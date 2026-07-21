@@ -13,7 +13,7 @@
 - 계층 의존 방향 `contract ← kernel ← loop ← onboarding` / `artifacts`는 loop 위 /
   게임 지식은 contract 위로 금지 — `src/__tests__/dependency-rules.test.ts`가 강제하며
   이 테스트를 우회·완화하지 않는다.
-- `Date.now()`/`Math.random()`은 `src/reference/demo.ts`(앱 경계) 밖에서 금지.
+- `Date.now()`/`Math.random()`은 앱 경계(`src/reference/demo.ts`, `src/reference/runners/*.ts`) 밖에서 금지.
 - smoke 통과 ≠ 채택. holdout(미사용 예약 시드)까지 통과해야 adopted.
 - holdout/graduation 시드 뱅크 재사용 금지, 앵커 봇 갱신 금지.
 - 점수 비교는 comparabilityKey 동일 문맥 안에서만 (docs/INTERPRETATION.md 제1규칙).
@@ -22,4 +22,10 @@
 - 온보딩 절차: `docs/ONBOARDING-GUIDE.md` (§0 적용 범위부터)
 - 지표 해석: `docs/INTERPRETATION.md`
 - 갭 분석 이력: `docs/GAP-ANALYSIS.md`(훌라·체스) → `-2.md`(5게임) → `-3.md`(12계열)
+  → `-4.md`(실전 온보딩 1차: 스플랜더·오목) → `-5.md`(목표 정합성 점검: 온보딩
+  사용성·다중 게임 운용·큰루프 개입 지점) → `-6.md`(산출물 신선도·중복 정책·
+  실험 인프라, 3열 승률 비교 실험 착수 전 점검)
+- 벤치마크 실험 설계(3열 승률 비교, 아직 미구현): `docs/BENCHMARK-EXPERIMENT.md`
 - 새 갭을 발견하면 새 GAP-ANALYSIS 문서에 기록하고 처치(구현/가이드/로드맵)를 명시한다.
+- 실제로 고쳐야 할 코드/가이드 항목은 `docs/FIX-BACKLOG.md`에 누적 추적한다(라운드별
+  기록인 GAP-ANALYSIS와 달리 상태가 바뀌는 살아있는 목록 — 줄을 지우지 않고 상태만 갱신).

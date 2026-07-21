@@ -27,6 +27,13 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
       가능 여부. **하나라도 시드 불가면 G-Convert에서 반드시 해소해야 한다.**
 - [ ] 은닉 정보의 경계 — 누가 무엇을 보면 안 되는가
 - [ ] 승패·점수 판정 규칙과 **종국 보장 규칙**(무한 게임 방지: 반복/무진행 무승부 등)
+      — **체스류만의 문제가 아니다** (GAP-ANALYSIS-4 Z7). 자원 누적형 게임(스플랜더
+      등)도 자원이 고갈되면 "젬을 못 집으니 예약도 못 하고, 예약을 못 하니 버릴
+      것도 없어서" 같은 진짜 데드락에 빠질 수 있다. **원본 소스를 규칙북의 정확한
+      구현으로 신뢰하지 말고, 종국 보장 규칙이 실제로 존재하는지 소스에서 직접
+      검증하라** — 없으면 어댑터가 자체 스테일메이트/턴 상한 규칙을 합성해야
+      한다(예: "연속 N턴 무진행 시 무승부 종료"). §5의 반복수/50수 규칙은 이 일반
+      원칙의 체스류 특수 사례일 뿐이다.
 - [ ] 기존 AI/NPC 로직의 위치 — 룰 엔진과 얼마나 얽혀 있는가
 - [ ] UI/네트워크/애니메이션과 룰의 결합 지점
 
@@ -50,6 +57,22 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
 - [ ] **strategySurface**: 실험할 전략 주입 지점. 초기에는 3~10개의 단순 플래그로 시작.
 - [ ] **hiddenInfoProbe** (은닉 정보 게임) 또는 **`spec.perfectInformation: true`**
       (완전정보 게임) — 반드시 둘 중 하나.
+      - **부분 은닉 판단 기준 (GAP-ANALYSIS-4 Z5)**: 원본 게임에 "상대만 아는
+        은닉"이 아니라 "아직 아무도 모르는 공용 미래 정보"(셔플된 덱 순서 등)만
+        있고 실제 승부에 지엽적인 영향만 준다면 `perfectInformation:true`로
+        선언해도 된다 — 계약에 이 둘을 구분하는 필드는 없으므로, **G-Profile
+        문서에 그 판단 근거를 한 줄로 남겨라**("비공개 예약 카드가 있지만 승부에
+        미치는 영향이 제한적이라 완전정보로 취급"처럼). 나중에 이 판단이 틀렸다고
+        밝혀지면(예: 그 은닉이 실제로 전략에 유의미했다면) hiddenInfoProbe를 추가
+        구현하고 재채점하라.
+- [ ] **멀티스텝 턴 (GAP-ANALYSIS-4 Z4)**: 한 턴이 여러 원자적 결정으로 쪼개지는
+      게임(스플랜더의 "젬 최대 3개까지 집기", 카탄의 오퍼 협상, 도미니언의 액션
+      체인 등)은 `PendingDecision`이 항상 단일 player+decisionPoint라는 것과
+      부딪힌다. **턴 내부 진행 상황을 상태 필드로 직접 관리**하라(예:
+      `takenColors: readonly Color[]`처럼 이번 턴에 이미 소비한 하위 결정을
+      기록) — `currentDecision`은 매 sub-decision마다 그 필드를 보고 새로 계산한다.
+      mini-trick에는 없던 패턴이라 처음 마주치면 계약이 이걸 어떻게 표현하길
+      원하는지 헷갈릴 수 있는데, 계약 자체는 바꿀 필요 없다.
 - [ ] **replayFixtures**: 가능하면 원본 게임에서 뽑은 리플레이(진짜 parity 증명).
       불가하면 어댑터 self-play로 생성한 고정 fixture(재현성 증명으로 격하되며,
       리포트에 그렇게 표시된다).
@@ -61,13 +84,51 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
 ## 3. G-Score — 채점과 수정 루프
 
 `scoreAdapter(adapter)` 실행 → 리포트의 blocker/remediation을 따라 수정 → 재채점.
-임계(기본 70) 미달이면 웨이브 러너가 실행을 거부한다. 축 정의는 DESIGN.md §4.
+임계(기본 80) 미달이면 웨이브 러너가 실행을 거부한다. 축 정의는 DESIGN.md §4.
+
+**중요**: 이 반복 루프에서 수정하는 대상은 **원본 게임 저장소가 아니라 어댑터
+코드**(`src/reference/<game>.ts`)다. 원본은 §2가 말한 대로 참조 구현일 뿐 — "완성도를
+높인다"는 건 원본을 패치하는 게 아니라 headless 재구현을 개선하는 것을 뜻한다
+(GAP-ANALYSIS-5 H3).
+
+### 3.1 실제 사례로 보는 반복 루프 (GAP-ANALYSIS-5 H2)
+
+한 문단짜리 설명보다 실제로 무슨 일이 일어나는지 보는 게 빠르다. 4차 실전
+온보딩(GAP-ANALYSIS-4)에서 오목 어댑터가 겪은 사이클:
+
+1. **1차 채점**: `scoreAdapter(gomokuAdapter, {threshold:70})` → `overallScore=0,
+   ready=false`. 리포트에서 `C2-integrity: 0` 축에 `C2_ILLEGAL_CHOICE_ACCEPTED`
+   blocker 발견.
+2. **리포트 읽기**: remediation이 "applyChoice must throw on any choice not
+   returned by getLegalChoices... 보통 이건 게임 규칙상 불가능한 수를 게임이
+   걸러내지 않고 그대로 받아들일 때 발생합니다"라고 안내(§8 자동 분류/H1 번역
+   계층 반영 이후 문구).
+3. **원인 조사**: 어댑터의 `applyChoice`/`getLegalChoices` 자체는 정상이었고, 실제
+   원인은 **채점기(`score.ts`)의 스팟체크 버그**였다(합법수 공간이 큰 게임에서
+   불법수 재구성 로직이 오탐을 냄 — Z1). 항상 어댑터 버그라고 단정하지 말고,
+   mini-trick 같은 대조군에서 같은 축을 돌려 정상인지부터 확인하는 습관이 원인을
+   빨리 좁혀준다.
+4. **수정과 재채점**: 채점기 버그를 고친 뒤 재채점 → `C2-integrity: 100`,
+   최종적으로 `overallScore=100, ready=true`.
+
+교훈: 블로커가 항상 "당신의 어댑터가 틀렸다"를 뜻하지는 않는다 — 채점기 자체의
+한계일 수도 있다(특히 게임 상태공간이 대형일 때, §5.5의 신규 경고 참고). 어느
+쪽이든 재채점으로 확인하기 전엔 결론 내지 마라.
 
 ## 4. G-Parity — 정합성 증명
 
 원본 게임 리플레이 fixture가 재생·일치하는지 확인(C7). 원본에서 리플레이를 뽑을 수
 없는 프로젝트라면, 최소한 원본과 어댑터에 같은 수순을 수동으로 넣어 결과 대조한
 기록을 남긴다.
+
+**provenance와 60점 캡**: `ReplayFixture.provenance` 필드로 fixture 출처를 밝힌다.
+`'original-replay'`는 실제 사람 플레이 또는 원본 게임 엔진 자체의 리플레이에서
+캡처한 것, `'self-play'`(또는 필드 미선언)는 어댑터가 자기 자신을 재생해서 만든
+것이다. self-play는 "결정론적으로 재현 가능하다"만 증명할 뿐 "원본 게임과 결과가
+일치한다"는 증명이 아니다 — 그래서 `provenance: 'original-replay'` fixture가
+하나도 없으면 C7 점수는 self-play 통과율과 무관하게 **최대 60점으로 캡**된다(임계
+80을 넘지 못해 `ready=false`가 됨). 캡을 해제하려면 원본에서 최소 한 개 이상의
+진짜 리플레이를 캡처해 `provenance: 'original-replay'`로 등록해야 한다.
 
 ## 5. 결정론 게임(체스류) 특별 규칙
 
@@ -95,6 +156,16 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
   관행이다.
 - **세부 규칙은 fixture로**: 금수(오목)·타이브레이커(스플랜더) 같은 세부 규칙의
   정확성은 크래시 검사(C2)가 아니라 리플레이 fixture(C7)로 증명된다.
+- **대형 상태공간 게임은 채점 방법론 자체가 흔들릴 수 있다 (GAP-ANALYSIS-4 Z6)**:
+  합법수 공간이 크거나(수십 개 이상) 결정 수가 많은(≳80결정) 게임에서는 C2/C5의
+  표본 설계 가정이 mini-trick류 소형 게임을 암묵적으로 전제하고 있어 깨질 수 있다
+  — 실전에서 두 사례가 확인됐다: C2 illegal-choice 스팟체크가 합법수 공간이 크면
+  구조적으로 오탐을 내고(오목, Z1), `calibrateIdentity`가 결정 수 많은 게임에서
+  고정 봇시드 재사용으로 미수렴한다(스플랜더, Z2). **blocker가 뜨면 어댑터를
+  의심하기 전에 mini-trick 같은 소형 대조군으로 같은 축을 돌려 커널/채점기 자체가
+  정상인지부터 확인하라** — 두 사례 모두 어댑터가 아니라 채점기 버그였다(이제는
+  둘 다 고쳐졌지만, 새로운 대형 상태공간 게임 계열에서 비슷한 가정 붕괴가 또
+  나올 수 있다).
 
 ## 5.7 콘텐츠 무거운 게임(윙스팬·하스스톤류) 특별 규칙
 
@@ -153,3 +224,31 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
 - **다인 자유전의 킹메이킹**: 후보 1 + 동일 기준선 N-1 구성은 하나의 생태계 표본이다
   — 채택 결론이 다른 상대 구성에서 뒤집힐 수 있음을 INTERPRETATION §"FFA 해석 경고"와
   함께 읽어라. 필드 믹스 웨이브는 로드맵.
+
+## 8. 자동 분류·설계도 조립 (4차 실전 온보딩 이후 반영)
+
+위 §7의 조항들("승/패 전용 게임은 minScoreDiff=0", "팀 게임은 spec.teams 선언" 등)은
+**이제 사람이 매번 기억해서 손으로 설정할 필요가 없다.** `src/kernel/classify.ts`의
+`classifyGame(spec, contentInventory?)`이 `GameSpec`(+선언된 `scoreMargin`/`teams`/
+`perfectInformation`/`contentInventory`)만 보고 게임을 자동 분류하고,
+`src/kernel/blueprint.ts`의 `deriveBlueprint(classification, calibration?)`가 그
+분류로부터 구체적 설정값(웨이브 기준, C2~C5 표본 크기, 벤치마크 렌더링 방식 등)을
+조립한다.
+
+- `src/onboarding/score.ts`의 `scoreAdapter`는 **옵션을 안 줘도** 내부에서 자동으로
+  분류·블루프린트를 적용한다 — 명시적으로 넘긴 `options`는 여전히 최우선 override.
+- `src/loop/assemble-wave-config.ts`의 `assembleWaveConfig(adapter, required,
+  calibration?, overrides?)`가 §7의 `criteria.minScoreDiff` 규칙을 자동 적용한다
+  (승/패 전용 게임 선언 시 자동으로 0).
+- `src/artifacts/benchmark.ts`/`adoption-ledger.ts`의 렌더 함수에 분류 정보를 넘기면
+  승/패 전용 게임의 scoreDiff 열이 자동으로 숨겨지고 identityCenter 컨텍스트가
+  표시된다.
+
+**이게 §7 조항을 대체하는 게 아니다** — 왜 그 값이 나왔는지 이해하려면 여전히 §7을
+읽어야 한다. 새 게임을 온보딩할 때 할 일은: (1) `GameSpec`에 `teams`/`perfectInformation`/
+`scoreMargin`을 정확히 선언하고, (2) `contentInventory`를 콘텐츠가 있으면 선언하고,
+(3) 나머지는 기본적으로 신뢰하되 리포트의 `warnings` 필드(예: "scoreMargin 미선언")를
+확인하는 것. 분류가 틀렸다고 의심되면(예: 새 게임 계열이 §7에 없는 특성을 가짐)
+`src/kernel/classify.ts`/`blueprint.ts`를 직접 확장할 근거로 §7에 새 조항을 먼저
+추가하고 갭 분석 문서에 기록하라 — 이 자동화 계층도 손으로 설계된 규칙 위에 있을
+뿐, 모든 미래 게임 계열을 예측하지 못한다.

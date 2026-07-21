@@ -28,7 +28,8 @@ import { SeedLedger } from '../kernel/seed-ledger';
 import { calibrateIdentity, measureNoiseFloor } from '../loop/calibrate';
 import { eraseAdapter } from '../loop/erase';
 import { recommendBlockCount } from '../kernel/paired-stats';
-import { runWave, type WaveConfig } from '../loop/wave-runner';
+import { assembleWaveConfig } from '../loop/assemble-wave-config';
+import { runWave } from '../loop/wave-runner';
 import { renderReportMarkdown } from '../onboarding/report';
 import { scoreAdapter } from '../onboarding/score';
 import { BaselineRegistry, composeBot } from '../artifacts/baseline-registry';
@@ -67,7 +68,8 @@ function main(): void {
   console.log('온보딩 채점 통과 — 웨이브 실행으로 진행합니다.');
 
   runStore.saveRun({
-    runId: 'conformance-mini-trick',
+    gameId: 'mini-trick',
+    runId: 'conformance',
     kind: 'conformance',
     recordedAt: now(),
     comparabilityKey: computeComparabilityKey({
@@ -80,7 +82,7 @@ function main(): void {
     payload: conformance,
     markdown: conformanceMarkdown,
   });
-  savedPaths.push('runs/conformance-mini-trick/');
+  savedPaths.push('runs/mini-trick/conformance/');
 
   section('2단계 — 캘리브레이션 (좌석 편향/항등성 진단)');
   const identitySeeds = Array.from({ length: 300 }, (_, i) => 900_000 + i);
@@ -121,7 +123,8 @@ function main(): void {
     '',
   ].join('\n');
   runStore.saveRun({
-    runId: 'calibration-mini-trick',
+    gameId: 'mini-trick',
+    runId: 'calibration',
     kind: 'calibration',
     recordedAt: now(),
     comparabilityKey: computeComparabilityKey({
@@ -134,7 +137,7 @@ function main(): void {
     payload: identity,
     markdown: calibrationMarkdown,
   });
-  savedPaths.push('runs/calibration-mini-trick/');
+  savedPaths.push('runs/mini-trick/calibration/');
 
   section('3단계 — BaselineRegistry v1 등록 + 벤치마크 앵커 동결');
   const registry = new BaselineRegistry();
@@ -173,34 +176,37 @@ function main(): void {
     reservedAt,
   });
 
-  // mini-trick's scores range 0-6 (six tricks total); kernel/gates'
-  // DEFAULT_CRITERIA is tuned for a larger-magnitude game, so this demo scales
-  // minScoreDiff down accordingly. minWinRate is kept at the kernel default.
-  const criteria = { minWinRate: DEFAULT_CRITERIA.minWinRate, minScoreDiff: 0.3 };
-
-  const waveConfig: WaveConfig = {
-    waveId: 'demo-wave-1',
-    candidates: [{ flag: 'winCheapest' }, { flag: 'noopSort' }, { flag: 'leadHighFirst' }],
-    opponent: 'heuristic',
-    recordedAt: new Date().toISOString(),
-    ledger,
-    baselineFlags: v1.flags,
-    baselineVersion: v1.version,
-    tiers: {
-      smoke: {
-        bankId: 'demo-smoke',
-        sprt: { p0: 0.5, p1: 0.58, alpha: 0.05, beta: 0.05 },
-        maxBlocks: 80,
-        minBlocks: 10,
+  // mini-trick's scores range 0-6 (six tricks total); the blueprint's
+  // default minScoreDiff (kernel/gates' DEFAULT_CRITERIA) is tuned for a
+  // larger-magnitude game, so this demo overrides it down to preserve the
+  // original tuned behavior. minWinRate stays at the blueprint-derived value.
+  const waveConfig = assembleWaveConfig(
+    adapter,
+    {
+      waveId: 'demo-wave-1',
+      candidates: [{ flag: 'winCheapest' }, { flag: 'noopSort' }, { flag: 'leadHighFirst' }],
+      opponent: 'heuristic',
+      recordedAt: new Date().toISOString(),
+      ledger,
+      baselineFlags: v1.flags,
+      baselineVersion: v1.version,
+      tiers: {
+        smoke: {
+          bankId: 'demo-smoke',
+          sprt: { p0: 0.5, p1: 0.58, alpha: 0.05, beta: 0.05 },
+          maxBlocks: 80,
+          minBlocks: 10,
+        },
+        prune: { bankId: 'demo-prune', blocks: 150 },
+        holdout: { bankId: 'demo-holdout', blocks: 150 },
       },
-      prune: { bankId: 'demo-prune', blocks: 150 },
-      holdout: { bankId: 'demo-holdout', blocks: 150 },
+      // Probe seeds independently confirmed to expose winCheapest's decision
+      // divergence from the heuristic baseline (see loop/__tests__/wave-runner.test.ts).
+      screenProbe: { seeds: [7, 11, 12, 13, 42], botSeedBase: 500 },
     },
-    criteria,
-    // Probe seeds independently confirmed to expose winCheapest's decision
-    // divergence from the heuristic baseline (see loop/__tests__/wave-runner.test.ts).
-    screenProbe: { seeds: [7, 11, 12, 13, 42], botSeedBase: 500 },
-  };
+    undefined,
+    { criteria: { minWinRate: DEFAULT_CRITERIA.minWinRate, minScoreDiff: 0.3 } },
+  );
 
   const report = runWave(adapter, waveConfig);
 
@@ -231,6 +237,7 @@ function main(): void {
 
   const waveMarkdown = ['# Wave Report — demo-wave-1', '', ...waveTableLines, ''].join('\n');
   runStore.saveRun({
+    gameId: 'mini-trick',
     runId: report.waveId,
     kind: 'wave',
     recordedAt: now(),
@@ -238,7 +245,7 @@ function main(): void {
     payload: report,
     markdown: waveMarkdown,
   });
-  savedPaths.push(`runs/${report.waveId}/`);
+  savedPaths.push(`runs/mini-trick/${report.waveId}/`);
 
   const adoptionLedger = new AdoptionLedger();
   const adoptionEntries: AdoptionEntry[] = report.results.map((result) => {
@@ -332,6 +339,7 @@ function main(): void {
     renderLadderMarkdown(v2Ladder),
   ].join('\n');
   runStore.saveRun({
+    gameId: 'mini-trick',
     runId: 'benchmark-v1-vs-v2',
     kind: 'benchmark',
     recordedAt: now(),
@@ -346,11 +354,14 @@ function main(): void {
     markdown: benchmarkMarkdown,
     svg: [{ name: 'progression.svg', content: progressionSvg }],
   });
-  savedPaths.push('runs/benchmark-v1-vs-v2/ (payload.json, digest.txt, report.md, progression.svg)');
+  savedPaths.push(
+    'runs/mini-trick/benchmark-v1-vs-v2/ (payload.json, digest.txt, report.md, progression.svg)',
+  );
 
   section('7단계 — STRATEGY-HISTORY.md 렌더');
   const strategyHistoryMarkdown = adoptionLedger.renderStrategyHistoryMarkdown();
   runStore.saveRun({
+    gameId: 'mini-trick',
     runId: 'strategy-history',
     kind: 'wave',
     recordedAt: now(),
@@ -358,7 +369,7 @@ function main(): void {
     payload: adoptionLedger.toJSON(),
     markdown: strategyHistoryMarkdown,
   });
-  savedPaths.push('runs/strategy-history/ (report.md === STRATEGY-HISTORY.md 내용)');
+  savedPaths.push('runs/mini-trick/strategy-history/ (report.md === STRATEGY-HISTORY.md 내용)');
 
   section('요약');
   console.log('전체 파이프라인 실행 완료: 온보딩 채점 → 캘리브레이션 → 기준선 v1 등록 →');

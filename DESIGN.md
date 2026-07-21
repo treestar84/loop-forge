@@ -44,8 +44,14 @@
 ```
 contract ← kernel ← loop ← onboarding
                   ↖ artifacts
-reference → (contract, kernel/rng)          demo → 전 계층 (앱 경계)
+reference → (contract, kernel/rng)          demo, reference/runners/* → 전 계층 (앱 경계)
 ```
+
+`reference/runners/<gameId>.ts`는 게임별 실행 진입점이다(H5/Z3) — `demo.ts`와
+동일하게 앱 경계로 취급되어 전 계층을 import할 수 있고 `Date.now()`도 허용된다
+(`src/__tests__/dependency-rules.test.ts`의 `APP_BOUNDARY_PREFIXES`가 `reference/
+runners/`로 시작하는 모든 경로를 자동 예외 처리 — 게임이 늘어나도 예외 목록을
+수동으로 추가할 필요가 없다).
 
 허용 edge는 이것이 전부이며, `src/__tests__/dependency-rules.test.ts`가 기계적으로
 강제한다 (위반 import는 테스트 실패). 결정론 규칙(`Date.now()`/`Math.random()` 금지,
@@ -159,8 +165,59 @@ Loop Forge에서는 이를 뒤집는다:
   노이즈 플로어, 좌석 편향 측정. C5 축의 실행기이자 상시 진단 도구.
 - **웨이브 러너** (`loop/wave-runner.ts`): 후보 집합을 받아 게이트 순서대로 평가하고
   `WaveReport`(채택/선별/근접실패/실패 + 통계 + 시드 소비 기록)를 봉인.
-- **큰 루프 프로토콜**: v1에서는 WaveReport의 실패 패턴 요약이 다음 후보 설계의 입력
-  포맷으로 규격화된다(사람 또는 에이전트가 설계). 후보 자동 생성은 v2+.
+### 6.1 큰 루프 프로토콜 (v1 — 사람/에이전트 개입 지점 명세)
+
+GAP-ANALYSIS-5 H9에서 확인된 대로, v1까지는 이 절이 한 문장("WaveReport 실패 패턴이
+다음 후보 설계의 입력이 된다")뿐이었다. 실제로 "개입"이 무엇을 의미하는지, 어떤
+순서로 진행하는지를 아래에 명세한다 — 새 도구를 만드는 게 아니라 **이미 존재하는
+조각들(WaveReport, AdoptionLedger, strategySurface)을 어떤 순서로 조합해 쓰는지**를
+성문화하는 것이다.
+
+**1단계 — 웨이브 결과 확보**: `runWave`(또는 `assembleWaveConfig` + `runWave`)를
+1회 실행하면 `WaveReport`가 나온다. 각 후보는 `verdict`
+(`adopted`/`screened`/`near-miss`/`failed`) + 축소된 통계(`WaveCandidateResult.stats`)를
+가진다. 이 시점에 채택된(`adopted`) 후보는 바로 `BaselineRegistry`에 새 버전으로
+합성(v1→v2 등)하면 되고, 사람의 개입이 필요한 건 **near-miss/failed** 후보뿐이다.
+
+**2단계 — near-miss를 구조화된 형태로 추출**: `AdoptionLedger`의
+`extractNearMissCandidates(record)`(H10, `src/artifacts/adoption-ledger.ts`)가
+자유 텍스트 `nextLoopNotes` 대신 각 near-miss 후보의 `{flags, failedAtTier,
+pointWinRate, pointScoreDiff, winRateCI, gap}`을 기계가 읽을 수 있는 목록으로
+뽑아준다. `gap`은 승격 기준(`PromotionCriteria`)까지 얼마나 모자랐는지를 나타내
+"조금만 더 손보면 되는 후보"와 "근본적으로 다시 설계해야 하는 후보"를 구분하는
+근거가 된다.
+
+**3단계 — 사람 또는 에이전트가 재설계**: 이 구조화된 목록을 읽고, 게임 어댑터의
+`strategySurface`(`src/reference/<game>.ts`)에서 해당 `StrategyFlagSpec.apply`
+클로저를 수정하거나 새 플래그를 추가한다. **v1에는 이것 말고 다른 개입 경로가 없다**
+— config/데이터 기반으로 전략을 제안하는 방법은 없고, 항상 TypeScript 코드를 고쳐
+어댑터를 재빌드해야 한다(자동 후보 생성은 ROADMAP v2). 이 사실을 감추지 않고 명시하는
+이유: 사용자가 "개입 가능"을 코드 없는 조작으로 오해하지 않게 하기 위함이다.
+- 이미 한 웨이브에서 판정된 `flag` 이름은 **재사용하지 않는다** — 같은 이름으로
+  로직만 바꾸면 `AdoptionLedger`의 이력이 "같은 플래그가 예전엔 near-miss였는데
+  이번엔 adopted"처럼 모호해진다. 로직을 바꿨으면 새 flag 이름을 쓴다
+  (`winCheapestV2` 등).
+- 완전히 새로운 아이디어를 시도하고 싶으면 그냥 새 `StrategyFlagSpec`을 추가한다 —
+  near-miss 재설계와 신규 아이디어 추가는 같은 메커니즘(strategySurface에 항목
+  추가)이다.
+
+**4단계 — 다음 웨이브 발주**: 재설계/신규 플래그의 이름을 다음 `runWave` 호출의
+`candidates`에 손으로 나열한다(`WaveConfig.candidates` — 여전히 호출자가 채우는
+평문 리스트, `wave-runner.ts` 참고). 여기서 사람이 조절할 수 있는 또 다른 개입
+축은 **탐색 폭**이다 — 한 라운드에 후보를 몇 개 넣을지, `tiers`의 블록 수를
+얼마나 넉넉하게 잡을지는 예산(시간·시드 뱅크)과 트레이드오프이며 이것도 명시적
+개입 지점이다.
+
+**요약 — v1에서 "사용자가 큰루프에 개입한다"의 정확한 의미**:
+1. 웨이브 리포트를 읽는다(사람 또는 에이전트).
+2. `extractNearMissCandidates`로 무엇이 얼마나 아깝게 실패했는지 구조화된 형태로
+   본다.
+3. 어댑터 코드에서 전략 플래그를 수정/추가한다(코드 작업 — v1엔 이것뿐).
+4. 다음 웨이브의 candidates/tiers를 정하고 재발주한다.
+
+자동화(ROADMAP v2 "큰 루프 반자동화": 실패 패턴 → 후보 설계 프롬프트/템플릿 자동
+생성)는 3단계를 에이전트가 대신 하게 만드는 것이지, 이 4단계 절차 자체를 바꾸는
+것이 아니다.
 
 ## 7. 오픈소스 체리픽 명세
 
@@ -188,3 +245,28 @@ Loop Forge에서는 이를 뒤집는다:
 v1의 성공 기준: 레퍼런스 게임이 C0~C7을 통과하고, 웨이브 러너가 "효과 있는 플래그는
 채택, no-op 플래그는 screen에서 탈락, 노이즈 플래그는 holdout에서 탈락"을 실제로
 보여주는 것.
+
+## 9. 실전 온보딩 현황 (v1.4~1.5, 2026-07-21~22)
+
+레퍼런스 게임(mini-trick) 외에 실제 오픈소스 게임 6종을 온보딩했다. 각 게임의
+어댑터는 `src/reference/<gameId>.ts`, 실행 진입점은 `src/reference/runners/
+<gameId>.ts`(mini-trick만 예외적으로 `demo.ts`를 씀 — 파이프라인 최초 증명용이라
+분리하지 않음). 원본 오픈소스 출처는 `docs/CREDITS.md` 참고.
+
+| 게임 | 원본 소스 | 특성 | 갭 분석 |
+|---|---|---|---|
+| 스플랜더 | caeleel/splendor | 2~4인 FFA, 완전정보, 콘텐츠(카드) 100 커버 | GAP-ANALYSIS-4 |
+| 오목 | imjacobclark/BoardGameEngine | 2인, 완전정보, 승/패 전용(scoreMargin:none), 시드-강제 오프닝 | GAP-ANALYSIS-4 |
+| 장기 | davisethan/janggi | 2인, 완전정보, 승/패 전용, 시드-강제 마상 배치 | 6개 게임 병렬 온보딩 세션 |
+| 도미니언 | rspeer/dominiate | 2인, 부분 은닉(hiddenInfoProbe), 킹덤 카드 12종 부분집합 | 〃 |
+| 윙스팬(core) | keithgw/wingspan | 2인, 부분 은닉, 원본 자체가 실제 윙스팬 규칙의 극단 단순화판(서식지·트리거 없음) — 소스를 있는 그대로 온보딩 | 〃 |
+| 하스스톤(mirror) | danielyule/hearthbreaker | 2인, 은닉정보(hiddenInfoProbe), 미러 매치·중립카드 12장 한정 | 〃 |
+
+**채점 기준 강화(2026-07-21, FIX-BACKLOG S1)**: `ReplayFixture.provenance`
+필드로 원본 게임 리플레이(`'original-replay'`)와 어댑터 self-play 재현성
+증거(`'self-play'`, 미선언 시 기본값)를 구분한다. 원본 리플레이가 하나도 없으면
+C7-parity 점수가 통과율과 무관하게 **60점으로 캡**된다(기본 threshold는 80으로
+상향). 지금 7개 게임 전부 self-play fixture만 있어 C7=60, `ready:false`다 —
+게임 로직 자체(C0~C6)는 전부 100점이지만 "원본 게임과 진짜로 일치한다"는 증거는
+아직 없다는 뜻이다. 각 러너는 이 사실을 감추지 않고 로그/리포트에 경고로 남기되,
+C7만 캡된 경우 웨이브 실행은 계속 진행한다(`src/onboarding/wave-readiness.ts`).

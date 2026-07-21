@@ -14,6 +14,8 @@ import type {
 } from '../contract/types';
 import { createRng } from '../kernel/rng';
 import { canonicalJson } from '../kernel/digest';
+import { classifyGame } from '../kernel/classify';
+import { deriveBlueprint, type PipelineBlueprint } from '../kernel/blueprint';
 import { calibrateIdentity } from '../loop/calibrate';
 import { runMatch, type MatchResult } from '../loop/match';
 import { runPairedBlock } from '../loop/paired-match';
@@ -52,14 +54,14 @@ export interface ScoreOptions {
 }
 
 const DEFAULTS: Required<ScoreOptions> = {
-  threshold: 70,
+  threshold: 80,
   seedBase: 10_000,
   c1SeedCount: 5,
   c1CandidatePoolSize: 20,
-  c1DiversitySeedCount: 8,
-  c1DiversityThreshold: 0.8,
+  c1DiversitySeedCount: 12,
+  c1DiversityThreshold: 0.9,
   c2Playouts: 200,
-  c3SampleStates: 5,
+  c3SampleStates: 10,
   c4SampleGames: 60,
   c4MinGamesPerSecond: 20,
   c4TargetGamesPerSecond: 200,
@@ -67,7 +69,7 @@ const DEFAULTS: Required<ScoreOptions> = {
   c4TargetDecisionsPerSecond: 5_000,
   c5IdentitySeeds: 200,
   c5HeadToHeadSeeds: 300,
-  c6ProbeSeeds: 5,
+  c6ProbeSeeds: 10,
 };
 
 function axis(
@@ -110,7 +112,8 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
     blockers.push({
       code: 'C0_PLAYER_COUNT',
       message: `spec.playerCount must be a positive integer, got ${spec.playerCount}`,
-      remediation: 'Set spec.playerCount to the number of seats in the game.',
+      remediation:
+        'Set spec.playerCount to the number of seats in the game. 보통 이건 게임 규칙에서 정한 좌석 수가 어댑터 설정에 반영되지 않았을 때 발생합니다.',
     });
   } else if (spec.playerCount < 2) {
     // G2: win-rate-based loop statistics assume a competitive matchup between
@@ -126,14 +129,16 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
     blockers.push({
       code: 'C0_NO_DECISION_POINTS',
       message: 'spec.decisionPoints is empty',
-      remediation: 'Declare at least one DecisionPointSpec for the game.',
+      remediation:
+        'Declare at least one DecisionPointSpec for the game. 보통 이건 게임에서 플레이어가 선택을 내리는 지점(턴, 페이즈 등)이 어댑터에 아직 하나도 등록되지 않았을 때 발생합니다.',
     });
   }
   if (spec.seatingPlan.length < 2) {
     blockers.push({
       code: 'C0_SEATING_PLAN_TOO_SHORT',
       message: `spec.seatingPlan has ${spec.seatingPlan.length} permutation(s), need at least 2`,
-      remediation: 'Add seat permutations so position bias can cancel in paired statistics.',
+      remediation:
+        'Add seat permutations so position bias can cancel in paired statistics. 보통 이건 게임의 좌석 순서를 하나만 등록해서, 선공/후공 같은 자리 유불리를 통계적으로 상쇄할 방법이 없을 때 발생합니다.',
     });
   } else {
     const wrongLength = spec.seatingPlan.some(
@@ -143,7 +148,8 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
       blockers.push({
         code: 'C0_SEATING_PLAN_LENGTH',
         message: 'a seatingPlan permutation does not have length spec.playerCount',
-        remediation: 'Every seatingPlan permutation must assign a seat to every bot slot.',
+        remediation:
+          'Every seatingPlan permutation must assign a seat to every bot slot. 보통 이건 좌석 순서 목록 중 일부가 실제 플레이어 수보다 짧거나 길게 잘못 작성됐을 때 발생합니다.',
       });
     }
     const seatsCoveredForCandidate = new Set(
@@ -153,7 +159,8 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
       blockers.push({
         code: 'C0_SEATING_PLAN_COVERAGE',
         message: 'seatingPlan permutations do not cover every seat for the candidate (index 0)',
-        remediation: 'Include a permutation with seating[0] equal to each PlayerId.',
+        remediation:
+          'Include a permutation with seating[0] equal to each PlayerId. 보통 이건 특정 플레이어가 한 번도 "내 게임"의 주인공(0번 후보) 자리에 앉는 순서로 등록되지 않았을 때 발생합니다.',
       });
     }
   }
@@ -161,21 +168,24 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
     blockers.push({
       code: 'C0_MAX_DECISIONS',
       message: `spec.maxDecisionsPerGame must be a positive integer, got ${spec.maxDecisionsPerGame}`,
-      remediation: 'Set a finite hard cap on decisions per game.',
+      remediation:
+        'Set a finite hard cap on decisions per game. 보통 이건 게임이 무한히 계속될 수 있는 경우를 대비한 강제 종료 상한이 설정되지 않았을 때 발생합니다.',
     });
   }
   if (typeof adapter.baselines?.random !== 'function' || typeof adapter.baselines?.heuristic !== 'function') {
     blockers.push({
       code: 'C0_BASELINES_MISSING',
       message: 'adapter.baselines.random/heuristic must both be BotFactory functions',
-      remediation: 'Implement both a random and a heuristic baseline bot factory.',
+      remediation:
+        'Implement both a random and a heuristic baseline bot factory. 보통 이건 무작위로 두는 봇이나 간단한 규칙 기반 봇 같은, 게임을 비교할 최소한의 기준 플레이어가 아직 구현되지 않았을 때 발생합니다.',
     });
   }
   if (!Array.isArray(adapter.strategySurface)) {
     blockers.push({
       code: 'C0_STRATEGY_SURFACE_MISSING',
       message: 'adapter.strategySurface must be an array (may be empty)',
-      remediation: 'Declare strategySurface: [] at minimum, or add StrategyFlagSpec entries.',
+      remediation:
+        'Declare strategySurface: [] at minimum, or add StrategyFlagSpec entries. 보통 이건 게임에서 봇 전략을 실험적으로 바꿔볼 지점(공격성, 우선순위 등)이 아예 선언되지 않았을 때 발생합니다.',
     });
   }
 
@@ -234,7 +244,8 @@ function scoreC1(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         code: 'C1_NONDETERMINISTIC',
         message: `seed ${gameSeed} produced different trajectories/outcomes on repeated runs`,
         remediation:
-          'Ensure createInitialState/applyChoice/bots never use Date.now(), Math.random(), or external I/O.',
+          'Ensure createInitialState/applyChoice/bots never use Date.now(), Math.random(), or external I/O. ' +
+          '보통 이건 게임 로직이나 봇이 시각/난수 등 실행마다 달라지는 값에 의존해서, 같은 시드로 다시 돌려도 다른 결과가 나올 때 발생합니다.',
       });
     }
   }
@@ -320,7 +331,9 @@ function scoreC2ContentCoverage(
     blockers.push({
       code: 'C2_CONTENT_UNKNOWN_ID',
       message: `exercisedContent returned id "${unknownContentId}", which is not present in contentInventory`,
-      remediation: 'exercisedContent가 반환하는 모든 id는 contentInventory에 선언된 id 집합의 부분집합이어야 한다.',
+      remediation:
+        'exercisedContent가 반환하는 모든 id는 contentInventory에 선언된 id 집합의 부분집합이어야 한다. ' +
+        '보통 이건 실제 플레이 중 등장한 카드/타일/유닛 같은 콘텐츠 항목이 콘텐츠 목록(contentInventory)에는 등록되지 않았을 때 발생합니다.',
     });
   }
 
@@ -355,7 +368,7 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   let maxDecisionsDefectSeen = false;
   let illegalChoiceRejectionChecked = false;
 
-  const legalChoicePools: unknown[][] = [];
+  const legalChoicePools: { legal: unknown[]; sourceGameSeed: number; depth: number }[] = [];
   const contentInventory = adapter.contentInventory;
   const exercisedContentFn = adapter.exercisedContent;
   const inventoryIds = new Set((contentInventory ?? []).map((entry) => entry.id));
@@ -389,7 +402,7 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         const decision = adapter.currentDecision(state);
         if (!decision) break;
         const legal = adapter.getLegalChoices(state);
-        legalChoicePools.push(legal.slice());
+        legalChoicePools.push({ legal: legal.slice(), sourceGameSeed: gameSeed, depth: step });
         state = adapter.applyChoice(state, legal[0]);
       }
     }
@@ -400,7 +413,9 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
     blockers.push({
       code: 'C2_CONTENT_INVENTORY_WITHOUT_EXERCISED',
       message: 'adapter.contentInventory is declared but adapter.exercisedContent is not implemented',
-      remediation: 'contentInventory 선언 시 exercisedContent 구현 필수',
+      remediation:
+        'contentInventory 선언 시 exercisedContent 구현 필수 — 보통 이건 게임의 카드/유닛 등 콘텐츠 목록은 선언했지만, ' +
+        '한 판에서 실제로 어떤 콘텐츠가 등장했는지 알려주는 코드가 아직 없을 때 발생합니다.',
     });
   } else {
     const coverage = scoreC2ContentCoverage(adapter, exercisedIds, unknownContentId);
@@ -411,7 +426,9 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
 
   if (defectCount > 0) {
     let remediation =
-      'Fix illegal-choice/empty-legal/invariant/max-decisions defects surfaced by loop/match.ts.';
+      'Fix illegal-choice/empty-legal/invariant/max-decisions defects surfaced by loop/match.ts. ' +
+      '보통 이건 게임 규칙 일부가 잘못 구현되어 불가능한 선택을 허용하거나, 선택지가 없는데도 진행을 요구하거나, ' +
+      '판이 끝나지 않을 때 발생합니다.';
     if (maxDecisionsDefectSeen) {
       remediation +=
         ' 게임의 종국 보장 규칙(반복/무진행 무승부 등) 미구현 여부를 확인하라 — max-decisions defect can mean the adapter never terminates.';
@@ -433,21 +450,20 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       if (otherIndex === poolIndex) continue;
       const targetPool = legalChoicePools[otherIndex];
       if (!targetPool) continue;
-      const targetKeys = new Set(targetPool.map((choice) => adapter.encodeChoice(choice)));
-      const foreignChoice = donorPool.find(
+      const targetKeys = new Set(targetPool.legal.map((choice) => adapter.encodeChoice(choice)));
+      const foreignChoice = donorPool.legal.find(
         (choice) => !targetKeys.has(adapter.encodeChoice(choice)),
       );
       if (foreignChoice === undefined) continue;
 
-      // Replay a fresh state matching targetPool's seed to attempt the foreign choice.
-      const targetGameSeed = options.seedBase + 2000 + otherIndex;
-      let targetState = adapter.createInitialState(targetGameSeed);
+      // Replay from targetPool's recorded source game/depth to attempt the foreign choice.
+      let targetState = adapter.createInitialState(targetPool.sourceGameSeed);
       let matchedDepth = -1;
-      for (let step = 0; step <= otherIndex && step < 3; step += 1) {
+      for (let step = 0; step <= targetPool.depth; step += 1) {
         const decision = adapter.currentDecision(targetState);
         if (!decision) break;
         matchedDepth = step;
-        if (step === otherIndex % 3) break;
+        if (step === targetPool.depth) break;
         const legal = adapter.getLegalChoices(targetState);
         targetState = adapter.applyChoice(targetState, legal[0]);
       }
@@ -464,7 +480,9 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         blockers.push({
           code: 'C2_ILLEGAL_CHOICE_ACCEPTED',
           message: 'applyChoice accepted a choice not present in getLegalChoices for that state',
-          remediation: 'applyChoice must throw on any choice not returned by getLegalChoices(state).',
+          remediation:
+            'applyChoice must throw on any choice not returned by getLegalChoices(state). ' +
+            '보통 이건 게임 규칙상 불가능한 수(예: 이미 사용한 카드, 규칙 위반 이동)를 게임이 걸러내지 않고 그대로 받아들일 때 발생합니다.',
         });
       }
       break outer;
@@ -484,10 +502,10 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   }
 
   let score = blockers.length === 0 ? 100 : 0;
-  if (score === 100 && contentCoveragePercent !== null && contentCoveragePercent < 50) {
-    // Linear degradation below the 50% coverage floor (the <20% case is
+  if (score === 100 && contentCoveragePercent !== null && contentCoveragePercent < 80) {
+    // Linear degradation below the 80% coverage floor (the <20% case is
     // already a blocker above, forcing score 0 regardless).
-    score = Math.round((contentCoveragePercent / 50) * 100);
+    score = Math.round((contentCoveragePercent / 80) * 100);
   }
 
   return axis('C2-integrity', score, blockers, notes);
@@ -507,7 +525,8 @@ function scoreC3(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
           code: 'C3_PERFECT_INFO_CONTRADICTION',
           message: 'spec.perfectInformation is true but adapter.hiddenInfoProbe is also implemented',
           remediation:
-            'Perfect-information games have nothing to hide: remove hiddenInfoProbe, or unset spec.perfectInformation if this game does have hidden state.',
+            'Perfect-information games have nothing to hide: remove hiddenInfoProbe, or unset spec.perfectInformation if this game does have hidden state. ' +
+            '보통 이건 완전정보 게임(체스처럼 모두에게 보이는 게임)으로 선언했는데, 실제로는 숨김 정보 검사 코드가 남아있어 설정이 서로 모순될 때 발생합니다.',
         },
       ], notes);
     }
@@ -521,7 +540,8 @@ function scoreC3(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         code: 'C3_NO_PROBE',
         message: 'adapter.hiddenInfoProbe is not implemented',
         remediation:
-          'Implement HiddenInfoProbe.mutateHidden so observation invariance to hidden-info mutation can be verified.',
+          'Implement HiddenInfoProbe.mutateHidden so observation invariance to hidden-info mutation can be verified. ' +
+          '보통 이건 상대의 손패나 숨겨진 카드처럼, 게임에 비공개 정보가 있는데도 그걸 검증할 방법이 어댑터에 아직 없을 때 발생합니다.',
       },
     ], notes);
   }
@@ -555,7 +575,9 @@ function scoreC3(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       blockers.push({
         code: 'C3_OBSERVATION_LEAK',
         message: `mutating hidden information changed viewer ${viewer}'s observation at seed ${gameSeed}`,
-        remediation: 'getObservation must depend only on information the viewer is allowed to see.',
+        remediation:
+          'getObservation must depend only on information the viewer is allowed to see. ' +
+          '보통 상대의 손패/뒷면 카드/비공개 정보가 관찰 객체에 그대로 노출되고 있을 때 발생합니다. 원본 게임에서 그 정보가 진짜 숨겨져 있는지 다시 확인하세요.',
       });
     }
   }
@@ -564,7 +586,9 @@ function scoreC3(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
     blockers.push({
       code: 'C3_PROBE_NEVER_MUTATED',
       message: 'hiddenInfoProbe.mutateHidden returned null for every sampled state',
-      remediation: 'mutateHidden should return a mutated state whenever hidden information exists for the viewer.',
+      remediation:
+        'mutateHidden should return a mutated state whenever hidden information exists for the viewer. ' +
+        '보통 이건 검사 코드가 숨길 정보를 하나도 찾지 못했을 때 발생합니다 — 게임에 정말 비공개 정보가 있다면 mutateHidden이 그 정보를 실제로 바꾸도록 구현돼 있는지 확인하세요.',
     });
   } else {
     notes.push('hiddenInfoProbe mutated hidden information without changing the viewer observation.');
@@ -610,7 +634,9 @@ function scoreC4(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
     blockers.push({
       code: 'C4_THROUGHPUT_TOO_LOW',
       message: `throughput ${decisionsPerSecond.toFixed(1)} decisions/sec is below the hard floor of ${options.c4MinDecisionsPerSecond}`,
-      remediation: 'Profile and optimize createInitialState/applyChoice/getLegalChoices for the hot loop.',
+      remediation:
+        'Profile and optimize createInitialState/applyChoice/getLegalChoices for the hot loop. ' +
+        '보통 이건 게임 로직 자체가 무겁거나(초기화, 합법 수 계산 등), 매 수마다 불필요한 연산을 반복하며 최적화가 안 됐을 때 발생합니다.',
     });
     return axis('C4-throughput', 0, blockers, notes);
   }
@@ -651,7 +677,9 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       message:
         `random self-play mean win rate ${identity.meanWinRate.toFixed(3)} is not within ` +
         `${identityCenter.toFixed(3)}+/-0.05 (expected 1/${adapter.spec.teams ? 'teamCount' : 'playerCount'})`,
-      remediation: 'Check seatingPlan coverage and outcome/scoring symmetry for a fair game.',
+      remediation:
+        'Check seatingPlan coverage and outcome/scoring symmetry for a fair game. ' +
+        '보통 이건 좌석(선공/후공 등) 순서 구성이 한쪽에 유리하게 치우쳐 있거나, 점수/승패 판정 로직이 플레이어 간에 비대칭적으로 동작할 때 발생합니다.',
     });
   }
   if (identity.bias > 0.3) {
@@ -671,7 +699,9 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       blockers.push({
         code: 'C5_HEAD_TO_HEAD_DEFECT',
         message: `heuristic-vs-random paired block hit a defect at seed ${seed}: ${result.defect.message}`,
-        remediation: 'Fix the underlying adapter/bot defect before baselines can be trusted.',
+        remediation:
+        'Fix the underlying adapter/bot defect before baselines can be trusted. ' +
+        '보통 이건 C2에서와 같은 종류의 규칙 구현 오류가 특정 봇 조합/시드에서만 드러날 때 발생합니다.',
       });
       break;
     }
@@ -684,19 +714,22 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       confidenceLevel: 0.95,
       seed: options.seedBase + 11_000,
     });
-    const significantlyDifferent = bootstrap.winRate.lower > 0.5 || bootstrap.winRate.upper < 0.5;
+    const significantlyDifferent =
+      bootstrap.winRate.lower > identityCenter || bootstrap.winRate.upper < identityCenter;
     notes.push(
       `heuristic vs random: pointWinRate=${bootstrap.pointWinRate.toFixed(3)}, ` +
         `CI=[${bootstrap.winRate.lower.toFixed(3)}, ${bootstrap.winRate.upper.toFixed(3)}]` +
-        (significantlyDifferent ? '' : ' (not significantly different from 0.5)'),
+        (significantlyDifferent ? '' : ` (not significantly different from ${identityCenter.toFixed(3)})`),
     );
     if (!significantlyDifferent) {
       blockers.push({
         code: 'C5_HEURISTIC_NOT_DISTINCT',
-        message: 'heuristic baseline win rate against random is not significantly different from 0.5',
-        remediation: 'The heuristic baseline should play distinctly from random (stronger or weaker, but not equivalent).',
+        message: `heuristic baseline win rate against random is not significantly different from ${identityCenter.toFixed(3)}`,
+        remediation:
+          'The heuristic baseline should play distinctly from random (stronger or weaker, but not equivalent). ' +
+          '보통 이건 "휴리스틱" 봇이라고 이름 붙였지만 실제로는 무작위 봇과 사실상 같은 방식으로 수를 고르고 있을 때 발생합니다.',
       });
-    } else if (bootstrap.pointWinRate < 0.5) {
+    } else if (bootstrap.pointWinRate < identityCenter) {
       notes.push('heuristic is significantly weaker than random for this game — direction noted, not penalized.');
     }
   }
@@ -716,7 +749,9 @@ function scoreC6(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       {
         code: 'C6_EMPTY_STRATEGY_SURFACE',
         message: 'adapter.strategySurface is empty',
-        remediation: 'Add at least one StrategyFlagSpec candidate-injection point.',
+        remediation:
+          'Add at least one StrategyFlagSpec candidate-injection point. ' +
+          '보통 이건 봇의 성향(공격적/방어적, 특정 콤보 선호 등)을 조절할 수 있는 지점을 아직 하나도 게임에 만들지 않았을 때 발생합니다.',
       },
     ], notes);
   }
@@ -772,7 +807,9 @@ function scoreC6(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
           {
             code: 'C6_ALL_NOOP',
             message: 'every strategySurface flag is a behavioral no-op on the probe seeds',
-            remediation: 'Fix strategy flags so their apply() wrapper changes at least one decision.',
+            remediation:
+              'Fix strategy flags so their apply() wrapper changes at least one decision. ' +
+              '보통 이 전략 플래그가 실제로는 아무 결정도 바꾸지 않는 장식적 변경(정렬 순서 등)만 하고 있을 때 발생합니다. 봇이 실제로 다른 선택을 하게 만드는 로직을 넣으세요.',
           },
         ]
       : [];
@@ -792,15 +829,21 @@ function scoreC7(adapter: AnyGameAdapter): AxisResult {
       {
         code: 'C7_NO_FIXTURES',
         message: 'adapter.replayFixtures is missing or empty',
-        remediation: 'Capture real-game replay fixtures (choiceKeys + finalScores) to prove parity.',
+        remediation:
+          'Capture real-game replay fixtures (choiceKeys + finalScores) to prove parity. ' +
+          '보통 이건 실제 사람이 플레이했거나 원본 게임 엔진에서 재생한 진짜 판의 기록이 아직 하나도 캡처되지 않았을 때 발생합니다.',
       },
     ], notes);
   }
 
   const blockers: AxisBlocker[] = [];
-  let passed = 0;
+  let originalCount = 0;
+  let originalPassed = 0;
+  let selfPlayCount = 0;
+  let selfPlayPassed = 0;
 
   for (const fixture of adapter.replayFixtures) {
+    const isOriginal = fixture.provenance === 'original-replay';
     let state = adapter.createInitialState(fixture.seed);
     let ok = true;
     for (const choiceKey of fixture.choiceKeys) {
@@ -828,30 +871,72 @@ function scoreC7(adapter: AnyGameAdapter): AxisResult {
       outcome.scores.length === fixture.finalScores.length &&
       outcome.scores.every((score, index) => score === fixture.finalScores[index]);
 
+    if (isOriginal) {
+      originalCount += 1;
+    } else {
+      selfPlayCount += 1;
+    }
+
     if (ok && scoresMatch) {
-      passed += 1;
+      if (isOriginal) {
+        originalPassed += 1;
+      } else {
+        selfPlayPassed += 1;
+      }
     } else {
       blockers.push({
         code: 'C7_FIXTURE_MISMATCH',
         message: `replay fixture "${fixture.id}" did not replay to its recorded finalScores`,
-        remediation: 'Verify the fixture was captured from this adapter version and choiceKeys/encodeChoice agree.',
+        remediation:
+          'Verify the fixture was captured from this adapter version and choiceKeys/encodeChoice agree. ' +
+          '보통 어댑터 코드를 고친 뒤 픽스처를 재생성하지 않았거나, 원본 게임의 실제 결과와 어댑터의 시뮬레이션 결과가 어긋날 때 발생합니다.',
       });
     }
   }
 
+  const passed = originalPassed + selfPlayPassed;
   notes.push(`${passed}/${adapter.replayFixtures.length} replay fixture(s) replayed to their recorded outcome.`);
 
-  const score = Math.round((passed / adapter.replayFixtures.length) * 100);
+  let score: number;
+  if (originalCount === 0) {
+    score = selfPlayCount > 0 ? Math.min(60, Math.round((selfPlayPassed / selfPlayCount) * 100)) : 0;
+    notes.push(
+      '원본 게임 리플레이 증거 없음 — self-play 재현성만 확인됨, 정합성 미증명(최대 60점 캡). ' +
+        'provenance: "original-replay"인 fixture를 최소 하나 이상 추가해야 캡이 해제됩니다.',
+    );
+  } else {
+    score = Math.round((passed / (originalCount + selfPlayCount)) * 100);
+  }
+
   return axis('C7-parity', score, blockers, notes);
 }
 
 // ---------------------------------------------------------------------------
 
+/** Maps blueprint fields onto their ScoreOptions counterparts (field names
+ * diverge, e.g. c2PlayoutCount <-> c2Playouts). Only fields the blueprint
+ * actually derives are included — the rest of DEFAULTS is untouched. */
+function blueprintToScoreOptions(blueprint: PipelineBlueprint): Partial<ScoreOptions> {
+  return {
+    c2Playouts: blueprint.c2PlayoutCount,
+    c4MinDecisionsPerSecond: blueprint.c4MinDecisionsPerSecond,
+    c5IdentitySeeds: blueprint.c5IdentitySeedCount,
+    c5HeadToHeadSeeds: blueprint.c5HeadToHeadSeedCount,
+  };
+}
+
 export function scoreAdapter(
   adapter: AnyGameAdapter,
   options: ScoreOptions = {},
 ): ConformanceReport {
-  const resolved: Required<ScoreOptions> = { ...DEFAULTS, ...options };
+  const classification = classifyGame(adapter.spec, adapter.contentInventory);
+  const blueprint = deriveBlueprint(classification);
+  // Priority: explicit caller options > blueprint-derived defaults > DEFAULTS.
+  const resolved: Required<ScoreOptions> = {
+    ...DEFAULTS,
+    ...blueprintToScoreOptions(blueprint),
+    ...options,
+  };
 
   const axes: AxisResult[] = [
     scoreC0(adapter),

@@ -1,8 +1,10 @@
 /**
  * Run store: on-disk persistence for every scored/calibrated/wave/benchmark
- * execution (GAP-ANALYSIS.md C1). Each run gets `rootDir/runs/<runId>/`
- * holding a canonical-JSON envelope, its digest, a human-readable Markdown
- * report, and any SVGs. Runs are append-only — re-saving an existing runId
+ * execution (GAP-ANALYSIS.md C1). Each run gets
+ * `rootDir/runs/<gameId>/<runId>/` holding a canonical-JSON envelope, its
+ * digest, a human-readable Markdown report, and any SVGs. Namespacing by
+ * gameId keeps two games from colliding on the same runId (GAP-ANALYSIS-5.md
+ * H6). Runs are append-only — re-saving an existing (gameId, runId) pair
  * throws, mirroring the seed ledger's single-reservation philosophy so
  * evidence can't be silently overwritten.
  *
@@ -24,6 +26,7 @@ export interface SaveRunSvg {
 }
 
 export interface SaveRunInput {
+  readonly gameId: string;
   readonly runId: string;
   readonly kind: RunKind;
   readonly recordedAt: string;
@@ -34,6 +37,7 @@ export interface SaveRunInput {
 }
 
 export interface RunSummary {
+  readonly gameId: string;
   readonly runId: string;
   readonly kind: RunKind;
   readonly recordedAt: string;
@@ -41,6 +45,7 @@ export interface RunSummary {
 }
 
 export interface LoadedRun {
+  readonly gameId: string;
   readonly runId: string;
   readonly kind: RunKind;
   readonly recordedAt: string;
@@ -50,6 +55,7 @@ export interface LoadedRun {
 }
 
 interface RunEnvelope {
+  readonly gameId: string;
   readonly runId: string;
   readonly kind: RunKind;
   readonly recordedAt: string;
@@ -59,12 +65,20 @@ interface RunEnvelope {
 
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-function validateRunId(runId: string): void {
-  if (!RUN_ID_PATTERN.test(runId)) {
+function validatePathSegment(label: string, value: string): void {
+  if (!RUN_ID_PATTERN.test(value)) {
     throw new Error(
-      `RunStore: runId "${runId}" must match ${RUN_ID_PATTERN.source} (no path separators)`,
+      `RunStore: ${label} "${value}" must match ${RUN_ID_PATTERN.source} (no path separators)`,
     );
   }
+}
+
+function validateRunId(runId: string): void {
+  validatePathSegment('runId', runId);
+}
+
+function validateGameId(gameId: string): void {
+  validatePathSegment('gameId', gameId);
 }
 
 export class RunStore {
@@ -74,18 +88,22 @@ export class RunStore {
     return join(this.rootDir, 'runs');
   }
 
-  private runDir(runId: string): string {
-    return join(this.runsDir(), runId);
+  private runDir(gameId: string, runId: string): string {
+    return join(this.runsDir(), gameId, runId);
   }
 
   saveRun(input: SaveRunInput): void {
+    validateGameId(input.gameId);
     validateRunId(input.runId);
-    const dir = this.runDir(input.runId);
+    const dir = this.runDir(input.gameId, input.runId);
     if (existsSync(dir)) {
-      throw new Error(`RunStore: run "${input.runId}" already exists (runs are append-only)`);
+      throw new Error(
+        `RunStore: run "${input.runId}" already exists for game "${input.gameId}" (runs are append-only)`,
+      );
     }
 
     const envelope: RunEnvelope = {
+      gameId: input.gameId,
       runId: input.runId,
       kind: input.kind,
       recordedAt: input.recordedAt,
@@ -109,26 +127,37 @@ export class RunStore {
     if (!existsSync(dir)) {
       return [];
     }
-    const runIds = readdirSync(dir, { withFileTypes: true })
+    const gameIds = readdirSync(dir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort();
-    return runIds.map((runId) => {
-      const envelope = this.readEnvelope(runId, { verify: false });
-      return {
-        runId: envelope.runId,
-        kind: envelope.kind,
-        recordedAt: envelope.recordedAt,
-        comparabilityKey: envelope.comparabilityKey,
-      };
-    });
+    const summaries: RunSummary[] = [];
+    for (const gameId of gameIds) {
+      const runIds = readdirSync(join(dir, gameId), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+      for (const runId of runIds) {
+        const envelope = this.readEnvelope(gameId, runId, { verify: false });
+        summaries.push({
+          gameId: envelope.gameId,
+          runId: envelope.runId,
+          kind: envelope.kind,
+          recordedAt: envelope.recordedAt,
+          comparabilityKey: envelope.comparabilityKey,
+        });
+      }
+    }
+    return summaries;
   }
 
-  loadRun(runId: string): LoadedRun {
+  loadRun(gameId: string, runId: string): LoadedRun {
+    validateGameId(gameId);
     validateRunId(runId);
-    const envelope = this.readEnvelope(runId, { verify: true });
-    const markdown = readFileSync(join(this.runDir(runId), 'report.md'), 'utf8');
+    const envelope = this.readEnvelope(gameId, runId, { verify: true });
+    const markdown = readFileSync(join(this.runDir(gameId, runId), 'report.md'), 'utf8');
     return {
+      gameId: envelope.gameId,
       runId: envelope.runId,
       kind: envelope.kind,
       recordedAt: envelope.recordedAt,
@@ -138,10 +167,14 @@ export class RunStore {
     };
   }
 
-  private readEnvelope(runId: string, options: { readonly verify: boolean }): RunEnvelope {
-    const dir = this.runDir(runId);
+  private readEnvelope(
+    gameId: string,
+    runId: string,
+    options: { readonly verify: boolean },
+  ): RunEnvelope {
+    const dir = this.runDir(gameId, runId);
     if (!existsSync(dir)) {
-      throw new Error(`RunStore: unknown run "${runId}"`);
+      throw new Error(`RunStore: unknown run "${runId}" for game "${gameId}"`);
     }
     const payloadJson = readFileSync(join(dir, 'payload.json'), 'utf8');
     const envelope = JSON.parse(payloadJson) as RunEnvelope;
@@ -151,7 +184,7 @@ export class RunStore {
       const actualDigest = sha256Digest(envelope);
       if (actualDigest !== expectedDigest) {
         throw new Error(
-          `RunStore: digest mismatch for run "${runId}" — recorded evidence has been tampered with or drifted (expected ${expectedDigest}, got ${actualDigest})`,
+          `RunStore: digest mismatch for run "${runId}" (game "${gameId}") — recorded evidence has been tampered with or drifted (expected ${expectedDigest}, got ${actualDigest})`,
         );
       }
     }

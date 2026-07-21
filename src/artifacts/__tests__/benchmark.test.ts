@@ -77,4 +77,47 @@ describe('renderLadderMarkdown', () => {
     expect(markdown).toContain('random-anchor');
     expect(markdown).toContain('| anchor | kind |');
   });
+
+  it('omits classification context when no classification is passed (back-compat)', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'random-anchor', kind: 'random' });
+    const subject = composeBot(adapter, ['winCheapest']);
+    const result = runBenchmarkLadder(adapter, subject, registry.listAnchors(), registry, {
+      seeds: [1, 2, 3],
+      botSeedBase: 50,
+    });
+    const withoutArg = renderLadderMarkdown(result);
+    const withUndefinedArg = renderLadderMarkdown(result, undefined);
+    expect(withUndefinedArg).toEqual(withoutArg);
+    expect(withoutArg).not.toContain('항등 기준');
+    expect(withoutArg).toContain('| scoreDiff |');
+  });
+
+  it('hides raw scoreDiff and shows identityCenter context for win-loss-only games', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'random-anchor', kind: 'random' });
+    const subject = composeBot(adapter, ['winCheapest']);
+    const result = runBenchmarkLadder(adapter, subject, registry.listAnchors(), registry, {
+      seeds: [1, 2, 3],
+      botSeedBase: 50,
+    });
+    const markdown = renderLadderMarkdown(result, { scoreStructure: 'win-loss-only', identityCenter: 0.5 });
+    expect(markdown).toContain('항등 기준(identityCenter): 0.500');
+    expect(markdown).toContain('N/A — 승/패 전용 게임');
+    expect(markdown).not.toMatch(/\|\s*-?\d+\.\d{3}\s*\|\s*\d+\s*\|\n/);
+  });
+
+  it('keeps raw scoreDiff numbers for scored games', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'random-anchor', kind: 'random' });
+    const subject = composeBot(adapter, ['winCheapest']);
+    const result = runBenchmarkLadder(adapter, subject, registry.listAnchors(), registry, {
+      seeds: [1, 2, 3],
+      botSeedBase: 50,
+    });
+    const markdown = renderLadderMarkdown(result, { scoreStructure: 'scored', identityCenter: 0.5 });
+    const expectedScoreDiff = result.rungs[0]!.pointScoreDiff.toFixed(3);
+    expect(markdown).toContain(expectedScoreDiff);
+    expect(markdown).not.toContain('N/A — 승/패 전용 게임');
+  });
 });

@@ -93,6 +93,10 @@ export function renderReportMarkdown(report: ConformanceReport): string {
   );
   lines.push(`**Ready for loop execution:** ${report.ready ? 'yes' : 'no'}`);
   lines.push('');
+  lines.push(
+    '_C0=계약 형태, C1=결정론, C2=무결성, C3=은닉정보, C4=처리량, C5=기준선 공정성, C6=전략표면, C7=정합성_',
+  );
+  lines.push('');
   lines.push('| Axis | Score | Blockers | Status |');
   lines.push('|---|---|---|---|');
   for (const axis of report.axes) {

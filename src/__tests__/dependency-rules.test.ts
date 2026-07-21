@@ -12,6 +12,9 @@
  *   reference  → contract, kernel        (the reference GAME must stay a pure adapter)
  *
  * reference/demo.ts is the app boundary and exempt (it wires every layer).
+ * Any file under reference/runners/ is also an app boundary — per-game
+ * execution entrypoints (H5/H7) that wire every layer and persist state, one
+ * per gameId, without requiring a new literal exemption per game.
  * Test files (__tests__) are exempt from layer rules but not from determinism.
  */
 
@@ -30,6 +33,11 @@ const LAYER_ALLOWED: Record<string, readonly string[]> = {
 };
 
 const APP_BOUNDARY_FILES = new Set(['reference/demo.ts']);
+const APP_BOUNDARY_PREFIXES = ['reference/runners/'];
+
+function isAppBoundary(relPath: string): boolean {
+  return APP_BOUNDARY_FILES.has(relPath) || APP_BOUNDARY_PREFIXES.some((prefix) => relPath.startsWith(prefix));
+}
 
 /** Files allowed to use wall-clock/system randomness (app boundary only). */
 const DETERMINISM_EXEMPT = new Set(['reference/demo.ts']);
@@ -75,7 +83,7 @@ const allFiles = walk(SRC).map(relative);
 
 describe('layer dependency rules (DESIGN.md)', () => {
   const productionFiles = allFiles.filter(
-    (file) => !isTestFile(file) && !APP_BOUNDARY_FILES.has(file) && layerOf(file) !== null,
+    (file) => !isTestFile(file) && !isAppBoundary(file) && layerOf(file) !== null,
   );
 
   it.each(productionFiles)('%s imports only from allowed layers', (relPath) => {
@@ -102,7 +110,10 @@ describe('layer dependency rules (DESIGN.md)', () => {
 
 describe('determinism rule (no wall clock / system randomness outside the app boundary)', () => {
   const checkedFiles = allFiles.filter(
-    (file) => !DETERMINISM_EXEMPT.has(file) && !isTestFile(file),
+    (file) =>
+      !DETERMINISM_EXEMPT.has(file) &&
+      !APP_BOUNDARY_PREFIXES.some((prefix) => file.startsWith(prefix)) &&
+      !isTestFile(file),
   );
 
   it.each(checkedFiles)('%s does not call Date.now or Math.random', (relPath) => {

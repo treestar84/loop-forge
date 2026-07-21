@@ -57,6 +57,7 @@ describe('RunStore', () => {
   it('saves a run and reloads it with matching payload and markdown', () => {
     const store = new RunStore(root);
     store.saveRun({
+      gameId: 'mini-trick',
       runId: 'run-1',
       kind: 'wave',
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -65,7 +66,8 @@ describe('RunStore', () => {
       markdown: '# Run 1\n',
     });
 
-    const loaded = store.loadRun('run-1');
+    const loaded = store.loadRun('mini-trick', 'run-1');
+    expect(loaded.gameId).toBe('mini-trick');
     expect(loaded.kind).toBe('wave');
     expect(loaded.comparabilityKey).toBe('sha256-abc');
     expect(loaded.payload).toEqual({ hello: 'world', n: 3 });
@@ -75,6 +77,7 @@ describe('RunStore', () => {
   it('writes svg files alongside the report', () => {
     const store = new RunStore(root);
     store.saveRun({
+      gameId: 'mini-trick',
       runId: 'run-svg',
       kind: 'benchmark',
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -83,13 +86,14 @@ describe('RunStore', () => {
       markdown: '# Run\n',
       svg: [{ name: 'progression.svg', content: '<svg></svg>' }],
     });
-    const content = readFileSync(join(root, 'runs', 'run-svg', 'progression.svg'), 'utf8');
+    const content = readFileSync(join(root, 'runs', 'mini-trick', 'run-svg', 'progression.svg'), 'utf8');
     expect(content).toBe('<svg></svg>');
   });
 
-  it('throws when saving a runId that already exists (append-only)', () => {
+  it('throws when saving a runId that already exists for the same game (append-only)', () => {
     const store = new RunStore(root);
     const input = {
+      gameId: 'mini-trick',
       runId: 'dup',
       kind: 'conformance' as const,
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -101,9 +105,37 @@ describe('RunStore', () => {
     expect(() => store.saveRun(input)).toThrow(/append-only/);
   });
 
-  it('lists saved runs sorted by runId with summary fields', () => {
+  it('allows two different games to reuse the same runId without colliding', () => {
     const store = new RunStore(root);
     store.saveRun({
+      gameId: 'test-game-a',
+      runId: 'conformance',
+      kind: 'conformance',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      comparabilityKey: 'sha256-a',
+      payload: { from: 'test-game-a' },
+      markdown: '# A\n',
+    });
+    store.saveRun({
+      gameId: 'test-game-b',
+      runId: 'conformance',
+      kind: 'conformance',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      comparabilityKey: 'sha256-b',
+      payload: { from: 'test-game-b' },
+      markdown: '# B\n',
+    });
+
+    const loadedA = store.loadRun('test-game-a', 'conformance');
+    const loadedB = store.loadRun('test-game-b', 'conformance');
+    expect(loadedA.payload).toEqual({ from: 'test-game-a' });
+    expect(loadedB.payload).toEqual({ from: 'test-game-b' });
+  });
+
+  it('lists saved runs sorted by gameId then runId with summary fields', () => {
+    const store = new RunStore(root);
+    store.saveRun({
+      gameId: 'mini-trick',
       runId: 'run-b',
       kind: 'calibration',
       recordedAt: '2026-01-02T00:00:00.000Z',
@@ -112,6 +144,7 @@ describe('RunStore', () => {
       markdown: '# B\n',
     });
     store.saveRun({
+      gameId: 'mini-trick',
       runId: 'run-a',
       kind: 'conformance',
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -122,6 +155,7 @@ describe('RunStore', () => {
     const runs = store.listRuns();
     expect(runs.map((r) => r.runId)).toEqual(['run-a', 'run-b']);
     expect(runs[0]).toEqual({
+      gameId: 'mini-trick',
       runId: 'run-a',
       kind: 'conformance',
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -132,6 +166,7 @@ describe('RunStore', () => {
   it('detects tampering: mutating payload.json after save makes loadRun throw', () => {
     const store = new RunStore(root);
     store.saveRun({
+      gameId: 'mini-trick',
       runId: 'run-tamper',
       kind: 'wave',
       recordedAt: '2026-01-01T00:00:00.000Z',
@@ -139,20 +174,36 @@ describe('RunStore', () => {
       payload: { value: 1 },
       markdown: '# Run\n',
     });
-    const payloadPath = join(root, 'runs', 'run-tamper', 'payload.json');
+    const payloadPath = join(root, 'runs', 'mini-trick', 'run-tamper', 'payload.json');
     const original = readFileSync(payloadPath, 'utf8');
     const tampered = original.replace('"value":1', '"value":2');
     expect(tampered).not.toBe(original);
     writeFileSync(payloadPath, tampered, 'utf8');
 
-    expect(() => store.loadRun('run-tamper')).toThrow(/digest mismatch/);
+    expect(() => store.loadRun('mini-trick', 'run-tamper')).toThrow(/digest mismatch/);
   });
 
   it('rejects runIds containing path separators', () => {
     const store = new RunStore(root);
     expect(() =>
       store.saveRun({
+        gameId: 'mini-trick',
         runId: '../escape',
+        kind: 'wave',
+        recordedAt: '2026-01-01T00:00:00.000Z',
+        comparabilityKey: 'sha256-abc',
+        payload: {},
+        markdown: '# Run\n',
+      }),
+    ).toThrow();
+  });
+
+  it('rejects gameIds containing path separators', () => {
+    const store = new RunStore(root);
+    expect(() =>
+      store.saveRun({
+        gameId: '../escape',
+        runId: 'run-1',
         kind: 'wave',
         recordedAt: '2026-01-01T00:00:00.000Z',
         comparabilityKey: 'sha256-abc',
@@ -164,7 +215,7 @@ describe('RunStore', () => {
 
   it('throws loading an unknown runId', () => {
     const store = new RunStore(root);
-    expect(() => store.loadRun('does-not-exist')).toThrow(/unknown run/);
+    expect(() => store.loadRun('mini-trick', 'does-not-exist')).toThrow(/unknown run/);
   });
 
   it('listRuns returns an empty array when no runs exist yet', () => {

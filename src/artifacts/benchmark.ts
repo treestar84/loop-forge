@@ -6,9 +6,15 @@
  */
 
 import type { AnyBotFactory, AnyGameAdapter } from '../contract/types';
+import type { GameClassification } from '../kernel/classify';
 import { bootstrapPairedSeedBlocks, type PairedSeedOutcome } from '../kernel/paired-stats';
 import type { BaselineRegistry, BenchmarkAnchor } from './baseline-registry';
 import { runPairedBlock } from '../loop/paired-match';
+
+/** The two classification fields renderLadderMarkdown needs to label output
+ * correctly (INTERPRETATION.md §2, §3.5) — accepts a full GameClassification
+ * or just these fields. */
+export type LadderRenderClassification = Pick<GameClassification, 'scoreStructure' | 'identityCenter'>;
 
 export interface LadderSeedBank {
   readonly seeds: readonly number[];
@@ -86,11 +92,26 @@ function hashSeedFor(label: string): number {
   return hash >>> 0;
 }
 
-export function renderLadderMarkdown(result: LadderResult): string {
-  const lines = ['# Benchmark Ladder', '', '| anchor | kind | winRate | winRate CI | scoreDiff | blocks |', '|---|---|---|---|---|---|'];
+export function renderLadderMarkdown(
+  result: LadderResult,
+  classification?: LadderRenderClassification,
+): string {
+  const winLossOnly = classification?.scoreStructure === 'win-loss-only';
+  const scoreDiffHeader = winLossOnly ? 'scoreDiff (N/A)' : 'scoreDiff';
+  const caption =
+    classification !== undefined
+      ? `\n_항등 기준(identityCenter): ${classification.identityCenter.toFixed(3)}${winLossOnly ? ' — 승/패 전용 게임: scoreDiff는 무의미하여 표시하지 않음' : ''}_\n`
+      : '';
+  const lines = [
+    '# Benchmark Ladder',
+    caption,
+    `| anchor | kind | winRate | winRate CI | ${scoreDiffHeader} | blocks |`,
+    '|---|---|---|---|---|---|',
+  ];
   for (const rung of result.rungs) {
+    const scoreDiffCell = winLossOnly ? 'N/A — 승/패 전용 게임' : rung.pointScoreDiff.toFixed(3);
     lines.push(
-      `| ${rung.anchorId} | ${rung.anchorKind} | ${(rung.pointWinRate * 100).toFixed(1)}% | [${(rung.winRateCI.lower * 100).toFixed(1)}%, ${(rung.winRateCI.upper * 100).toFixed(1)}%] | ${rung.pointScoreDiff.toFixed(3)} | ${rung.blocks} |`,
+      `| ${rung.anchorId} | ${rung.anchorKind} | ${(rung.pointWinRate * 100).toFixed(1)}% | [${(rung.winRateCI.lower * 100).toFixed(1)}%, ${(rung.winRateCI.upper * 100).toFixed(1)}%] | ${scoreDiffCell} | ${rung.blocks} |`,
     );
   }
   return lines.join('\n') + '\n';

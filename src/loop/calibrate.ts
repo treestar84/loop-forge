@@ -6,6 +6,7 @@
  */
 
 import type { AnyBotFactory, AnyGameAdapter, PlayerId } from '../contract/types';
+import { createRng } from '../kernel/rng';
 import {
   bootstrapPairedSeedBlocks,
   type BootstrapOptions,
@@ -14,6 +15,13 @@ import {
 } from '../kernel/paired-stats';
 import { runMatch } from './match';
 import { runPairedBlock } from './paired-match';
+
+/**
+ * Upper bound (exclusive) for per-seed bot seeds derived from a forked RNG
+ * stream — comfortably inside Number.isSafeInteger while giving each
+ * gameSeed x seat combination an effectively independent draw.
+ */
+const BOT_SEED_SPACE = 2 ** 31;
 
 export interface IdentityCalibration {
   /** Mean win rate across seating-plan permutations; should be ~0.5. */
@@ -59,7 +67,13 @@ export function calibrateIdentity(
   for (let i = 0; i < playerCount; i += 1) {
     botFactories.push(botFactory);
   }
-  const botSeeds = botFactories.map((_, index) => botSeedBase + index);
+
+  // Each gameSeed gets its own bot-seed stream, forked off botSeedBase by the
+  // seed label. Reusing one fixed pair of bot seeds across every gameSeed
+  // (the pre-fix behavior) lets a long-decision-count game's RNG sequence
+  // freeze into a persistent, compounding bias per seat that never averages
+  // out no matter how many seeds are sampled — see docs/FIX-BACKLOG.md Z2.
+  const rootRng = createRng(botSeedBase);
 
   const seatingPlan = adapter.spec.seatingPlan;
   const winSums = seatingPlan.map(() => 0);
@@ -68,6 +82,9 @@ export function calibrateIdentity(
   let collapsedBlocks = 0;
 
   for (const seed of seeds) {
+    const seedRng = rootRng.fork(String(seed));
+    const botSeeds = botFactories.map(() => seedRng.nextInt(BOT_SEED_SPACE));
+
     // Block = this seed's winFraction averaged across every seatingPlan
     // permutation — the same unit runPairedBlock/wave-runner's drawRate use,
     // so signalCollapseRate here is directly comparable to a wave's per-tier
@@ -149,9 +166,15 @@ export function measureNoiseFloor(
   botSeedBase: number,
   options: BootstrapOptions,
 ): NoiseFloorResult {
+  // Same per-seed bot-seed forking as calibrateIdentity (docs/FIX-BACKLOG.md
+  // Z2): a fixed botSeedBase reused across every seed lets a long game's RNG
+  // sequence lock into a persistent bias, inflating the measured noise floor
+  // instead of reporting the true seed-to-seed spread.
+  const rootRng = createRng(botSeedBase);
   const outcomes: PairedSeedOutcome[] = [];
   for (const seed of seeds) {
-    const result = runPairedBlock(adapter, botFactory, botFactory, seed, botSeedBase);
+    const seedBotSeedBase = rootRng.fork(String(seed)).nextInt(BOT_SEED_SPACE);
+    const result = runPairedBlock(adapter, botFactory, botFactory, seed, seedBotSeedBase);
     if ('defect' in result) {
       throw new Error(`measureNoiseFloor: defect at seed ${seed}: ${result.defect.message}`);
     }

@@ -1,4 +1,4 @@
-import { bootstrapPairedSeedBlocks, type PairedSeedOutcome } from '../paired-stats';
+import { bootstrapPairedSeedBlocks, recommendBlockCount, type PairedSeedOutcome } from '../paired-stats';
 
 function makeOutcomes(): PairedSeedOutcome[] {
   const outcomes: PairedSeedOutcome[] = [];
@@ -100,6 +100,49 @@ describe('bootstrapPairedSeedBlocks', () => {
     ).toThrow();
     expect(() =>
       bootstrapPairedSeedBlocks(outcomes, { iterations: 100, confidenceLevel: 0.95, seed: 1.5 }),
+    ).toThrow();
+  });
+});
+
+describe('recommendBlockCount', () => {
+  it('matches the standard 0.05/0.8 sample-size formula for a known input', () => {
+    // n = ((1.95996 + 0.84162) * 0.5 / 0.03)^2 ~= 2180.6 -> ceil to 2181.
+    const n = recommendBlockCount({ blockStdDev: 0.5, targetEffect: 0.03 });
+    expect(n).toBe(2181);
+  });
+
+  it('requires more blocks for a noisier game (larger blockStdDev)', () => {
+    const quiet = recommendBlockCount({ blockStdDev: 0.1, targetEffect: 0.03 });
+    const noisy = recommendBlockCount({ blockStdDev: 0.5, targetEffect: 0.03 });
+    expect(noisy).toBeGreaterThan(quiet);
+  });
+
+  it('requires fewer blocks for a larger target effect', () => {
+    const smallEffect = recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.02 });
+    const largeEffect = recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.1 });
+    expect(largeEffect).toBeLessThan(smallEffect);
+  });
+
+  it('requires more blocks for higher power at the same alpha', () => {
+    const lowPower = recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.03, power: 0.8 });
+    const highPower = recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.03, power: 0.95 });
+    expect(highPower).toBeGreaterThan(lowPower);
+  });
+
+  it('returns a positive integer', () => {
+    const n = recommendBlockCount({ blockStdDev: 0.25, targetEffect: 0.05 });
+    expect(Number.isInteger(n)).toBe(true);
+    expect(n).toBeGreaterThan(0);
+  });
+
+  it('rejects non-positive blockStdDev/targetEffect and out-of-range alpha/power', () => {
+    expect(() => recommendBlockCount({ blockStdDev: 0, targetEffect: 0.03 })).toThrow();
+    expect(() => recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0 })).toThrow();
+    expect(() =>
+      recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.03, alpha: 0 }),
+    ).toThrow();
+    expect(() =>
+      recommendBlockCount({ blockStdDev: 0.3, targetEffect: 0.03, power: 1 }),
     ).toThrow();
   });
 });

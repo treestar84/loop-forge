@@ -159,26 +159,6 @@ export class RunStore {
   }
 }
 
-export interface ComparabilityKeyInput {
-  readonly gameId: string;
-  readonly specDigest: string;
-  readonly baselineVersion: string;
-  readonly opponentId: string;
-  readonly seedBankIds: readonly string[];
-}
-
-/**
- * Digest the 4-factor comparability context (INTERPRETATION.md §1): adapter
- * identity (via caller-computed specDigest), baseline version, opponent
- * identity, and seed banks used. Two reports are only directly comparable
- * when this key matches.
- */
-export function computeComparabilityKey(input: ComparabilityKeyInput): string {
-  return sha256Digest({
-    gameId: input.gameId,
-    specDigest: input.specDigest,
-    baselineVersion: input.baselineVersion,
-    opponentId: input.opponentId,
-    seedBankIds: [...input.seedBankIds],
-  });
-}
+// Canonical implementation lives in the kernel (layer rule: the wave runner in
+// loop stamps every report with this key; loop → artifacts is forbidden).
+export { computeComparabilityKey, type ComparabilityKeyInput } from '../kernel/comparability';

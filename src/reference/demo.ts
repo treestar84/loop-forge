@@ -25,8 +25,9 @@ import { join } from 'node:path';
 import { canonicalJson, sha256Digest } from '../kernel/digest';
 import { DEFAULT_CRITERIA } from '../kernel/gates';
 import { SeedLedger } from '../kernel/seed-ledger';
-import { calibrateIdentity } from '../loop/calibrate';
+import { calibrateIdentity, measureNoiseFloor } from '../loop/calibrate';
 import { eraseAdapter } from '../loop/erase';
+import { recommendBlockCount } from '../kernel/paired-stats';
 import { runWave, type WaveConfig } from '../loop/wave-runner';
 import { renderReportMarkdown } from '../onboarding/report';
 import { scoreAdapter } from '../onboarding/score';
@@ -89,6 +90,21 @@ function main(): void {
     `좌석별 승률: [${identity.seatWinRates.map((rate) => rate.toFixed(4)).join(', ')}]`,
   );
   console.log(`좌석 편향(bias, max-min): ${identity.bias.toFixed(4)}`);
+  console.log(`페어드 신호 붕괴율(signalCollapseRate, winFraction===0.5): ${identity.signalCollapseRate.toFixed(4)}`);
+
+  const noiseFloor = measureNoiseFloor(adapter, miniTrickAdapter.baselines.random, identitySeeds, 800_000, {
+    iterations: 2000,
+    confidenceLevel: 0.95,
+    seed: 123,
+  });
+  const targetEffect = 0.03;
+  const recommendedBlocks = recommendBlockCount({
+    blockStdDev: noiseFloor.blockStdDev,
+    targetEffect,
+  });
+  console.log(
+    `승률 +${(targetEffect * 100).toFixed(0)}%p 판정에 필요한 블록 수: ${recommendedBlocks} (α=0.05, power=0.8)`,
+  );
 
   const calibrationMarkdown = [
     '# Calibration — mini-trick',
@@ -96,6 +112,11 @@ function main(): void {
     renderMetricTable([
       { label: 'meanWinRate', value: identity.meanWinRate.toFixed(4), bar: { value: identity.meanWinRate, max: 1 } },
       { label: 'bias (max-min)', value: identity.bias.toFixed(4), bar: { value: identity.bias, max: 1 } },
+      {
+        label: 'signalCollapseRate',
+        value: identity.signalCollapseRate.toFixed(4),
+        bar: { value: identity.signalCollapseRate, max: 1 },
+      },
     ]),
     '',
   ].join('\n');
@@ -161,6 +182,7 @@ function main(): void {
     waveId: 'demo-wave-1',
     candidates: [{ flag: 'winCheapest' }, { flag: 'noopSort' }, { flag: 'leadHighFirst' }],
     opponent: 'heuristic',
+    recordedAt: new Date().toISOString(),
     ledger,
     baselineFlags: v1.flags,
     baselineVersion: v1.version,

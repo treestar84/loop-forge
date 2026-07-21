@@ -3,8 +3,10 @@ import type { PromotionCriteria } from '../../kernel/gates';
 import { miniTrickAdapter } from '../../reference/mini-trick';
 import { eraseAdapter } from '../erase';
 import { runWave, type WaveConfig } from '../wave-runner';
+import { firstMoverWinsAdapter } from './helpers/first-mover-wins-game';
 
 const adapter = eraseAdapter(miniTrickAdapter);
+const collapseAdapter = eraseAdapter(firstMoverWinsAdapter);
 
 // mini-trick scores range 0-6 (six tricks total), so kernel/gates'
 // DEFAULT_CRITERIA (minScoreDiff: 5, tuned for a larger-magnitude game) would
@@ -39,6 +41,7 @@ function baseWaveConfig(ledger: SeedLedger): WaveConfig {
     waveId: 'test-wave-1',
     candidates: [{ flag: 'winCheapest' }, { flag: 'noopSort' }, { flag: 'leadHighFirst' }],
     opponent: 'heuristic',
+    recordedAt: '2026-01-01T00:00:00.000Z',
     ledger,
     tiers: {
       smoke: {
@@ -94,5 +97,44 @@ describe('runWave', () => {
     const report = runWave(adapter, baseWaveConfig(ledger));
     const flags = report.results.map((r) => r.flag).sort();
     expect(flags).toEqual(['leadHighFirst', 'noopSort', 'winCheapest']);
+  });
+});
+
+// X1 (docs/GAP-ANALYSIS-2.md): paired signal collapse warning. firstMoverWinsAdapter's
+// outcome never depends on any decision, so every smoke block's winFraction is
+// exactly 0.5 (drawRate=1.0) — comfortably above the default 0.8 threshold.
+describe('runWave signal-collapse warnings (X1)', () => {
+  function collapseWaveConfig(ledger: SeedLedger): WaveConfig {
+    return {
+      waveId: 'collapse-wave-1',
+      candidates: [{ flag: 'pickB' }],
+      opponent: 'heuristic',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      ledger,
+      tiers: {
+        smoke: {
+          bankId: 'smoke-test',
+          sprt: { p0: 0.5, p1: 0.58, alpha: 0.05, beta: 0.05 },
+          maxBlocks: 20,
+          minBlocks: 20,
+        },
+        prune: { bankId: 'prune-test', blocks: 20 },
+        holdout: { bankId: 'holdout-test', blocks: 20 },
+      },
+      criteria: { minWinRate: 0.53, minScoreDiff: 0.1 },
+      screenProbe: { seeds: [1, 2, 3], botSeedBase: 500 },
+    };
+  }
+
+  it('raises a signal-collapse warning on the candidate result and aggregates it on the report', () => {
+    const ledger = makeLedger();
+    const report = runWave(collapseAdapter, collapseWaveConfig(ledger));
+    const pickB = report.results.find((r) => r.flag === 'pickB');
+    expect(pickB).toBeDefined();
+    expect(pickB?.stats.smoke?.drawRate).toBe(1);
+    expect(pickB?.warnings.some((w) => w.includes('signal collapse'))).toBe(true);
+    expect(report.warnings.some((w) => w.includes('[pickB]') && w.includes('signal collapse'))).toBe(
+      true,
+    );
   });
 });

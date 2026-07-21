@@ -112,6 +112,15 @@ function scoreC0(adapter: AnyGameAdapter): AxisResult {
       message: `spec.playerCount must be a positive integer, got ${spec.playerCount}`,
       remediation: 'Set spec.playerCount to the number of seats in the game.',
     });
+  } else if (spec.playerCount < 2) {
+    // G2: win-rate-based loop statistics assume a competitive matchup between
+    // two-or-more parties; solo/co-op games have no such matchup to measure
+    // (docs/GAP-ANALYSIS-2.md G2).
+    blockers.push({
+      code: 'C0_SOLO_OR_COOP_UNSUPPORTED',
+      message: `spec.playerCount is ${spec.playerCount}; v1 requires a competitive game (playerCount >= 2)`,
+      remediation: 'v1은 경쟁 게임 전용 — 솔로/협력 게임은 로드맵 (docs/GAP-ANALYSIS-2.md G2)',
+    });
   }
   if (spec.decisionPoints.length === 0) {
     blockers.push({
@@ -294,6 +303,51 @@ function scoreC1(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
 // C2 — rule integrity
 // ---------------------------------------------------------------------------
 
+function scoreC2ContentCoverage(
+  adapter: AnyGameAdapter,
+  exercisedIds: ReadonlySet<string>,
+  unknownContentId: string | null,
+): { readonly blockers: AxisBlocker[]; readonly notes: string[]; readonly coveragePercent: number | null } {
+  const blockers: AxisBlocker[] = [];
+  const notes: string[] = [];
+  const contentInventory = adapter.contentInventory;
+  if (!contentInventory) {
+    notes.push('콘텐츠 커버리지 미측정 — 콘텐츠 무거운 게임이면 contentInventory 선언 권장');
+    return { blockers, notes, coveragePercent: null };
+  }
+
+  if (unknownContentId !== null) {
+    blockers.push({
+      code: 'C2_CONTENT_UNKNOWN_ID',
+      message: `exercisedContent returned id "${unknownContentId}", which is not present in contentInventory`,
+      remediation: 'exercisedContent가 반환하는 모든 id는 contentInventory에 선언된 id 집합의 부분집합이어야 한다.',
+    });
+  }
+
+  const inventorySize = contentInventory.length;
+  const coveragePercent = inventorySize > 0 ? (exercisedIds.size / inventorySize) * 100 : 100;
+  const uncovered = contentInventory.filter((entry) => !exercisedIds.has(entry.id)).map((entry) => entry.id);
+  const shown = uncovered.slice(0, 20);
+  const remaining = uncovered.length - shown.length;
+  notes.push(
+    `콘텐츠 커버리지: ${coveragePercent.toFixed(1)}% (${exercisedIds.size}/${inventorySize}) — ` +
+      (uncovered.length === 0
+        ? '모든 콘텐츠가 실행됨.'
+        : `미커버: ${shown.join(', ')}${remaining > 0 ? ` 외 ${remaining}개` : ''}`),
+  );
+
+  if (coveragePercent < 20) {
+    blockers.push({
+      code: 'C2_CONTENT_COVERAGE_TOO_LOW',
+      message: `content coverage ${coveragePercent.toFixed(1)}% is below the 20% floor`,
+      remediation:
+        '랜덤 플레이아웃이 콘텐츠 대부분을 실행하지 못함 — 증분 온보딩(docs/ONBOARDING-GUIDE.md §5.7) 또는 플레이아웃 수 증가 필요',
+    });
+  }
+
+  return { blockers, notes, coveragePercent };
+}
+
 function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): AxisResult {
   const blockers: AxisBlocker[] = [];
   const notes: string[] = [];
@@ -302,6 +356,11 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   let illegalChoiceRejectionChecked = false;
 
   const legalChoicePools: unknown[][] = [];
+  const contentInventory = adapter.contentInventory;
+  const exercisedContentFn = adapter.exercisedContent;
+  const inventoryIds = new Set((contentInventory ?? []).map((entry) => entry.id));
+  const exercisedIds = new Set<string>();
+  let unknownContentId: string | null = null;
 
   for (let i = 0; i < options.c2Playouts; i += 1) {
     const gameSeed = options.seedBase + 2000 + i;
@@ -313,6 +372,14 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         maxDecisionsDefectSeen = true;
       }
       continue;
+    }
+    if (contentInventory && exercisedContentFn) {
+      for (const id of exercisedContentFn(result.finalState)) {
+        if (unknownContentId === null && !inventoryIds.has(id)) {
+          unknownContentId = id;
+        }
+        exercisedIds.add(id);
+      }
     }
     // Collect a few legal-choice pools (from replaying) for the illegal-choice
     // spot-check below.
@@ -326,6 +393,20 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
         state = adapter.applyChoice(state, legal[0]);
       }
     }
+  }
+
+  let contentCoveragePercent: number | null = null;
+  if (contentInventory && !exercisedContentFn) {
+    blockers.push({
+      code: 'C2_CONTENT_INVENTORY_WITHOUT_EXERCISED',
+      message: 'adapter.contentInventory is declared but adapter.exercisedContent is not implemented',
+      remediation: 'contentInventory 선언 시 exercisedContent 구현 필수',
+    });
+  } else {
+    const coverage = scoreC2ContentCoverage(adapter, exercisedIds, unknownContentId);
+    blockers.push(...coverage.blockers);
+    notes.push(...coverage.notes);
+    contentCoveragePercent = coverage.coveragePercent;
   }
 
   if (defectCount > 0) {
@@ -402,7 +483,14 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
     notes.push(`${options.c2Playouts} random playouts completed with zero defects.`);
   }
 
-  return axis('C2-integrity', blockers.length === 0 ? 100 : 0, blockers, notes);
+  let score = blockers.length === 0 ? 100 : 0;
+  if (score === 100 && contentCoveragePercent !== null && contentCoveragePercent < 50) {
+    // Linear degradation below the 50% coverage floor (the <20% case is
+    // already a blocker above, forcing score 0 regardless).
+    score = Math.round((contentCoveragePercent / 50) * 100);
+  }
+
+  return axis('C2-integrity', score, blockers, notes);
 }
 
 // ---------------------------------------------------------------------------

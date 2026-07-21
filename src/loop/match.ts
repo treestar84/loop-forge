@@ -34,6 +34,10 @@ export type MatchResult =
       readonly outcome: Outcome;
       readonly choiceKeys: readonly string[];
       readonly decisions: number;
+      /** The adapter's final game state, type-erased. Lets callers (e.g. the
+       * C2 content-coverage check, docs/GAP-ANALYSIS-2.md X2) run
+       * adapter.exercisedContent(finalState) without re-simulating the game. */
+      readonly finalState: unknown;
     }
   | {
       readonly kind: 'defect';
@@ -216,5 +220,5 @@ export function runMatch(
     };
   }
 
-  return { kind: 'completed', outcome, choiceKeys, decisions };
+  return { kind: 'completed', outcome, choiceKeys, decisions, finalState: state };
 }

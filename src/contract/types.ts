@@ -142,6 +142,24 @@ export interface GameAdapter<TState, TObservation, TChoice> {
 
   /** Game-specific invariants; return an error message or null. Checked during playouts. */
   readonly invariants?: ReadonlyArray<(state: TState) => string | null>;
+  /**
+   * Content inventory for content-heavy games (unique cards, bird powers, …).
+   * Declaring it lets the conformance battery measure playout content
+   * coverage: random playouts only exercise what happens to be drawn, so
+   * without this, half-broken content can pass C2 unnoticed
+   * (docs/GAP-ANALYSIS-2.md X2). Pair with `exercisedContent`.
+   */
+  readonly contentInventory?: ReadonlyArray<{
+    readonly id: string;
+    readonly description: string;
+  }>;
+  /**
+   * Which contentInventory ids were actually exercised (drawn/triggered/used)
+   * over the course of a finished game. Required when contentInventory is
+   * declared; the battery aggregates this across playouts into a coverage
+   * report with an uncovered-content list.
+   */
+  readonly exercisedContent?: (finalState: TState) => readonly string[];
   /** Required for the C3 hidden-information axis to score above zero. */
   readonly hiddenInfoProbe?: HiddenInfoProbe<TState>;
   /** Required for the C7 parity axis to score above zero. */

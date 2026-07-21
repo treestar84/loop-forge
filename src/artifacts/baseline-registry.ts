@@ -50,24 +50,10 @@ function cloneAnchor(anchor: BenchmarkAnchor): BenchmarkAnchor {
     : { anchorId: anchor.anchorId, kind: anchor.kind };
 }
 
-/**
- * Compose a bot factory by starting at `adapter.baselines.heuristic` and
- * applying each named flag's `apply` from `adapter.strategySurface` in
- * order. Composing with an empty `flags` array returns the raw heuristic
- * bot untouched. Throws on any flag not present in strategySurface — an
- * unknown flag is a programming error, never a "no candidate" signal.
- */
-export function composeBot(adapter: AnyGameAdapter, flags: readonly string[]): AnyBotFactory {
-  let factory: AnyBotFactory = adapter.baselines.heuristic;
-  for (const flag of flags) {
-    const spec = adapter.strategySurface.find((candidate) => candidate.flag === flag);
-    if (!spec) {
-      throw new Error(`composeBot: unknown strategy flag "${flag}"`);
-    }
-    factory = spec.apply(factory);
-  }
-  return factory;
-}
+// Canonical implementation lives in the loop layer (layer rule: artifacts → loop
+// is allowed, loop → artifacts is not). Re-exported here for registry consumers.
+import { composeBot } from '../loop/compose';
+export { composeBot };
 
 export class BaselineRegistry {
   private readonly versions = new Map<string, BaselineVersion>();

@@ -133,3 +133,48 @@ describe('scoreAdapter — C4 throughput reporting (A4)', () => {
     expect(c4?.notes.some((note) => note.includes('games/sec'))).toBe(true);
   }, 20_000);
 });
+
+// ---------------------------------------------------------------------------
+// G2: solo/co-op games are out of scope for v1 (docs/GAP-ANALYSIS-2.md G2)
+// ---------------------------------------------------------------------------
+
+describe('scoreAdapter — a solo (playerCount < 2) adapter (G2)', () => {
+  // A minimal, internally-consistent 1-player adapter (its own valid
+  // seatingPlan/playerCount pairing) — isolates the G2 check from unrelated
+  // playerCount/seatingPlan mismatches that would otherwise crash runMatch
+  // before any axis gets to report.
+  interface SoloState {
+    readonly done: boolean;
+  }
+  const soloAdapter = eraseAdapter({
+    spec: {
+      gameId: 'solo-noop',
+      playerCount: 1,
+      decisionPoints: [{ id: 'noop', description: 'The only decision; ends the game.' }],
+      seatingPlan: [[0], [0]] as const,
+      maxDecisionsPerGame: 1,
+    },
+    createInitialState: (_seed: number): SoloState => ({ done: false }),
+    currentDecision: (state: SoloState) => (state.done ? null : { player: 0 as const, decisionPoint: 'noop' }),
+    getObservation: (_state: SoloState, _player: 0) => ({}),
+    getLegalChoices: (_state: SoloState) => ['noop'] as const,
+    applyChoice: (_state: SoloState, _choice: 'noop'): SoloState => ({ done: true }),
+    getOutcome: (state: SoloState) => (state.done ? { scores: [1], winners: [0 as const] } : null),
+    encodeChoice: (choice: 'noop') => choice,
+    baselines: {
+      random: () => ({ id: 'solo-bot', decide: (_dp: string, _obs: unknown, legal: readonly string[]) => legal[0] as 'noop' }),
+      heuristic: () => ({ id: 'solo-bot', decide: (_dp: string, _obs: unknown, legal: readonly string[]) => legal[0] as 'noop' }),
+    },
+    strategySurface: [],
+  });
+
+  it('blocks C0 with a roadmap remediation instead of accepting a non-competitive game', () => {
+    const report = scoreAdapter(soloAdapter, { threshold: 65 });
+    const c0 = report.axes.find((a) => a.axis === 'C0-contract');
+    expect(c0?.blockers.some((b) => b.code === 'C0_SOLO_OR_COOP_UNSUPPORTED')).toBe(true);
+    expect(
+      c0?.blockers.some((b) => b.remediation.includes('GAP-ANALYSIS-2.md G2')),
+    ).toBe(true);
+    expect(report.ready).toBe(false);
+  }, 20_000);
+});

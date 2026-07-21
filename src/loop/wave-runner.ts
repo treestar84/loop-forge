@@ -26,8 +26,8 @@ import {
 } from '../kernel/gates';
 import { createSprt, type SprtConfig } from '../kernel/sprt';
 import type { SeedLedger } from '../kernel/seed-ledger';
-import { composeBot } from '../artifacts/baseline-registry';
-import { computeComparabilityKey } from '../artifacts/run-store';
+import { composeBot } from './compose';
+import { computeComparabilityKey } from '../kernel/comparability';
 import { runMatch, type MatchDefect } from './match';
 import { runPairedBlock } from './paired-match';
 
@@ -68,6 +68,12 @@ export interface WaveConfig {
   readonly opponent: 'heuristic' | 'random';
   readonly ledger: SeedLedger;
   /**
+   * ISO timestamp stamped on seed-bank consumption. Caller-injected (app
+   * boundary), never derived from the wall clock here — the loop layer is
+   * bound by the determinism rule.
+   */
+  readonly recordedAt: string;
+  /**
    * Flags already adopted into the current baseline, composed onto
    * adapter.baselines.heuristic before any candidate flags (C4 marginal
    * check). Defaults to an empty array — a pristine heuristic baseline.
@@ -82,6 +88,13 @@ export interface WaveConfig {
   };
   readonly criteria: PromotionCriteria;
   readonly screenProbe: WaveScreenProbeConfig;
+  /**
+   * Fraction of a tier's blocks whose drawRate (winFraction===0.5) must be
+   * reached before a signal-collapse warning is raised for that tier
+   * (docs/GAP-ANALYSIS-2.md X1: paired signal collapse — seat mirroring can
+   * cancel strategy signal along with position bias). Defaults to 0.8.
+   */
+  readonly signalCollapseThreshold?: number;
 }
 
 export interface WaveTierStats extends TierStats {
@@ -98,6 +111,11 @@ export interface WaveCandidateResult {
   readonly tiersPassed: readonly TierId[];
   readonly stats: Partial<Record<TierId, WaveTierStats>>;
   readonly defect?: MatchDefect;
+  /**
+   * Signal-collapse warnings (docs/GAP-ANALYSIS-2.md X1), one per tier whose
+   * drawRate met/exceeded signalCollapseThreshold. Empty when none triggered.
+   */
+  readonly warnings: readonly string[];
 }
 
 export interface WaveReport {
@@ -106,6 +124,27 @@ export interface WaveReport {
   readonly seedConsumption: readonly string[];
   readonly comparabilityKey: string;
   readonly reportDigest: string;
+  /** Aggregated signal-collapse warnings across every candidate, prefixed with the candidate's flag label. */
+  readonly warnings: readonly string[];
+}
+
+const DEFAULT_SIGNAL_COLLAPSE_THRESHOLD = 0.8;
+
+function signalCollapseWarnings(
+  stats: Partial<Record<TierId, WaveTierStats>>,
+  threshold: number,
+): string[] {
+  const warnings: string[] = [];
+  for (const tier of ['smoke', 'prune', 'holdout'] as const) {
+    const tierStats = stats[tier];
+    if (tierStats?.drawRate !== undefined && tierStats.drawRate >= threshold) {
+      warnings.push(
+        `signal collapse at ${tier} (drawRate=${tierStats.drawRate.toFixed(3)}) — ` +
+          '미러링이 전략 신호까지 상쇄 중, 오프닝 다양성/불균형 오프닝 필요 (docs/INTERPRETATION.md)',
+      );
+    }
+  }
+  return warnings;
 }
 
 function hashToInt(label: string): number {
@@ -308,31 +347,33 @@ function evaluateCandidate(
 ): WaveCandidateResult {
   const flag = candidateLabel(flags);
   const candidateFactory = composeBot(adapter, [...(wave.baselineFlags ?? []), ...flags]);
+  const signalCollapseThreshold = wave.signalCollapseThreshold ?? DEFAULT_SIGNAL_COLLAPSE_THRESHOLD;
 
   const tiersPassed: TierId[] = [];
   const stats: Partial<Record<TierId, WaveTierStats>> = {};
+  const warnings = (): string[] => signalCollapseWarnings(stats, signalCollapseThreshold);
 
   // Screen compares against the baseline the candidate was built from (not
   // necessarily the match opponent) — this is what detects a no-op flag.
   const screenResult = screenCandidate(adapter, candidateFactory, baselineFactory, wave.screenProbe);
   if (screenResult.defect) {
-    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: screenResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: screenResult.defect, warnings: warnings() };
   }
   if (!screenResult.passed) {
     // No-op flag: rejected at screen, before any games are spent on it.
     const verdict = finalVerdict(tiersPassed, { pointWinRate: 0, pointScoreDiff: 0 }, wave.criteria);
-    return { flag, flags, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats, warnings: warnings() };
   }
   tiersPassed.push('screen');
 
   const smokeResult = runSmokeTier(adapter, candidateFactory, opponentFactory, smokeSeeds, wave.tiers.smoke);
   stats.smoke = smokeResult.stats;
   if (smokeResult.defect) {
-    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: smokeResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: smokeResult.defect, warnings: warnings() };
   }
   if (!smokeResult.passed) {
     const verdict = finalVerdict(tiersPassed, smokeResult.stats, wave.criteria);
-    return { flag, flags, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats, warnings: warnings() };
   }
   tiersPassed.push('smoke');
 
@@ -347,11 +388,11 @@ function evaluateCandidate(
   );
   stats.prune = pruneResult.stats;
   if (pruneResult.defect) {
-    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: pruneResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: pruneResult.defect, warnings: warnings() };
   }
   if (!pruneResult.passed) {
     const verdict = finalVerdict(tiersPassed, pruneResult.stats, wave.criteria);
-    return { flag, flags, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats, warnings: warnings() };
   }
   tiersPassed.push('prune');
 
@@ -366,18 +407,18 @@ function evaluateCandidate(
   );
   stats.holdout = holdoutResult.stats;
   if (holdoutResult.defect) {
-    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: holdoutResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: holdoutResult.defect, warnings: warnings() };
   }
   if (holdoutResult.passed) {
     tiersPassed.push('holdout');
   }
 
   const verdict = finalVerdict(tiersPassed, holdoutResult.stats, wave.criteria);
-  return { flag, flags, verdict, tiersPassed, stats };
+  return { flag, flags, verdict, tiersPassed, stats, warnings: warnings() };
 }
 
 export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
-  const consumedAt = new Date().toISOString();
+  const consumedAt = wave.recordedAt;
   const seedConsumption: string[] = [];
 
   wave.ledger.consume(wave.tiers.smoke.bankId, consumedAt);
@@ -427,5 +468,9 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
 
   const reportDigest = sha256Digest({ waveId: wave.waveId, results, seedConsumption, comparabilityKey });
 
-  return { waveId: wave.waveId, results, seedConsumption, comparabilityKey, reportDigest };
+  const warnings = results.flatMap((result) =>
+    result.warnings.map((warning) => `[${result.flag}] ${warning}`),
+  );
+
+  return { waveId: wave.waveId, results, seedConsumption, comparabilityKey, reportDigest, warnings };
 }

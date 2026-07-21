@@ -24,11 +24,28 @@ export interface ScoreOptions {
   readonly threshold?: number;
   readonly seedBase?: number;
   readonly c1SeedCount?: number;
+  /** Candidate seed pool searched for the longest (most-decision) games before
+   * the C1 reproducibility check samples from it (B1: late-triggering
+   * nondeterminism, e.g. mid-game reshuffles, is more likely to surface in
+   * long games). */
+  readonly c1CandidatePoolSize?: number;
+  /** Number of distinct game seeds compared for the C1 seed-diversity check
+   * (A1: deterministic games with a fixed initial position replay identically
+   * across every seed unless the adapter injects seed-indexed diversity). */
+  readonly c1DiversitySeedCount?: number;
+  /** Minimum fraction of distinct-seed trajectory pairs that must differ for
+   * the C1 seed-diversity check to pass. */
+  readonly c1DiversityThreshold?: number;
   readonly c2Playouts?: number;
   readonly c3SampleStates?: number;
   readonly c4SampleGames?: number;
   readonly c4MinGamesPerSecond?: number;
   readonly c4TargetGamesPerSecond?: number;
+  /** Decisions/sec floor; below this C4 is a blocker (A4: decisions/sec is the
+   * primary throughput signal, since games/sec conflates game length with
+   * adapter speed). */
+  readonly c4MinDecisionsPerSecond?: number;
+  readonly c4TargetDecisionsPerSecond?: number;
   readonly c5IdentitySeeds?: number;
   readonly c5HeadToHeadSeeds?: number;
   readonly c6ProbeSeeds?: number;
@@ -38,11 +55,16 @@ const DEFAULTS: Required<ScoreOptions> = {
   threshold: 70,
   seedBase: 10_000,
   c1SeedCount: 5,
+  c1CandidatePoolSize: 20,
+  c1DiversitySeedCount: 8,
+  c1DiversityThreshold: 0.8,
   c2Playouts: 200,
   c3SampleStates: 5,
   c4SampleGames: 60,
   c4MinGamesPerSecond: 20,
   c4TargetGamesPerSecond: 200,
+  c4MinDecisionsPerSecond: 500,
+  c4TargetDecisionsPerSecond: 5_000,
   c5IdentitySeeds: 200,
   c5HeadToHeadSeeds: 300,
   c6ProbeSeeds: 5,
@@ -163,9 +185,29 @@ function scoreC1(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   const blockers: AxisBlocker[] = [];
   const notes: string[] = [];
 
-  for (let i = 0; i < options.c1SeedCount; i += 1) {
+  // B1: bias the reproducibility sample toward the longest games in a
+  // candidate pool, since late-triggering nondeterminism (e.g. a mid-game
+  // reshuffle) is more likely to surface once a game has run for a while.
+  const poolSize = options.c1CandidatePoolSize;
+  const sampleCount = Math.min(options.c1SeedCount, poolSize);
+  const pool = Array.from({ length: poolSize }, (_, i) => {
     const gameSeed = options.seedBase + i;
     const botSeedBase = options.seedBase + 1000 + i;
+    const result = playRandomGame(adapter, gameSeed, botSeedBase);
+    const decisions = result.kind === 'completed' ? result.decisions : -1;
+    return { gameSeed, botSeedBase, decisions };
+  });
+  const selected = pool
+    .filter((entry) => entry.decisions >= 0)
+    .sort((a, b) => b.decisions - a.decisions)
+    .slice(0, sampleCount);
+
+  notes.push(
+    `reproducibility sample: ${selected.length} longest-game seed(s) selected from a pool of ${poolSize} — ` +
+      selected.map((entry) => `${entry.gameSeed} (${entry.decisions} decisions)`).join(', '),
+  );
+
+  for (const { gameSeed, botSeedBase } of selected) {
     const first = playRandomGame(adapter, gameSeed, botSeedBase);
     const second = playRandomGame(adapter, gameSeed, botSeedBase);
 
@@ -189,7 +231,60 @@ function scoreC1(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   }
 
   if (blockers.length === 0) {
-    notes.push(`${options.c1SeedCount} seed(s) replayed identically twice.`);
+    notes.push(`${selected.length} seed(s) replayed identically twice.`);
+  }
+
+  // A1: seed-diversity check. A deterministic game with a fixed initial
+  // position (chess-like) produces the exact same trajectory on every seed
+  // unless the adapter injects seed-indexed opening diversity — which makes
+  // paired-seed statistics meaningless (every seed is the same sample).
+  const diversitySeeds = Array.from(
+    { length: options.c1DiversitySeedCount },
+    (_, i) => options.seedBase + 40_000 + i,
+  );
+  // Use one fixed bot seed base for every diversity-check game so the only
+  // thing that can vary between trajectories is the game seed's effect on
+  // initial state — otherwise random-bot noise alone would make even a
+  // truly fixed-opening (chess-like) adapter look seed-diverse.
+  const diversityBotSeedBase = options.seedBase + 50_000;
+  const trajectories: (readonly string[] | null)[] = diversitySeeds.map((gameSeed) => {
+    const result = playRandomGame(adapter, gameSeed, diversityBotSeedBase);
+    return result.kind === 'completed' ? result.choiceKeys : null;
+  });
+
+  let totalPairs = 0;
+  let identicalPairs = 0;
+  for (let i = 0; i < trajectories.length; i += 1) {
+    const a = trajectories[i];
+    if (!a) continue;
+    for (let j = i + 1; j < trajectories.length; j += 1) {
+      const b = trajectories[j];
+      if (!b) continue;
+      totalPairs += 1;
+      const identical = a.length === b.length && a.every((key, index) => key === b[index]);
+      if (identical) {
+        identicalPairs += 1;
+      }
+    }
+  }
+
+  if (totalPairs > 0) {
+    const distinctPairs = totalPairs - identicalPairs;
+    const diversityRatio = distinctPairs / totalPairs;
+    notes.push(
+      `seed diversity: ${distinctPairs}/${totalPairs} distinct-seed trajectory pair(s) differ ` +
+        `(${identicalPairs} identical pair(s)) across ${options.c1DiversitySeedCount} seeds.`,
+    );
+    if (diversityRatio < options.c1DiversityThreshold) {
+      blockers.push({
+        code: 'C1_SEED_DIVERSITY',
+        message:
+          `only ${distinctPairs}/${totalPairs} distinct-seed trajectory pairs differ, ` +
+          `below the required ${(options.c1DiversityThreshold * 100).toFixed(0)}%`,
+        remediation:
+          '서로 다른 시드가 같은 게임을 재생함 — 결정론 게임이라면 시드-인덱스 오프닝 다양성을 주입하라 (docs/ONBOARDING-GUIDE.md §5)',
+      });
+    }
   }
 
   return axis('C1-determinism', blockers.length === 0 ? 100 : 0, blockers, notes);
@@ -203,6 +298,7 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   const blockers: AxisBlocker[] = [];
   const notes: string[] = [];
   let defectCount = 0;
+  let maxDecisionsDefectSeen = false;
   let illegalChoiceRejectionChecked = false;
 
   const legalChoicePools: unknown[][] = [];
@@ -213,6 +309,9 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
     const result = playRandomGame(adapter, gameSeed, botSeedBase);
     if (result.kind === 'defect') {
       defectCount += 1;
+      if (result.defect.type === 'max-decisions-exceeded') {
+        maxDecisionsDefectSeen = true;
+      }
       continue;
     }
     // Collect a few legal-choice pools (from replaying) for the illegal-choice
@@ -230,11 +329,16 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   }
 
   if (defectCount > 0) {
+    let remediation =
+      'Fix illegal-choice/empty-legal/invariant/max-decisions defects surfaced by loop/match.ts.';
+    if (maxDecisionsDefectSeen) {
+      remediation +=
+        ' 게임의 종국 보장 규칙(반복/무진행 무승부 등) 미구현 여부를 확인하라 — max-decisions defect can mean the adapter never terminates.';
+    }
     blockers.push({
       code: 'C2_DEFECTS',
       message: `${defectCount}/${options.c2Playouts} random playouts produced an adapter/bot defect`,
-      remediation:
-        'Fix illegal-choice/empty-legal/invariant/max-decisions defects surfaced by loop/match.ts.',
+      remediation,
     });
   }
 
@@ -308,6 +412,21 @@ function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
 function scoreC3(adapter: AnyGameAdapter, options: Required<ScoreOptions>): AxisResult {
   const notes: string[] = [];
 
+  if (adapter.spec.perfectInformation === true) {
+    if (adapter.hiddenInfoProbe) {
+      return axis('C3-hidden-info', 0, [
+        {
+          code: 'C3_PERFECT_INFO_CONTRADICTION',
+          message: 'spec.perfectInformation is true but adapter.hiddenInfoProbe is also implemented',
+          remediation:
+            'Perfect-information games have nothing to hide: remove hiddenInfoProbe, or unset spec.perfectInformation if this game does have hidden state.',
+        },
+      ], notes);
+    }
+    notes.push('완전정보 게임 — 은닉 검사 해당 없음');
+    return axis('C3-hidden-info', 100, [], notes);
+  }
+
   if (!adapter.hiddenInfoProbe) {
     return axis('C3-hidden-info', 0, [
       {
@@ -376,30 +495,39 @@ function scoreC4(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
 
   const start = process.hrtime.bigint();
   let completed = 0;
+  let totalDecisions = 0;
   for (let i = 0; i < options.c4SampleGames; i += 1) {
     const gameSeed = options.seedBase + 6000 + i;
     const botSeedBase = options.seedBase + 7000 + i;
     const result = playRandomGame(adapter, gameSeed, botSeedBase);
     if (result.kind === 'completed') {
       completed += 1;
+      totalDecisions += result.decisions;
     }
   }
   const elapsedNanos = process.hrtime.bigint() - start;
   const elapsedSeconds = Number(elapsedNanos) / 1_000_000_000;
   const gamesPerSecond = elapsedSeconds > 0 ? completed / elapsedSeconds : Infinity;
+  const decisionsPerSecond = elapsedSeconds > 0 ? totalDecisions / elapsedSeconds : Infinity;
 
-  notes.push(`measured ${gamesPerSecond.toFixed(1)} games/sec over ${options.c4SampleGames} sampled games.`);
+  // A4: decisions/sec is the primary throughput signal — games/sec alone
+  // conflates game length with adapter speed (a slow adapter playing short
+  // games can look faster than a fast adapter playing long games).
+  notes.push(
+    `measured ${decisionsPerSecond.toFixed(1)} decisions/sec (${totalDecisions} decisions across ${completed} completed games).`,
+  );
+  notes.push(`measured ${gamesPerSecond.toFixed(1)} games/sec over ${options.c4SampleGames} sampled games (reported only, not scored).`);
 
-  if (gamesPerSecond < options.c4MinGamesPerSecond) {
+  if (decisionsPerSecond < options.c4MinDecisionsPerSecond) {
     blockers.push({
       code: 'C4_THROUGHPUT_TOO_LOW',
-      message: `throughput ${gamesPerSecond.toFixed(1)} games/sec is below the hard floor of ${options.c4MinGamesPerSecond}`,
+      message: `throughput ${decisionsPerSecond.toFixed(1)} decisions/sec is below the hard floor of ${options.c4MinDecisionsPerSecond}`,
       remediation: 'Profile and optimize createInitialState/applyChoice/getLegalChoices for the hot loop.',
     });
     return axis('C4-throughput', 0, blockers, notes);
   }
 
-  const ratio = Math.min(1, gamesPerSecond / options.c4TargetGamesPerSecond);
+  const ratio = Math.min(1, decisionsPerSecond / options.c4TargetDecisionsPerSecond);
   const score = Math.round(ratio * 100);
   return axis('C4-throughput', score, blockers, notes);
 }
@@ -415,15 +543,26 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   const identitySeeds = Array.from({ length: options.c5IdentitySeeds }, (_, i) => options.seedBase + 8000 + i);
   const identity = calibrateIdentity(adapter, adapter.baselines.random, identitySeeds, options.seedBase + 9000);
 
+  // The identity expectation is NOT universally 0.5 — that is a 2-player
+  // coincidence. For a symmetric solo-winner game the per-player expectation is
+  // 1/playerCount (free-for-all) or 1/teamCount (team games). Tie handling can
+  // shift this slightly for 3+ players, so the tolerance is a band, not a point.
+  const identityCenter = adapter.spec.teams
+    ? 1 / adapter.spec.teams.length
+    : 1 / adapter.spec.playerCount;
+
   notes.push(
-    `identity calibration: meanWinRate=${identity.meanWinRate.toFixed(3)}, ` +
+    `identity calibration: meanWinRate=${identity.meanWinRate.toFixed(3)} ` +
+      `(expected center ${identityCenter.toFixed(3)} = 1/${adapter.spec.teams ? 'teamCount' : 'playerCount'}), ` +
       `seatWinRates=[${identity.seatWinRates.map((r) => r.toFixed(3)).join(', ')}], bias=${identity.bias.toFixed(3)}`,
   );
 
-  if (Math.abs(identity.meanWinRate - 0.5) > 0.05) {
+  if (Math.abs(identity.meanWinRate - identityCenter) > 0.05) {
     blockers.push({
       code: 'C5_IDENTITY_NOT_FAIR',
-      message: `random self-play mean win rate ${identity.meanWinRate.toFixed(3)} is not within 0.5+/-0.05`,
+      message:
+        `random self-play mean win rate ${identity.meanWinRate.toFixed(3)} is not within ` +
+        `${identityCenter.toFixed(3)}+/-0.05 (expected 1/${adapter.spec.teams ? 'teamCount' : 'playerCount'})`,
       remediation: 'Check seatingPlan coverage and outcome/scoring symmetry for a fair game.',
     });
   }

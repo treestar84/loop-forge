@@ -20,6 +20,18 @@ function mean(values: readonly number[]): number {
   return sum / values.length;
 }
 
+/** Find the team (a set of PlayerIds) containing `player`, or null when the
+ * game has no team declaration or the player is not in any declared team. */
+function teamOf(
+  teams: AnyGameAdapter['spec']['teams'],
+  player: PlayerId,
+): readonly PlayerId[] | null {
+  if (!teams) {
+    return null;
+  }
+  return teams.find((team) => team.includes(player)) ?? null;
+}
+
 export function runPairedBlock(
   adapter: AnyGameAdapter,
   candidate: AnyBotFactory,
@@ -54,16 +66,48 @@ export function runPairedBlock(
         `runPairedBlock: outcome.scores has no entry for player ${candidatePlayer}`,
       );
     }
-    const opponentScores = result.outcome.scores.filter(
-      (_, index) => index !== candidatePlayer,
-    );
-    const opponentMean = opponentScores.length > 0 ? mean(opponentScores) : 0;
+    const candidateTeam = teamOf(adapter.spec.teams, candidatePlayer as PlayerId);
 
-    const isWinner = result.outcome.winners.includes(candidatePlayer as PlayerId);
-    const winFraction = isWinner ? (result.outcome.winners.length > 1 ? 0.5 : 1) : 0;
+    let winFraction: number;
+    let scoreDelta: number;
+
+    if (candidateTeam) {
+      // B3: team-aware statistics. winFraction: 1 when every winner is a
+      // candidate teammate, 0.5 when the winner set is mixed (candidate's
+      // team + non-teammates), 0 when the candidate's team did not win at
+      // all. scoreDelta: candidate team's mean score minus the mean of every
+      // other team's players (never the candidate's own teammates).
+      const winners = result.outcome.winners;
+      const candidateTeamWon = winners.some((winner) => candidateTeam.includes(winner));
+      const allWinnersAreTeammates =
+        winners.length > 0 && winners.every((winner) => candidateTeam.includes(winner));
+      winFraction = allWinnersAreTeammates ? 1 : candidateTeamWon ? 0.5 : 0;
+
+      const teammateScores = candidateTeam.map((player) => {
+        const score = result.outcome.scores[player];
+        if (score === undefined) {
+          throw new Error(`runPairedBlock: outcome.scores has no entry for player ${player}`);
+        }
+        return score;
+      });
+      const opponentScores = result.outcome.scores.filter(
+        (_, index) => !candidateTeam.includes(index as PlayerId),
+      );
+      const opponentMean = opponentScores.length > 0 ? mean(opponentScores) : 0;
+      scoreDelta = mean(teammateScores) - opponentMean;
+    } else {
+      const opponentScores = result.outcome.scores.filter(
+        (_, index) => index !== candidatePlayer,
+      );
+      const opponentMean = opponentScores.length > 0 ? mean(opponentScores) : 0;
+
+      const isWinner = result.outcome.winners.includes(candidatePlayer as PlayerId);
+      winFraction = isWinner ? (result.outcome.winners.length > 1 ? 0.5 : 1) : 0;
+      scoreDelta = candidateScore - opponentMean;
+    }
 
     winSum += winFraction;
-    scoreSum += candidateScore - opponentMean;
+    scoreSum += scoreDelta;
   }
 
   const n = seatingPlan.length;

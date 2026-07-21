@@ -10,12 +10,12 @@
  * comparable.
  */
 
-import type { AnyBotFactory, AnyGameAdapter, StrategyFlagSpec } from '../contract/types';
+import type { AnyBotFactory, AnyGameAdapter } from '../contract/types';
 import {
   bootstrapPairedSeedBlocks,
   type PairedSeedOutcome,
 } from '../kernel/paired-stats';
-import { sha256Digest } from '../kernel/digest';
+import { canonicalJson, sha256Digest } from '../kernel/digest';
 import {
   finalVerdict,
   judgeTier,
@@ -26,6 +26,8 @@ import {
 } from '../kernel/gates';
 import { createSprt, type SprtConfig } from '../kernel/sprt';
 import type { SeedLedger } from '../kernel/seed-ledger';
+import { composeBot } from '../artifacts/baseline-registry';
+import { computeComparabilityKey } from '../artifacts/run-store';
 import { runMatch, type MatchDefect } from './match';
 import { runPairedBlock } from './paired-match';
 
@@ -46,12 +48,33 @@ export interface WaveScreenProbeConfig {
   readonly botSeedBase: number;
 }
 
+/**
+ * A candidate is one or more strategySurface flags composed in order (C4:
+ * bundle candidates for marginal/regression checks). The single-flag `flag`
+ * form is kept for backward compatibility; both forms resolve to the same
+ * `flags` array internally.
+ */
+export type WaveCandidateConfig =
+  | { readonly flag: string }
+  | { readonly flags: readonly string[] };
+
+export function candidateFlags(candidate: WaveCandidateConfig): readonly string[] {
+  return 'flags' in candidate ? candidate.flags : [candidate.flag];
+}
+
 export interface WaveConfig {
   readonly waveId: string;
-  /** Flags looked up in adapter.strategySurface by name. */
-  readonly candidates: ReadonlyArray<{ readonly flag: string }>;
+  readonly candidates: ReadonlyArray<WaveCandidateConfig>;
   readonly opponent: 'heuristic' | 'random';
   readonly ledger: SeedLedger;
+  /**
+   * Flags already adopted into the current baseline, composed onto
+   * adapter.baselines.heuristic before any candidate flags (C4 marginal
+   * check). Defaults to an empty array — a pristine heuristic baseline.
+   */
+  readonly baselineFlags?: readonly string[];
+  /** Identifies the baseline this wave's candidates build on, for comparabilityKey (C3). Defaults to 'unversioned'. */
+  readonly baselineVersion?: string;
   readonly tiers: {
     readonly smoke: WaveSmokeTierConfig;
     readonly prune: WaveFixedTierConfig;
@@ -61,11 +84,19 @@ export interface WaveConfig {
   readonly screenProbe: WaveScreenProbeConfig;
 }
 
+export interface WaveTierStats extends TierStats {
+  readonly blocks: number;
+  readonly drawRate?: number;
+  readonly winRateCI?: { readonly lower: number; readonly upper: number };
+}
+
 export interface WaveCandidateResult {
+  /** Back-compat single-string label: flags.length===1 ? flags[0] : flags.join('+'). */
   readonly flag: string;
+  readonly flags: readonly string[];
   readonly verdict: FinalVerdict;
   readonly tiersPassed: readonly TierId[];
-  readonly stats: Partial<Record<TierId, TierStats>>;
+  readonly stats: Partial<Record<TierId, WaveTierStats>>;
   readonly defect?: MatchDefect;
 }
 
@@ -73,6 +104,7 @@ export interface WaveReport {
   readonly waveId: string;
   readonly results: readonly WaveCandidateResult[];
   readonly seedConsumption: readonly string[];
+  readonly comparabilityKey: string;
   readonly reportDigest: string;
 }
 
@@ -93,15 +125,8 @@ function mean(values: readonly number[]): number {
   return sum / values.length;
 }
 
-function findFlagSpec(
-  adapter: AnyGameAdapter,
-  flag: string,
-): StrategyFlagSpec<unknown, unknown> {
-  const found = adapter.strategySurface.find((candidate) => candidate.flag === flag);
-  if (!found) {
-    throw new Error(`runWave: strategy flag "${flag}" not found in adapter.strategySurface`);
-  }
-  return found;
+function candidateLabel(flags: readonly string[]): string {
+  return flags.length === 1 ? (flags[0] as string) : flags.join('+');
 }
 
 /** Trajectory (choiceKeys) for seat-0-bot=seatZeroFactory vs every other seat=restFactory. */
@@ -171,19 +196,29 @@ function screenCandidate(
   return { passed: behaviorallyDistinct };
 }
 
-function currentStats(outcomes: readonly PairedSeedOutcome[]): TierStats {
+function drawRateOf(outcomes: readonly PairedSeedOutcome[]): number {
   if (outcomes.length === 0) {
-    return { pointWinRate: 0, pointScoreDiff: 0 };
+    return 0;
+  }
+  const draws = outcomes.filter((outcome) => outcome.candidateWinFraction === 0.5).length;
+  return draws / outcomes.length;
+}
+
+function currentStats(outcomes: readonly PairedSeedOutcome[]): WaveTierStats {
+  if (outcomes.length === 0) {
+    return { pointWinRate: 0, pointScoreDiff: 0, blocks: 0, drawRate: 0 };
   }
   return {
     pointWinRate: mean(outcomes.map((outcome) => outcome.candidateWinFraction)),
     pointScoreDiff: mean(outcomes.map((outcome) => outcome.candidateScoreDelta)),
+    blocks: outcomes.length,
+    drawRate: drawRateOf(outcomes),
   };
 }
 
 interface TierRunResult {
   readonly passed: boolean;
-  readonly stats: TierStats;
+  readonly stats: WaveTierStats;
   readonly defect?: MatchDefect;
 }
 
@@ -251,9 +286,12 @@ function runFixedTier(
     confidenceLevel: 0.95,
     seed: bootstrapSeed,
   });
-  const stats: TierStats = {
+  const stats: WaveTierStats = {
     pointWinRate: bootstrap.pointWinRate,
     pointScoreDiff: bootstrap.pointScoreDiff,
+    blocks: outcomes.length,
+    drawRate: drawRateOf(outcomes),
+    winRateCI: { lower: bootstrap.winRate.lower, upper: bootstrap.winRate.upper },
   };
   return { passed: judgeTier(tier, stats, criteria) === 'pass', stats };
 }
@@ -261,37 +299,40 @@ function runFixedTier(
 function evaluateCandidate(
   adapter: AnyGameAdapter,
   wave: WaveConfig,
-  baseFactory: AnyBotFactory,
-  flag: string,
+  baselineFactory: AnyBotFactory,
+  opponentFactory: AnyBotFactory,
+  flags: readonly string[],
   smokeSeeds: readonly number[],
   pruneSeeds: readonly number[],
   holdoutSeeds: readonly number[],
 ): WaveCandidateResult {
-  const flagSpec = findFlagSpec(adapter, flag);
-  const candidateFactory = flagSpec.apply(baseFactory);
+  const flag = candidateLabel(flags);
+  const candidateFactory = composeBot(adapter, [...(wave.baselineFlags ?? []), ...flags]);
 
   const tiersPassed: TierId[] = [];
-  const stats: Partial<Record<TierId, TierStats>> = {};
+  const stats: Partial<Record<TierId, WaveTierStats>> = {};
 
-  const screenResult = screenCandidate(adapter, candidateFactory, baseFactory, wave.screenProbe);
+  // Screen compares against the baseline the candidate was built from (not
+  // necessarily the match opponent) — this is what detects a no-op flag.
+  const screenResult = screenCandidate(adapter, candidateFactory, baselineFactory, wave.screenProbe);
   if (screenResult.defect) {
-    return { flag, verdict: 'failed', tiersPassed, stats, defect: screenResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: screenResult.defect };
   }
   if (!screenResult.passed) {
     // No-op flag: rejected at screen, before any games are spent on it.
     const verdict = finalVerdict(tiersPassed, { pointWinRate: 0, pointScoreDiff: 0 }, wave.criteria);
-    return { flag, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats };
   }
   tiersPassed.push('screen');
 
-  const smokeResult = runSmokeTier(adapter, candidateFactory, baseFactory, smokeSeeds, wave.tiers.smoke);
+  const smokeResult = runSmokeTier(adapter, candidateFactory, opponentFactory, smokeSeeds, wave.tiers.smoke);
   stats.smoke = smokeResult.stats;
   if (smokeResult.defect) {
-    return { flag, verdict: 'failed', tiersPassed, stats, defect: smokeResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: smokeResult.defect };
   }
   if (!smokeResult.passed) {
     const verdict = finalVerdict(tiersPassed, smokeResult.stats, wave.criteria);
-    return { flag, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats };
   }
   tiersPassed.push('smoke');
 
@@ -299,18 +340,18 @@ function evaluateCandidate(
     'prune',
     adapter,
     candidateFactory,
-    baseFactory,
+    opponentFactory,
     pruneSeeds,
     wave.criteria,
     hashToInt(`${wave.waveId}:${flag}:prune`),
   );
   stats.prune = pruneResult.stats;
   if (pruneResult.defect) {
-    return { flag, verdict: 'failed', tiersPassed, stats, defect: pruneResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: pruneResult.defect };
   }
   if (!pruneResult.passed) {
     const verdict = finalVerdict(tiersPassed, pruneResult.stats, wave.criteria);
-    return { flag, verdict, tiersPassed, stats };
+    return { flag, flags, verdict, tiersPassed, stats };
   }
   tiersPassed.push('prune');
 
@@ -318,21 +359,21 @@ function evaluateCandidate(
     'holdout',
     adapter,
     candidateFactory,
-    baseFactory,
+    opponentFactory,
     holdoutSeeds,
     wave.criteria,
     hashToInt(`${wave.waveId}:${flag}:holdout`),
   );
   stats.holdout = holdoutResult.stats;
   if (holdoutResult.defect) {
-    return { flag, verdict: 'failed', tiersPassed, stats, defect: holdoutResult.defect };
+    return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: holdoutResult.defect };
   }
   if (holdoutResult.passed) {
     tiersPassed.push('holdout');
   }
 
   const verdict = finalVerdict(tiersPassed, holdoutResult.stats, wave.criteria);
-  return { flag, verdict, tiersPassed, stats };
+  return { flag, flags, verdict, tiersPassed, stats };
 }
 
 export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
@@ -354,21 +395,37 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
     .seedsOf(wave.tiers.holdout.bankId)
     .slice(0, wave.tiers.holdout.blocks);
 
-  const baseFactory = adapter.baselines[wave.opponent];
+  // The candidate is always composed from adapter.baselines.heuristic plus
+  // this wave's already-adopted baselineFlags (C4 marginal check); the match
+  // opponent is the raw, unflagged baseline family selected by
+  // wave.opponent. With the default empty baselineFlags and opponent
+  // 'heuristic', these coincide exactly with pre-C4 behavior.
+  const baselineFactory = composeBot(adapter, wave.baselineFlags ?? []);
+  const opponentFactory = adapter.baselines[wave.opponent];
 
   const results = wave.candidates.map((candidateConfig) =>
     evaluateCandidate(
       adapter,
       wave,
-      baseFactory,
-      candidateConfig.flag,
+      baselineFactory,
+      opponentFactory,
+      candidateFlags(candidateConfig),
       smokeSeeds,
       pruneSeeds,
       holdoutSeeds,
     ),
   );
 
-  const reportDigest = sha256Digest({ waveId: wave.waveId, results, seedConsumption });
+  const specDigest = sha256Digest(canonicalJson(adapter.spec));
+  const comparabilityKey = computeComparabilityKey({
+    gameId: adapter.spec.gameId,
+    specDigest,
+    baselineVersion: wave.baselineVersion ?? 'unversioned',
+    opponentId: wave.opponent,
+    seedBankIds: [wave.tiers.smoke.bankId, wave.tiers.prune.bankId, wave.tiers.holdout.bankId],
+  });
 
-  return { waveId: wave.waveId, results, seedConsumption, reportDigest };
+  const reportDigest = sha256Digest({ waveId: wave.waveId, results, seedConsumption, comparabilityKey });
+
+  return { waveId: wave.waveId, results, seedConsumption, comparabilityKey, reportDigest };
 }

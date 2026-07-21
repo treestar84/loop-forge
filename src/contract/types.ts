@@ -45,6 +45,15 @@ export interface GameSpec {
    * for the candidate (index 0) — e.g. 2-player: [[0,1],[1,0]].
    */
   readonly seatingPlan: readonly SeatingPermutation[];
+  /**
+   * Declare true for perfect-information games (chess-like): the C3
+   * hidden-information axis then passes as not-applicable instead of requiring
+   * a hiddenInfoProbe. Games with any hidden state must omit this and ship a
+   * probe. Note that perfect-information games with a fixed initial position
+   * must still inject per-seed opening diversity (see docs/ONBOARDING-GUIDE.md
+   * §5), or the seed-diversity conformance check will block them.
+   */
+  readonly perfectInformation?: boolean;
   /** Hard cap on decisions per game; exceeding it is an adapter defect. */
   readonly maxDecisionsPerGame: number;
 }

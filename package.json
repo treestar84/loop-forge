@@ -1,0 +1,19 @@
+{
+  "name": "loop-forge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Game-agnostic NPC difficulty engineering platform: onboard a game, score its harness-readiness, then evolve bot strategies through statistically rigorous big-loop/small-loop experimentation.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "demo": "ts-node src/reference/demo.ts"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  }
+}

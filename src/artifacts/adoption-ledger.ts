@@ -109,9 +109,14 @@ export interface NearMissCandidate {
   };
 }
 
-/** The tier a near-miss entry last attempted: the highest TIER_ORDER tier
- * with recorded stats (holdout+ would have yielded a different verdict). */
+/** The tier a near-miss entry last attempted: 'regression' takes priority
+ * when present (O10, docs/GAP-ANALYSIS-7.md) since it only ever runs after
+ * holdout has already passed, making it strictly the most-recently-attempted
+ * tier; otherwise the highest TIER_ORDER tier with recorded stats. */
 function lastAttemptedTier(entry: AdoptionEntry): string {
+  if (entry.tierStats['regression'] !== undefined) {
+    return 'regression';
+  }
   for (let i = TIER_ORDER.length - 1; i >= 0; i--) {
     const tier = TIER_ORDER[i];
     if (tier !== undefined && entry.tierStats[tier] !== undefined) {
@@ -176,7 +181,7 @@ function renderEntryRow(
 }
 
 function highestPassedTier(entry: AdoptionEntry): string {
-  const tiers = ['holdout', 'prune', 'smoke', 'screen'];
+  const tiers = ['regression', 'holdout', 'prune', 'smoke', 'screen'];
   for (const tier of tiers) {
     if (entry.tierStats[tier] !== undefined) {
       return tier;

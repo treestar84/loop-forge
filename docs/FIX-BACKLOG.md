@@ -7,9 +7,15 @@
 
 ## 미착수
 
+고도화 라운드 (2026-07-23, 사용자 승인 — 5개 전부 적용 판정):
+
 | ID | 항목 | 출처 |
 |---|---|---|
-| O10 | 승격 게이트가 raw heuristic만 상대해 base-무시(override)형 후보의 "현 기준선 대비 회귀"를 검출 못 함 — 오목 v3(순수 mcts-s64)가 v2 합성봇보다 약한데도 승격됨(B열 100%→87.5%, 문맥 상이 주의). 승격 전 "현 기준선 합성봇 vs 후보" 회귀 게이트 추가 검토 | GAP-ANALYSIS-7 §1.5 |
+| O10 | 승격 게이트가 raw heuristic만 상대해 base-무시(override)형 후보의 "현 기준선 대비 회귀"를 검출 못 함 — 오목 v3(순수 mcts-s64)가 v2 합성봇보다 약한데도 승격됨(B열 100%→87.5%, 문맥 상이 주의). holdout 통과 후 "현 기준선 합성봇 vs 후보" regression 티어 추가(옵션, 미설정 시 기존 동작 불변) | GAP-ANALYSIS-7 §1.5 |
+| P1 | `search/mcts` 롤아웃 정책 옵션 — 랜덤 → `baselines.heuristic` 롤아웃(게임 중립 유지). 오목 `mcts-s64-hr` 후보로 재도전(regression 티어 포함 새 웨이브) | 리더보드 결과 2 (C열 100% 열세) |
+| P2 | 장기 이동 생성/장군 판정 성능 최적화 — **행동 보존**(고정 시드 trajectory digest 전후 완전 동일 강제). 목표 5배 이상, 달성 시 장기 MCTS 예산 상향 재실험 | GAP-ANALYSIS-7 §1.5 (s16 전패) |
+| P3 | mini-trick 관찰에 공개 행동 이력 추가 → `informationStateKey` perfect recall 달성 → MCCFR 재학습·재도전(새 플래그명 `mccfr-os-<iters>-pr`, 새 뱅크) | GAP-ANALYSIS-7 §3 |
+| P4 | contract에 `sampleStateFromObservation?`(결정화 훅) + `search/ismcts.ts` — 스플랜더 실증 먼저, 도미니언·하스스톤 단계 확장 | GAP-ANALYSIS-7 §2 이연분 해제 |
 
 이연 항목(IS-MCTS+결정화·레지스트리 버전 표현 일반화·정확 exploitability·
 vanilla CFR·동시수·O8 sampled exploitability)은 `docs/GAP-ANALYSIS-7.md` §2에

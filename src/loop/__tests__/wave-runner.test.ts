@@ -4,9 +4,11 @@ import { miniTrickAdapter } from '../../reference/mini-trick';
 import { eraseAdapter } from '../erase';
 import { runWave, type WaveConfig } from '../wave-runner';
 import { firstMoverWinsAdapter } from './helpers/first-mover-wins-game';
+import { strengthDeclareAdapter } from './helpers/strength-declare-game';
 
 const adapter = eraseAdapter(miniTrickAdapter);
 const collapseAdapter = eraseAdapter(firstMoverWinsAdapter);
+const strengthAdapter = eraseAdapter(strengthDeclareAdapter);
 
 // mini-trick scores range 0-6 (six tricks total), so kernel/gates'
 // DEFAULT_CRITERIA (minScoreDiff: 5, tuned for a larger-magnitude game) would
@@ -136,5 +138,131 @@ describe('runWave signal-collapse warnings (X1)', () => {
     expect(report.warnings.some((w) => w.includes('[pickB]') && w.includes('signal collapse'))).toBe(
       true,
     );
+  });
+});
+
+// O10 (docs/GAP-ANALYSIS-7.md): regression gate backward compatibility. A
+// WaveConfig that never sets wave.tiers.regression must behave byte-for-byte
+// like pre-O10 wave-runner — same seedConsumption, same reportDigest.
+describe('runWave backward compatibility (no regression tier configured)', () => {
+  it('produces a stable reportDigest identical to the pre-O10 value for an unchanged config', () => {
+    const ledger = makeLedger();
+    const report = runWave(adapter, baseWaveConfig(ledger));
+    expect(report.reportDigest).toBe(
+      'sha256-afd3bca47e9bf25ca757287295f888313c6a33b5f4baf588ce78d1a060560c30',
+    );
+    expect(report.seedConsumption).toEqual(['smoke-test', 'prune-test', 'holdout-test']);
+  });
+});
+
+// O10: regression gate — holdout-passing candidates get one more paired
+// evaluation against the current baseline composite bot (not the raw
+// heuristic opponent every other tier faces). This is the gate that would
+// have caught the omok v3 override bug (GAP-ANALYSIS-7.md O10): a candidate
+// that beats the raw opponent but is weaker than what's already adopted.
+describe('runWave regression tier (O10)', () => {
+  function makeStrengthLedger() {
+    const ledger = new SeedLedger();
+    ledger.reserve({
+      bankId: 'strength-smoke',
+      range: { start: 1000, end: 1009 },
+      purpose: 'smoke',
+      reservedAt: '2026-01-01T00:00:00.000Z',
+    });
+    ledger.reserve({
+      bankId: 'strength-prune',
+      range: { start: 2000, end: 2009 },
+      purpose: 'prune',
+      reservedAt: '2026-01-01T00:00:00.000Z',
+    });
+    ledger.reserve({
+      bankId: 'strength-holdout',
+      range: { start: 3000, end: 3009 },
+      purpose: 'holdout',
+      reservedAt: '2026-01-01T00:00:00.000Z',
+    });
+    ledger.reserve({
+      bankId: 'strength-regression',
+      range: { start: 4000, end: 4009 },
+      purpose: 'regression',
+      reservedAt: '2026-01-01T00:00:00.000Z',
+    });
+    return ledger;
+  }
+
+  const STRENGTH_CRITERIA: PromotionCriteria = { minWinRate: 0.53, minScoreDiff: 0.5 };
+
+  function strengthWaveConfig(
+    ledger: SeedLedger,
+    flag: string,
+  ): WaveConfig {
+    return {
+      waveId: 'strength-wave-1',
+      candidates: [{ flag }],
+      opponent: 'heuristic',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      ledger,
+      // The current baseline champion already has 'strong' composed in
+      // (strength 3) — this is what the regression tier compares candidates
+      // against, instead of the raw heuristic (strength 1).
+      baselineFlags: ['strong'],
+      tiers: {
+        smoke: {
+          bankId: 'strength-smoke',
+          sprt: { p0: 0.5, p1: 0.58, alpha: 0.05, beta: 0.05 },
+          maxBlocks: 10,
+          minBlocks: 5,
+        },
+        prune: { bankId: 'strength-prune', blocks: 10 },
+        holdout: { bankId: 'strength-holdout', blocks: 10 },
+        regression: { bankId: 'strength-regression', blocks: 10 },
+      },
+      criteria: STRENGTH_CRITERIA,
+      screenProbe: { seeds: [1, 2, 3], botSeedBase: 500 },
+    };
+  }
+
+  it('demotes an override-style candidate that beats the raw opponent but is weaker than the current baseline', () => {
+    const ledger = makeStrengthLedger();
+    const report = runWave(strengthAdapter, strengthWaveConfig(ledger, 'override'));
+    const result = report.results.find((r) => r.flag === 'override');
+    expect(result).toBeDefined();
+    // Clears screen/smoke/prune/holdout against the raw heuristic (strength
+    // 2 beats strength 1) but never reaches 'regression' in tiersPassed.
+    expect(result?.tiersPassed).toEqual(['screen', 'smoke', 'prune', 'holdout']);
+    expect(result?.verdict).toBe('near-miss');
+    expect(result?.stats.regression).toBeDefined();
+    expect(result?.stats.regression?.pointWinRate).toBe(0);
+    expect(result?.warnings.some((w) => w.includes('regression failed vs current baseline'))).toBe(
+      true,
+    );
+  });
+
+  it('adopts a candidate that ties the current baseline exactly (winFraction 0.5) in the regression tier', () => {
+    const ledger = makeStrengthLedger();
+    const report = runWave(strengthAdapter, strengthWaveConfig(ledger, 'twin'));
+    const result = report.results.find((r) => r.flag === 'twin');
+    expect(result).toBeDefined();
+    expect(result?.tiersPassed).toEqual(['screen', 'smoke', 'prune', 'holdout', 'regression']);
+    expect(result?.verdict).toBe('adopted');
+    expect(result?.stats.regression?.pointWinRate).toBeCloseTo(0.5);
+  });
+
+  it('consumes the regression seed bank only when the regression tier is configured', () => {
+    const ledger = makeStrengthLedger();
+    const report = runWave(strengthAdapter, strengthWaveConfig(ledger, 'twin'));
+    expect(report.seedConsumption).toEqual([
+      'strength-smoke',
+      'strength-prune',
+      'strength-holdout',
+      'strength-regression',
+    ]);
+    expect(ledger.get('strength-regression')?.status).toBe('consumed');
+
+    // Compare against a config that omits the regression tier entirely: the
+    // bank must stay untouched and out of seedConsumption (backward compat).
+    const noRegressionLedger = makeLedger();
+    const noRegressionReport = runWave(adapter, baseWaveConfig(noRegressionLedger));
+    expect(noRegressionReport.seedConsumption).not.toContain('strength-regression');
   });
 });

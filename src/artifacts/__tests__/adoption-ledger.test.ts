@@ -118,6 +118,31 @@ describe('extractNearMissCandidates', () => {
     ]);
   });
 
+  it('reports "regression" as failedAtTier when a candidate has holdout+regression stats (O10)', () => {
+    const record: AdoptionRecord = {
+      waveId: 'wave-regression',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      comparabilityKey: 'sha256-deadbeef',
+      baselineVersion: 'v1',
+      opponentId: 'heuristic',
+      entries: [
+        {
+          flags: ['override'],
+          verdict: 'near-miss',
+          tierStats: {
+            holdout: { pointWinRate: 0.65, pointScoreDiff: 6, blocks: 150 },
+            regression: { pointWinRate: 0.2, pointScoreDiff: -1, blocks: 40 },
+          },
+        },
+      ],
+      nextLoopNotes: [],
+    };
+    const candidates = extractNearMissCandidates(record, DEFAULT_CRITERIA);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.failedAtTier).toBe('regression');
+    expect(candidates[0]?.pointWinRate).toBeCloseTo(0.2);
+  });
+
   it('returns an empty array when there are no near-miss entries', () => {
     const record: AdoptionRecord = {
       waveId: 'wave-clean',

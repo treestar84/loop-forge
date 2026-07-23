@@ -85,6 +85,16 @@ export interface WaveConfig {
     readonly smoke: WaveSmokeTierConfig;
     readonly prune: WaveFixedTierConfig;
     readonly holdout: WaveFixedTierConfig;
+    /**
+     * O10 (docs/GAP-ANALYSIS-7.md): optional regression gate run after
+     * holdout passes, paired against the current baseline composite bot
+     * (baselineFactory) rather than the raw heuristic opponentFactory every
+     * other tier faces. Catches override-style candidates (e.g. a search
+     * flag whose `apply` discards `base`) that beat the raw opponent but are
+     * actually weaker than what's already adopted. Omitted entirely
+     * preserves pre-O10 behavior byte-for-byte (reportDigest unchanged).
+     */
+    readonly regression?: WaveFixedTierConfig;
   };
   readonly criteria: PromotionCriteria;
   readonly screenProbe: WaveScreenProbeConfig;
@@ -302,9 +312,9 @@ function runSmokeTier(
   return { passed: stats.pointWinRate > config.sprt.p0, stats };
 }
 
-/** Fixed-N tier (prune/holdout): runs every seed, bootstraps, judges via kernel/gates. */
+/** Fixed-N tier (prune/holdout/regression): runs every seed, bootstraps, judges via kernel/gates. */
 function runFixedTier(
-  tier: 'prune' | 'holdout',
+  tier: 'prune' | 'holdout' | 'regression',
   adapter: AnyGameAdapter,
   candidateFactory: AnyBotFactory,
   baseFactory: AnyBotFactory,
@@ -344,6 +354,7 @@ function evaluateCandidate(
   smokeSeeds: readonly number[],
   pruneSeeds: readonly number[],
   holdoutSeeds: readonly number[],
+  regressionSeeds: readonly number[],
 ): WaveCandidateResult {
   const flag = candidateLabel(flags);
   const candidateFactory = composeBot(adapter, [...(wave.baselineFlags ?? []), ...flags]);
@@ -411,6 +422,52 @@ function evaluateCandidate(
   }
   if (holdoutResult.passed) {
     tiersPassed.push('holdout');
+
+    // O10 (docs/GAP-ANALYSIS-7.md): only run when configured, so a wave
+    // without a regression tier behaves exactly as before. Opponent here is
+    // deliberately baselineFactory (the current baseline composite bot), not
+    // opponentFactory (the raw heuristic every other tier faces) — that
+    // substitution is the entire point of this tier: it's the only gate that
+    // can catch an override-style candidate that beats the raw opponent but
+    // is weaker than what's already adopted.
+    if (wave.tiers.regression !== undefined) {
+      const regressionResult = runFixedTier(
+        'regression',
+        adapter,
+        candidateFactory,
+        baselineFactory,
+        regressionSeeds,
+        wave.criteria,
+        hashToInt(`${wave.waveId}:${flag}:regression`),
+      );
+      stats.regression = regressionResult.stats;
+      if (regressionResult.defect) {
+        return {
+          flag,
+          flags,
+          verdict: 'failed',
+          tiersPassed,
+          stats,
+          defect: regressionResult.defect,
+          warnings: warnings(),
+        };
+      }
+      if (regressionResult.passed) {
+        tiersPassed.push('regression');
+      } else {
+        const threshold = wave.criteria.regressionMinWinRate ?? 0.5;
+        const regressionWarning =
+          `regression failed vs current baseline (winRate=${regressionResult.stats.pointWinRate.toFixed(3)} < ${threshold.toFixed(3)})`;
+        return {
+          flag,
+          flags,
+          verdict: 'near-miss',
+          tiersPassed,
+          stats,
+          warnings: [...warnings(), regressionWarning],
+        };
+      }
+    }
   }
 
   const verdict = finalVerdict(tiersPassed, holdoutResult.stats, wave.criteria);
@@ -427,6 +484,10 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
   seedConsumption.push(wave.tiers.prune.bankId);
   wave.ledger.consume(wave.tiers.holdout.bankId, consumedAt);
   seedConsumption.push(wave.tiers.holdout.bankId);
+  if (wave.tiers.regression !== undefined) {
+    wave.ledger.consume(wave.tiers.regression.bankId, consumedAt);
+    seedConsumption.push(wave.tiers.regression.bankId);
+  }
 
   const smokeSeeds = wave.ledger.seedsOf(wave.tiers.smoke.bankId);
   const pruneSeeds = wave.ledger
@@ -435,6 +496,10 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
   const holdoutSeeds = wave.ledger
     .seedsOf(wave.tiers.holdout.bankId)
     .slice(0, wave.tiers.holdout.blocks);
+  const regressionSeeds =
+    wave.tiers.regression !== undefined
+      ? wave.ledger.seedsOf(wave.tiers.regression.bankId).slice(0, wave.tiers.regression.blocks)
+      : [];
 
   // The candidate is always composed from adapter.baselines.heuristic plus
   // this wave's already-adopted baselineFlags (C4 marginal check); the match
@@ -454,6 +519,7 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
       smokeSeeds,
       pruneSeeds,
       holdoutSeeds,
+      regressionSeeds,
     ),
   );
 
@@ -463,7 +529,12 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
     specDigest,
     baselineVersion: wave.baselineVersion ?? 'unversioned',
     opponentId: wave.opponent,
-    seedBankIds: [wave.tiers.smoke.bankId, wave.tiers.prune.bankId, wave.tiers.holdout.bankId],
+    seedBankIds: [
+      wave.tiers.smoke.bankId,
+      wave.tiers.prune.bankId,
+      wave.tiers.holdout.bankId,
+      ...(wave.tiers.regression !== undefined ? [wave.tiers.regression.bankId] : []),
+    ],
   });
 
   const reportDigest = sha256Digest({ waveId: wave.waveId, results, seedConsumption, comparabilityKey });

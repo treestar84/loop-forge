@@ -34,6 +34,37 @@ describe('judgeTier', () => {
   });
 });
 
+// O10 (docs/GAP-ANALYSIS-7.md): regression tier judging ignores scoreDiff
+// entirely and uses its own, looser default threshold (0.5) — a candidate
+// exactly on par with the current baseline is a lateral swap, not a
+// regression.
+describe('judgeTier(\'regression\', ...)', () => {
+  it('passes when winRate is above the default 0.5 threshold, regardless of scoreDiff', () => {
+    const stats: TierStats = { pointWinRate: 0.6, pointScoreDiff: -100 };
+    expect(judgeTier('regression', stats, DEFAULT_CRITERIA)).toBe('pass');
+  });
+
+  it('passes exactly at winRate 0.5 (candidate on par with the champion is not a regression)', () => {
+    const stats: TierStats = { pointWinRate: 0.5, pointScoreDiff: 0 };
+    expect(judgeTier('regression', stats, DEFAULT_CRITERIA)).toBe('pass');
+  });
+
+  it('fails below winRate 0.5 (candidate is weaker than the current baseline)', () => {
+    const stats: TierStats = { pointWinRate: 0.4999, pointScoreDiff: 100 };
+    expect(judgeTier('regression', stats, DEFAULT_CRITERIA)).toBe('fail');
+  });
+
+  it('honors an explicit regressionMinWinRate override', () => {
+    const stats: TierStats = { pointWinRate: 0.55, pointScoreDiff: 0 };
+    expect(judgeTier('regression', stats, { ...DEFAULT_CRITERIA, regressionMinWinRate: 0.6 })).toBe(
+      'fail',
+    );
+    expect(judgeTier('regression', stats, { ...DEFAULT_CRITERIA, regressionMinWinRate: 0.5 })).toBe(
+      'pass',
+    );
+  });
+});
+
 describe('finalVerdict', () => {
   it('adopted when holdout passed', () => {
     const stats: TierStats = { pointWinRate: 0.6, pointScoreDiff: 10 };

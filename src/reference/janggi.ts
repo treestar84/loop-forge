@@ -307,6 +307,63 @@ function orthogonalRay(from: number, dr: number, dc: number): number[] {
   return ray;
 }
 
+/**
+ * Sliding rays (4 orthogonal directions + this square's palace diagonals, if
+ * any) for every board square, precomputed once at module load. Board
+ * geometry never changes at runtime, so this is bit-identical to calling
+ * `orthogonalRay`/`DIAGONAL_RAYS.get` fresh on every `chariotMoves`/
+ * `cannonMoves` call (the previous behavior) — it just avoids reallocating
+ * the same arrays on every single move-generation call (C4 throughput).
+ * Iteration order matches the original (orthogonal dirs in `ORTHOGONAL_DIRS`
+ * order, then diagonal rays), so callers that depend on ray order (none do
+ * today, but kept for safety) see no change.
+ */
+const SLIDING_RAYS: readonly (readonly (readonly number[])[])[] = (() => {
+  const table: (readonly number[])[][] = [];
+  for (let from = 0; from < BOARD_SIZE; from += 1) {
+    const rays: (readonly number[])[] = [];
+    for (const [dr, dc] of ORTHOGONAL_DIRS) {
+      rays.push(orthogonalRay(from, dr, dc));
+    }
+    for (const ray of DIAGONAL_RAYS.get(from) ?? []) {
+      rays.push(ray);
+    }
+    table.push(rays);
+  }
+  return table;
+})();
+
+/** (leg offset, destination offset) pairs for the Horse's 8 jump shapes — hoisted to
+ * module scope so `horseMoves`/`horseAttacksTarget` don't reallocate this literal
+ * on every call (C4 throughput; purely an allocation-count change, same values). */
+const HORSE_SPECS: readonly (readonly [readonly [number, number], readonly [number, number]])[] = [
+  [[-1, 0], [-2, -1]],
+  [[-1, 0], [-2, 1]],
+  [[0, 1], [-1, 2]],
+  [[0, 1], [1, 2]],
+  [[1, 0], [2, 1]],
+  [[1, 0], [2, -1]],
+  [[0, -1], [1, -2]],
+  [[0, -1], [-1, -2]],
+];
+
+/** (leg1 offset, leg2 offset, destination offset) triples for the Elephant's 8 jump
+ * shapes — hoisted for the same reason as HORSE_SPECS above. */
+const ELEPHANT_SPECS: readonly (readonly [
+  readonly [number, number],
+  readonly [number, number],
+  readonly [number, number],
+])[] = [
+  [[-1, 0], [-2, -1], [-3, -2]],
+  [[-1, 0], [-2, 1], [-3, 2]],
+  [[0, 1], [-1, 2], [-2, 3]],
+  [[0, 1], [1, 2], [2, 3]],
+  [[1, 0], [2, 1], [3, 2]],
+  [[1, 0], [2, -1], [3, -2]],
+  [[0, -1], [1, -2], [2, -3]],
+  [[0, -1], [-1, -2], [-2, -3]],
+];
+
 function slideRay(board: readonly Cell[], player: PlayerId, ray: readonly number[], out: number[]): void {
   for (const square of ray) {
     const occupant = board[square] as Cell;
@@ -351,10 +408,7 @@ function cannonJumpRay(
 
 function chariotMoves(board: readonly Cell[], player: PlayerId, from: number): number[] {
   const out: number[] = [];
-  for (const [dr, dc] of ORTHOGONAL_DIRS) {
-    slideRay(board, player, orthogonalRay(from, dr, dc), out);
-  }
-  for (const ray of DIAGONAL_RAYS.get(from) ?? []) {
+  for (const ray of SLIDING_RAYS[from] as readonly (readonly number[])[]) {
     slideRay(board, player, ray, out);
   }
   return out;
@@ -362,10 +416,7 @@ function chariotMoves(board: readonly Cell[], player: PlayerId, from: number): n
 
 function cannonMoves(board: readonly Cell[], player: PlayerId, from: number): number[] {
   const out: number[] = [];
-  for (const [dr, dc] of ORTHOGONAL_DIRS) {
-    cannonJumpRay(board, player, orthogonalRay(from, dr, dc), out);
-  }
-  for (const ray of DIAGONAL_RAYS.get(from) ?? []) {
+  for (const ray of SLIDING_RAYS[from] as readonly (readonly number[])[]) {
     cannonJumpRay(board, player, ray, out);
   }
   return out;
@@ -405,18 +456,8 @@ function generalGuardMoves(board: readonly Cell[], player: PlayerId, from: numbe
 function horseMoves(board: readonly Cell[], player: PlayerId, from: number): number[] {
   const row = rowOf(from);
   const col = colOf(from);
-  const specs: readonly [readonly [number, number], readonly [number, number]][] = [
-    [[-1, 0], [-2, -1]],
-    [[-1, 0], [-2, 1]],
-    [[0, 1], [-1, 2]],
-    [[0, 1], [1, 2]],
-    [[1, 0], [2, 1]],
-    [[1, 0], [2, -1]],
-    [[0, -1], [1, -2]],
-    [[0, -1], [-1, -2]],
-  ];
   const targets: number[] = [];
-  for (const [[legDr, legDc], [destDr, destDc]] of specs) {
+  for (const [[legDr, legDc], [destDr, destDc]] of HORSE_SPECS) {
     const legRow = row + legDr;
     const legCol = col + legDc;
     if (!inBoard(legRow, legCol) || board[idx(legRow, legCol)] !== 0) continue;
@@ -431,18 +472,8 @@ function horseMoves(board: readonly Cell[], player: PlayerId, from: number): num
 function elephantMoves(board: readonly Cell[], player: PlayerId, from: number): number[] {
   const row = rowOf(from);
   const col = colOf(from);
-  const specs: readonly [readonly [number, number], readonly [number, number], readonly [number, number]][] = [
-    [[-1, 0], [-2, -1], [-3, -2]],
-    [[-1, 0], [-2, 1], [-3, 2]],
-    [[0, 1], [-1, 2], [-2, 3]],
-    [[0, 1], [1, 2], [2, 3]],
-    [[1, 0], [2, 1], [3, 2]],
-    [[1, 0], [2, -1], [3, -2]],
-    [[0, -1], [1, -2], [2, -3]],
-    [[0, -1], [-1, -2], [-2, -3]],
-  ];
   const targets: number[] = [];
-  for (const [[leg1Dr, leg1Dc], [leg2Dr, leg2Dc], [destDr, destDc]] of specs) {
+  for (const [[leg1Dr, leg1Dc], [leg2Dr, leg2Dc], [destDr, destDc]] of ELEPHANT_SPECS) {
     const leg1Row = row + leg1Dr;
     const leg1Col = col + leg1Dc;
     if (!inBoard(leg1Row, leg1Col) || board[idx(leg1Row, leg1Col)] !== 0) continue;
@@ -533,12 +564,175 @@ function couldReach(type: number, from: number, target: number): boolean {
   }
 }
 
+/**
+ * Single-target reachability checks — one per piece type, each a boolean
+ * early-exit twin of the matching `*Moves` generator above (same shape/
+ * blocking rules, same geometry tables), used by `isSquareAttacked` /
+ * `isSquareAttackedFast` so a "can X reach square Y" query never has to
+ * allocate/enumerate that piece's full destination list just to test
+ * membership of one square (C4 throughput — this is the innermost loop of
+ * every self-check test of every candidate move).
+ */
+function chariotAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  for (const ray of SLIDING_RAYS[from] as readonly (readonly number[])[]) {
+    const pos = ray.indexOf(target);
+    if (pos === -1) continue;
+    for (let i = 0; i < pos; i += 1) {
+      if (board[ray[i] as number] !== 0) return false;
+    }
+    const occupant = board[target] as Cell;
+    return occupant === 0 || pieceOwner(occupant) !== player;
+  }
+  return false;
+}
+
+function cannonAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  for (const ray of SLIDING_RAYS[from] as readonly (readonly number[])[]) {
+    const pos = ray.indexOf(target);
+    if (pos === -1) continue;
+    let i = 0;
+    while (i < ray.length && board[ray[i] as number] === 0) i += 1;
+    if (i >= pos) return false; // no screen strictly before the target on this ray
+    const screen = board[ray[i] as number] as Cell;
+    if (pieceType(screen) === CANNON) return false;
+    for (let j = i + 1; j < pos; j += 1) {
+      if (board[ray[j] as number] !== 0) return false;
+    }
+    const occupant = board[target] as Cell;
+    if (occupant === 0) return true;
+    return pieceOwner(occupant) !== player && pieceType(occupant) !== CANNON;
+  }
+  return false;
+}
+
+function generalGuardAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  if (target === from) return true; // pass is always shape-legal, matching generalGuardMoves
+  const palace = palaceOf(player);
+  const row = rowOf(from);
+  const col = colOf(from);
+  for (const [dr, dc] of ORTHOGONAL_DIRS) {
+    const r = row + dr;
+    const c = col + dc;
+    if (inPalace(palace, r, c) && idx(r, c) === target) {
+      const occupant = board[target] as Cell;
+      return occupant === 0 || pieceOwner(occupant) !== player;
+    }
+  }
+  for (const ray of DIAGONAL_RAYS.get(from) ?? []) {
+    const first = ray[0] as number;
+    if (first === target && inPalace(palace, rowOf(first), colOf(first))) {
+      const occupant = board[target] as Cell;
+      return occupant === 0 || pieceOwner(occupant) !== player;
+    }
+  }
+  return false;
+}
+
+function horseAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  const row = rowOf(from);
+  const col = colOf(from);
+  for (const [[legDr, legDc], [destDr, destDc]] of HORSE_SPECS) {
+    const legRow = row + legDr;
+    const legCol = col + legDc;
+    if (!inBoard(legRow, legCol) || board[idx(legRow, legCol)] !== 0) continue;
+    const destRow = row + destDr;
+    const destCol = col + destDc;
+    if (!inBoard(destRow, destCol) || idx(destRow, destCol) !== target) continue;
+    const occupant = board[target] as Cell;
+    return occupant === 0 || pieceOwner(occupant) !== player;
+  }
+  return false;
+}
+
+function elephantAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  const row = rowOf(from);
+  const col = colOf(from);
+  for (const [[leg1Dr, leg1Dc], [leg2Dr, leg2Dc], [destDr, destDc]] of ELEPHANT_SPECS) {
+    const leg1Row = row + leg1Dr;
+    const leg1Col = col + leg1Dc;
+    if (!inBoard(leg1Row, leg1Col) || board[idx(leg1Row, leg1Col)] !== 0) continue;
+    const leg2Row = row + leg2Dr;
+    const leg2Col = col + leg2Dc;
+    if (!inBoard(leg2Row, leg2Col) || board[idx(leg2Row, leg2Col)] !== 0) continue;
+    const destRow = row + destDr;
+    const destCol = col + destDc;
+    if (!inBoard(destRow, destCol) || idx(destRow, destCol) !== target) continue;
+    const occupant = board[target] as Cell;
+    return occupant === 0 || pieceOwner(occupant) !== player;
+  }
+  return false;
+}
+
+function soldierAttacksTarget(board: readonly Cell[], player: PlayerId, from: number, target: number): boolean {
+  const row = rowOf(from);
+  const col = colOf(from);
+  const forwardDr = player === 0 ? -1 : 1;
+  let reaches = false;
+  if (inBoard(row + forwardDr, col) && idx(row + forwardDr, col) === target) reaches = true;
+  if (inBoard(row, col - 1) && idx(row, col - 1) === target) reaches = true;
+  if (inBoard(row, col + 1) && idx(row, col + 1) === target) reaches = true;
+  if (!reaches) {
+    reaches = soldierDiagonalTargets(player, from).includes(target);
+  }
+  if (!reaches) return false;
+  const occupant = board[target] as Cell;
+  return occupant === 0 || pieceOwner(occupant) !== player;
+}
+
+/** Dispatch to the piece-specific `*AttacksTarget` check above by `cell`'s type. */
+function pieceAttacksTarget(board: readonly Cell[], cell: Cell, from: number, target: number): boolean {
+  const player = pieceOwner(cell) as PlayerId;
+  switch (pieceType(cell)) {
+    case GENERAL:
+    case GUARD:
+      return generalGuardAttacksTarget(board, player, from, target);
+    case CHARIOT:
+      return chariotAttacksTarget(board, player, from, target);
+    case CANNON:
+      return cannonAttacksTarget(board, player, from, target);
+    case HORSE:
+      return horseAttacksTarget(board, player, from, target);
+    case ELEPHANT:
+      return elephantAttacksTarget(board, player, from, target);
+    case SOLDIER:
+      return soldierAttacksTarget(board, player, from, target);
+    default:
+      return false;
+  }
+}
+
 function isSquareAttacked(board: readonly Cell[], target: number, byPlayer: PlayerId): boolean {
   for (let i = 0; i < board.length; i += 1) {
     const cell = board[i] as Cell;
     if (pieceOwner(cell) !== byPlayer) continue;
     if (!couldReach(pieceType(cell), i, target)) continue;
-    if (rawMoves(board, i).includes(target)) return true;
+    if (pieceAttacksTarget(board, cell, i, target)) return true;
+  }
+  return false;
+}
+
+/**
+ * Same check as `isSquareAttacked`, but scans only `attackerSquares` (the
+ * precomputed list of `byPlayer`'s occupied squares) instead of the whole
+ * 90-square board, skipping `excludeIndex` (the square a candidate move just
+ * captured, if any — that piece is gone in `board` already, but the caller
+ * passes the index explicitly rather than mutating/rebuilding the list per
+ * candidate). Used by `legalMovesFor`'s inner loop, the hottest path in this
+ * file (C4 throughput): one call per candidate move, every ply.
+ */
+function isSquareAttackedFast(
+  board: readonly Cell[],
+  target: number,
+  byPlayer: PlayerId,
+  attackerSquares: readonly number[],
+  excludeIndex: number,
+): boolean {
+  for (const i of attackerSquares) {
+    if (i === excludeIndex) continue;
+    const cell = board[i] as Cell;
+    if (pieceOwner(cell) !== byPlayer) continue;
+    if (!couldReach(pieceType(cell), i, target)) continue;
+    if (pieceAttacksTarget(board, cell, i, target)) return true;
   }
   return false;
 }
@@ -565,15 +759,53 @@ function applyMove(board: readonly Cell[], move: JanggiMove): Cell[] {
  * Fully-legal moves for `player`: raw shape/blocking, minus self-check, minus
  * facing. Performance-sensitive (C4 throughput): mutates one scratch board
  * in place and undoes each candidate rather than allocating a fresh board
- * per candidate, and reuses cached general positions instead of re-scanning
- * the whole board for them on every candidate.
+ * per candidate, reuses cached general positions instead of re-scanning the
+ * whole board for them on every candidate, and precomputes the opponent's
+ * occupied-square list once so the safety check (`isSquareAttackedFast`)
+ * scans only that list rather than all 90 squares per candidate. The
+ * opponent's piece set never changes across candidates except when a
+ * candidate captures one of them — `excludeIndex` handles that without
+ * rebuilding the list.
  */
+/**
+ * Single-slot memo for `legalMovesFor`: `currentDecision` and `getLegalChoices`
+ * both call it for the exact same `(board, player)` pair within one ply (and
+ * `applyChoice` re-validates the choice against it too), and MCTS/rollout call
+ * `currentDecision` then `getLegalChoices` back-to-back on the same state —
+ * 2-3 redundant full recomputations per decision without this. `board` is a
+ * freshly allocated array on every `applyChoice`/`createInitialState` call
+ * and never mutated afterward (see `checkApplyChoicePurity`, O3), so
+ * reference equality is a sound cache key: a hit can only happen for the
+ * literal same board this function already computed moves for. The returned
+ * array is never mutated by any caller in this file (`shuffled` copies
+ * before shuffling; every other caller only reads), so sharing the cached
+ * array instance across calls is safe.
+ */
+let legalMovesCacheBoard: readonly Cell[] | null = null;
+let legalMovesCachePlayer: PlayerId | null = null;
+let legalMovesCacheResult: JanggiMove[] | null = null;
+
 function legalMovesFor(board: readonly Cell[], player: PlayerId): JanggiMove[] {
+  if (board === legalMovesCacheBoard && player === legalMovesCachePlayer) {
+    return legalMovesCacheResult as JanggiMove[];
+  }
+  const moves = computeLegalMovesFor(board, player);
+  legalMovesCacheBoard = board;
+  legalMovesCachePlayer = player;
+  legalMovesCacheResult = moves;
+  return moves;
+}
+
+function computeLegalMovesFor(board: readonly Cell[], player: PlayerId): JanggiMove[] {
   const moves: JanggiMove[] = [];
   const opponent = otherPlayer(player);
   const scratch = board.slice();
   const ownGeneralStart = findGeneral(board, player);
   const oppGeneralStart = findGeneral(board, opponent);
+  const opponentSquares: number[] = [];
+  for (let i = 0; i < board.length; i += 1) {
+    if (pieceOwner(board[i] as Cell) === opponent) opponentSquares.push(i);
+  }
   for (let from = 0; from < board.length; from += 1) {
     const cell = board[from] as Cell;
     if (pieceOwner(cell) !== player) continue;
@@ -584,9 +816,10 @@ function legalMovesFor(board: readonly Cell[], player: PlayerId): JanggiMove[] {
 
       const ownGeneralIndex = from === ownGeneralStart ? to : ownGeneralStart;
       const oppGeneralIndex = oppGeneralStart === to ? -1 : oppGeneralStart;
+      const excludeIndex = captured !== 0 ? to : -1;
       const safe =
         oppGeneralIndex !== -1 &&
-        !isSquareAttacked(scratch, ownGeneralIndex, opponent) &&
+        !isSquareAttackedFast(scratch, ownGeneralIndex, opponent, opponentSquares, excludeIndex) &&
         !generalsFacingAt(scratch, ownGeneralIndex, oppGeneralIndex);
       if (safe) {
         moves.push({ from, to });

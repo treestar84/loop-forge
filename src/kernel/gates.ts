@@ -4,7 +4,7 @@
  * not adoption — only holdout passing promotes a candidate into the baseline.
  */
 
-export type TierId = 'screen' | 'smoke' | 'prune' | 'holdout' | 'graduation';
+export type TierId = 'screen' | 'smoke' | 'prune' | 'holdout' | 'regression' | 'graduation';
 
 export const TIER_ORDER: readonly TierId[] = [
   'screen',
@@ -17,6 +17,13 @@ export const TIER_ORDER: readonly TierId[] = [
 export interface PromotionCriteria {
   readonly minWinRate: number;
   readonly minScoreDiff: number;
+  /**
+   * Pass threshold for the 'regression' tier (docs/GAP-ANALYSIS-7.md O10):
+   * paired win rate of the candidate against the current baseline composite
+   * bot (not the raw heuristic opponent every other tier faces). Defaults to
+   * 0.5 when unset.
+   */
+  readonly regressionMinWinRate?: number;
 }
 
 export const DEFAULT_CRITERIA: PromotionCriteria = {
@@ -36,6 +43,14 @@ export function judgeTier(
   stats: TierStats,
   criteria: PromotionCriteria,
 ): TierJudgement {
+  if (_tier === 'regression') {
+    // 0.5 is the meaningful default here: a candidate exactly on par with
+    // the champion (paired winRate 0.5) is a lateral swap, not a
+    // regression, so it still passes. Only a candidate that is actually
+    // *worse* than the current baseline composite bot should fail this
+    // tier.
+    return stats.pointWinRate >= (criteria.regressionMinWinRate ?? 0.5) ? 'pass' : 'fail';
+  }
   if (stats.pointWinRate >= criteria.minWinRate && stats.pointScoreDiff >= criteria.minScoreDiff) {
     return 'pass';
   }

@@ -324,6 +324,24 @@ function encodeChoice(choice: GomokuMove): string {
   return `${choice.row}-${choice.col}`;
 }
 
+/**
+ * MCTS simulation root (docs/GAP-ANALYSIS-7.md O6): the observation carries the
+ * full board and moveCount, so state is losslessly reconstructable except for
+ * `winner`/`openingId`, which are diagnostic-only fields not read by any move
+ * logic. `winner` is always null here because getObservation is only ever
+ * requested while a decision is pending (currentDecision(state) !== null),
+ * which by construction means the game is not yet won; `openingId` is never
+ * consulted after createInitialState, so a placeholder is safe.
+ */
+function reconstructState(observation: GomokuObservation): GomokuState {
+  return {
+    board: observation.board,
+    moveCount: observation.moveCount,
+    winner: null,
+    openingId: 'reconstructed',
+  };
+}
+
 function stoneCountInvariant(state: GomokuState): string | null {
   let filled = 0;
   let black = 0;
@@ -647,6 +665,7 @@ export const gomokuAdapter: GameAdapter<GomokuState, GomokuObservation, GomokuCh
     perfectInformation: true,
     scoreMargin: 'none',
     maxDecisionsPerGame: TOTAL_CELLS,
+    utility: 'zero-sum',
   },
   createInitialState,
   currentDecision,
@@ -655,6 +674,7 @@ export const gomokuAdapter: GameAdapter<GomokuState, GomokuObservation, GomokuCh
   applyChoice,
   getOutcome,
   encodeChoice,
+  reconstructState,
   invariants: [stoneCountInvariant, singleWinnerInvariant],
   replayFixtures,
   baselines: {

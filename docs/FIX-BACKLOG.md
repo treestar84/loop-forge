@@ -7,16 +7,37 @@
 
 ## 미착수
 
-_(없음 — R9까지 전부 완료, 2026-07-22)_
+| ID | 항목 | 출처 |
+|---|---|---|
+| O10 | 승격 게이트가 raw heuristic만 상대해 base-무시(override)형 후보의 "현 기준선 대비 회귀"를 검출 못 함 — 오목 v3(순수 mcts-s64)가 v2 합성봇보다 약한데도 승격됨(B열 100%→87.5%, 문맥 상이 주의). 승격 전 "현 기준선 합성봇 vs 후보" 회귀 게이트 추가 검토 | GAP-ANALYSIS-7 §1.5 |
 
-전체 설계 근거는 승인된 계획 문서(`게임 분류기 → 파이프라인 설계도 조립 계층 설계`,
-2026-07-21)와 `docs/GAP-ANALYSIS-4.md`/`-5.md`/`-6.md`,
-`docs/BENCHMARK-EXPERIMENT.md`/`-LEADERBOARD.md` 참고. Z1~Z8, W1~W8, H1~H10, S1,
-R1~R9 전부 완료(아래 완료 표).
+이연 항목(IS-MCTS+결정화·레지스트리 버전 표현 일반화·정확 exploitability·
+vanilla CFR·동시수·O8 sampled exploitability)은 `docs/GAP-ANALYSIS-7.md` §2에
+사유와 함께 기록.
 
 ## 처치 순서 권고
 
-_(전부 완료 — 새 갭 분석 라운드가 시작되면 이 섹션에 다시 채운다.)_
+O10이 다음 라운드 최우선 — 탐색/학습 후보가 늘수록 override형 후보 비중이 커져
+회귀 미검출 위험이 커진다.
+
+## 완료 — OpenSpiel 흡수 라운드 (2026-07-23, `docs/GAP-ANALYSIS-7.md`)
+
+| ID | 처치 내용 | 증거 |
+|---|---|---|
+| O1 | `GameSpec.utility?` + `informationStateKey?`/`reconstructState?` 옵션 추가(하위호환) | 34 suites/390 tests 통과 시점 편입, 기존 API 무손상 |
+| O2 | `classifyGame`에 `utilityStructure`/`utilityDeclared`(추론 없음) | classify 테스트 3케이스 추가 |
+| O3 | C2 전이 순수성 검사(api_test 흡수, 첫 플레이아웃 10결정 한정) — `C2_APPLYCHOICE_MUTATED_INPUT` blocker | 변조 픽스처로 검출 + mini-trick 무손상 회귀 테스트 |
+| O4 | `withStrategyFlags`(compose.ts) — 러너의 후보 주입 통로, 이름 중복 throw | 단위 테스트 4건 |
+| O5 | `src/search/mcts.ts` UCT MCTS 충실 이식(Apache-2.0 파생 표기), `search: [contract, kernel]` 계층 등록 | 결정론·전술픽스처·에러 테스트 통과 |
+| O6 | 오목 `mcts-s64` **adopted**(holdout 1.000/15블록, v3 승격) · 장기 `mcts-s16` failed(smoke 0.000 — 처리량 제약 실측) · 스플랜더 제외(덱 순서 은닉) · 2회 실행 중복 승격 없음 | `runs/{gomoku,janggi}/mcts-wave-1/`, 처리량 실측표(오목 s64 321ms/판, 장기 s16 17.8s/판) |
+| O7 | `src/learn/mccfr.ts` outcome-sampling MCCFR 이식 + PolicyTable(digest 봉인) + mini-trick 러너. mccfr-os-200000은 prune 탈락 **screened**(특례 없음) | 학습 9.5초/1,254,298 infosets, `runs/mini-trick/policy-*.json`, 테스트 4건 |
+| O8 | 스킵 — sampled BR 구현이 반나절 기준 초과 판단, GAP-ANALYSIS-7 §2 이연 목록에 사유 기록 | — |
+| O9 | DESIGN §1 import 지도(search/learn)·§7 라이선스 정책 개정, CREDITS.md 파생 절, GAP-ANALYSIS-7, 리더보드 "결과 2" | 메인 세션 직접 작성 |
+| 3열 v3 | 오목 벤치마크 재실행(N=2,000, 1594.5초): A 100% / B 87.5%(CI 86.3–88.7) / C 100%(Opus) — O10 갭과 holdout 소표본 과대추정 실측 | `runs/gomoku/benchmark-3col-v3.{json,md}` |
+
+**최종 결합 검증 4회차** (2026-07-23, O1~O9 반영): tsc 0에러, **36 suites /
+401 tests 전부 통과**. 오목 registry `['v1','v2','v3']`(v3=+mcts-s64), 장기
+`['v1']`(2회 실행 무손상), mini-trick `['v1']` — 채택 여부와 정확히 일치.
 
 ## 완료
 

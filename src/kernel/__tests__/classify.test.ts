@@ -60,4 +60,32 @@ describe('classifyGame', () => {
     expect(classifyGame(shortSpec).decisionMagnitude).toBe('short');
     expect(classifyGame(longSpec).decisionMagnitude).toBe('long');
   });
+
+  // O2: spec.utility -> classification.utilityStructure/utilityDeclared.
+  // Never inferred — a 2-player win/loss game left undeclared must still
+  // classify as 'general', not 'zero-sum'. mini-trick itself now declares
+  // utility: 'zero-sum' (docs/GAP-ANALYSIS-7.md O7-b: its scores always sum
+  // to a constant 6, so it is genuinely zero-sum after centering) — this
+  // test strips that declaration back off to exercise the omitted-field
+  // default independently of that fact.
+  it('defaults to general/undeclared when spec.utility is omitted, even for a 2-player game', () => {
+    const { utility: _utility, ...specWithoutUtility } = miniTrickAdapter.spec;
+    const classification = classifyGame(specWithoutUtility);
+    expect(classification.utilityStructure).toBe('general');
+    expect(classification.utilityDeclared).toBe(false);
+  });
+
+  it('classifies zero-sum only when spec.utility is explicitly declared', () => {
+    const zeroSumSpec = { ...miniTrickAdapter.spec, utility: 'zero-sum' as const };
+    const classification = classifyGame(zeroSumSpec);
+    expect(classification.utilityStructure).toBe('zero-sum');
+    expect(classification.utilityDeclared).toBe(true);
+  });
+
+  it('classifies general-sum when spec.utility is explicitly declared as general', () => {
+    const generalSpec = { ...miniTrickAdapter.spec, utility: 'general' as const };
+    const classification = classifyGame(generalSpec);
+    expect(classification.utilityStructure).toBe('general');
+    expect(classification.utilityDeclared).toBe(true);
+  });
 });

@@ -44,8 +44,15 @@
 ```
 contract ← kernel ← loop ← onboarding
                   ↖ artifacts
+              ↖ search (mcts — OpenSpiel 충실 이식, contract+kernel만)
+              ↖ learn  (mccfr — 〃)
 reference → (contract, kernel/rng)          demo, reference/runners/* → 전 계층 (앱 경계)
 ```
+
+`search/`·`learn/`(2026-07-23, `docs/GAP-ANALYSIS-7.md`)의 산출물은 전부
+`BotFactory`다 — 루프 엔진은 이들의 존재를 모르고, 러너(앱 경계)가
+`withStrategyFlags`로 어댑터에 후보 플래그를 덧붙여 웨이브에 주입한다. 탐색/학습
+봇이라도 holdout까지 통과해야 adopted(불변 규칙 3에 특례 없음).
 
 `reference/runners/<gameId>.ts`는 게임별 실행 진입점이다(H5/Z3) — `demo.ts`와
 동일하게 앱 경계로 취급되어 전 계층을 import할 수 있고 `Date.now()`도 허용된다
@@ -229,8 +236,12 @@ pointWinRate, pointScoreDiff, winRateCI, gap}`을 기계가 읽을 수 있는 �
 | Fishtest / OpenBench | SPRT 순차 검정, "패치 후보 → 대량 대국 → 통계 게이트" 운영 모델, 분산 워커(v2 로드맵) | `kernel/sprt.ts`, 게이트 설계 |
 | 티추 NPC 하네스 (선행 프로젝트) | 시드 원장 · 페어드 부트스트랩 · 다단 게이트 · 캘리브레이션 · 행동 지문 스크리닝 · digest 봉인 · parity 요구 — 그리고 이 전부의 **실사고 근거** | `kernel/*`, `onboarding/*` 전반 |
 | Optuna/Ax | (개념만) 탐색-활용 균형의 후보 예산 배분 — v2 큰 루프 자동화에서 참고 | ROADMAP |
+| OpenSpiel (2차 흡수, 2026-07-23) | `information_state_string`/`GameType.utility` 시맨틱, `api_test` 전이 순수성 검사, **UCT MCTS·outcome-sampling MCCFR 알고리즘 충실 이식** | `contract/types.ts` 옵션 필드, `onboarding/score.ts` C2, `search/mcts.ts`, `learn/mccfr.ts` (`docs/GAP-ANALYSIS-7.md`) |
 
-라이선스: 코드 복사 없음. 전부 아이디어 수준 체리픽 + 자체 구현.
+라이선스: 기본 정책은 코드 복사 없음(아이디어 수준 체리픽 + 자체 구현).
+**예외(2026-07-23 개정)**: OpenSpiel(Apache-2.0)의 알고리즘 구현(`python/algorithms/`
+의 MCTS·MCCFR)에 한해 로직을 기준 삼은 충실 이식(faithful port)을 허용한다 —
+파생 사실과 원 출처를 해당 파일 상단 주석과 `docs/CREDITS.md`에 표기한다.
 
 ## 8. v1 범위 (이 저장소의 첫 구현)
 

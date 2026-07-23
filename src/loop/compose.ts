@@ -1,4 +1,4 @@
-import type { AnyBotFactory, AnyGameAdapter } from '../contract/types';
+import type { AnyBotFactory, AnyGameAdapter, StrategyFlagSpec } from '../contract/types';
 
 /**
  * Compose a bot factory by starting at `adapter.baselines.heuristic` and
@@ -21,4 +21,30 @@ export function composeBot(adapter: AnyGameAdapter, flags: readonly string[]): A
     factory = spec.apply(factory);
   }
   return factory;
+}
+
+/**
+ * Return a new adapter whose strategySurface is the original's plus
+ * `extraFlags`, leaving the original adapter untouched. This is the injection
+ * point a runner (app boundary) uses to add search/learn bot candidates
+ * (MCTS, CFR, …) to a wave without editing the adapter's own source — the
+ * search/learn modules are reference-layer-adjacent tooling that only a
+ * runner imports, never the adapter itself. Throws if any extraFlags entry
+ * reuses a flag name already present on the adapter, since a silent name
+ * collision would make composeBot resolve to the wrong candidate.
+ */
+export function withStrategyFlags(
+  adapter: AnyGameAdapter,
+  extraFlags: ReadonlyArray<StrategyFlagSpec<unknown, unknown>>,
+): AnyGameAdapter {
+  const existingFlags = new Set(adapter.strategySurface.map((spec) => spec.flag));
+  for (const extra of extraFlags) {
+    if (existingFlags.has(extra.flag)) {
+      throw new Error(`withStrategyFlags: flag "${extra.flag}" already exists on adapter.strategySurface`);
+    }
+  }
+  return {
+    ...adapter,
+    strategySurface: [...adapter.strategySurface, ...extraFlags],
+  };
 }

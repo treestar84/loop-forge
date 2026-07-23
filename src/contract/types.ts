@@ -63,6 +63,15 @@ export interface GameSpec {
    * real information.
    */
   readonly scoreMargin?: 'none' | 'scored';
+  /**
+   * Absorbed from OpenSpiel's GameType.utility. 'zero-sum' means one player's
+   * gain is exactly another's loss (classic minimax); 'general' covers
+   * general-sum and cooperative payoff structures. Feeds classifyGame and any
+   * CFR-style learning algorithm's convergence-guarantee decision. Omitted is
+   * treated as 'general' — a conservative default, since assuming zero-sum
+   * without a declaration would falsely promise convergence guarantees.
+   */
+  readonly utility?: 'zero-sum' | 'general';
 }
 
 export interface PendingDecision {
@@ -179,6 +188,27 @@ export interface GameAdapter<TState, TObservation, TChoice> {
   readonly hiddenInfoProbe?: HiddenInfoProbe<TState>;
   /** Required for the C7 parity axis to score above zero. */
   readonly replayFixtures?: readonly ReplayFixture[];
+
+  /**
+   * Absorbed from OpenSpiel's information_state_string: a stable key for the
+   * player's information set, used by CFR-family learning algorithms. When
+   * omitted, the learning module falls back to digest(decisionPoint +
+   * canonical observation) — that fallback does NOT guarantee perfect recall
+   * (it can collide information sets that a true information-state key would
+   * keep distinct), so declaring this explicitly is required for sound CFR.
+   */
+  informationStateKey?(state: TState, player: PlayerId): string;
+  /**
+   * Full-information-only: reconstruct the entire game state from a single
+   * player's observation. This is the channel a search bot (MCTS) uses to
+   * obtain a simulation root from its own observation. It does not weaken the
+   * bot contract — bots still only ever see observations, never states — but
+   * a hidden-information game cannot losslessly reconstruct full state from
+   * one player's observation by definition, so implementing this method on a
+   * hidden-information adapter is a contract violation, not a valid choice:
+   * only games with spec.perfectInformation === true may declare it.
+   */
+  reconstructState?(observation: TObservation): TState;
 
   /** Baseline ecosystem — mandatory for calibration and the ladder floor. */
   readonly baselines: {

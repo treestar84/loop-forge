@@ -17,6 +17,17 @@
 | 윙스팬(core) | [keithgw/wingspan](https://github.com/keithgw/wingspan) | Python | **주의**: 이 저장소는 실제 윙스팬 보드게임 룰이 아니라 RL 학습용으로 극단 단순화된 자원게임(서식지·트리거·알·목표카드 없음)이다. "소스가 최종 근거" 원칙대로 이 단순화된 버전을 그대로 온보딩했다 — `src/reference/wingspan.ts`의 어댑터는 실제 시판 윙스팬의 재현이 **아니다**. | `src/reference/wingspan.ts` |
 | 하스스톤(mirror) | [danielyule/hearthbreaker](https://github.com/danielyule/hearthbreaker) | Python | 중립 카드 12장, 미러 매치 전용(직업 카드·인터럽트 범위 밖) | `src/reference/hearthstone.ts` |
 
+## 알고리즘 충실 이식 (코드 수준 파생)
+
+게임 콘텐츠와 별개로, 아래 모듈은 [google-deepmind/open_spiel](https://github.com/google-deepmind/open_spiel)
+(Apache-2.0)의 참조 구현을 기준 삼아 TypeScript로 **충실 이식(faithful port)**한
+파생물이다(DESIGN.md §7 라이선스 정책 예외, 2026-07-23 개정):
+
+| 모듈 | 원 구현 | 이식 범위 |
+|---|---|---|
+| `src/search/mcts.ts` | `open_spiel/python/algorithms/mcts.py` | UCT 선택·랜덤 롤아웃 평가기. chance/동시수 처리는 범위 밖(Loop Forge는 랜덤성을 시드에 접음) |
+| `src/learn/mccfr.ts` | `open_spiel/python/algorithms/outcome_sampling_mccfr.py` | outcome-sampling MCCFR. chance 샘플링을 게임 시드 샘플링으로 대응 |
+
 ## 참고: 로프-포지 자체의 설계 아이디어 출처
 
 게임 콘텐츠가 아니라 **로프-포지 아키텍처 자체**가 참고한 선행 프로젝트(OpenSpiel,

@@ -361,12 +361,49 @@ function scoreC2ContentCoverage(
   return { blockers, notes, coveragePercent };
 }
 
+/**
+ * O3: applyChoice transition-purity check (OpenSpiel api_test absorption).
+ * Only the first playout's first 10 decisions are checked — a canonicalJson
+ * snapshot before/after each applyChoice call is enough to catch a mutating
+ * adapter cheaply, without re-snapshotting every decision of every playout.
+ */
+function checkApplyChoicePurity(adapter: AnyGameAdapter, gameSeed: number): AxisBlocker[] {
+  const blockers: AxisBlocker[] = [];
+  let state = adapter.createInitialState(gameSeed);
+  for (let step = 0; step < 10; step += 1) {
+    const decision = adapter.currentDecision(state);
+    if (!decision) break;
+    const legal = adapter.getLegalChoices(state);
+    const choice = legal[0];
+    if (choice === undefined) break;
+
+    const before = canonicalJson(state);
+    const next = adapter.applyChoice(state, choice);
+    const after = canonicalJson(state);
+    if (before !== after) {
+      blockers.push({
+        code: 'C2_APPLYCHOICE_MUTATED_INPUT',
+        message: `applyChoice mutated its input state at decision step ${step} (seed ${gameSeed})`,
+        remediation:
+          'applyChoice must return a new state and leave the state it was given untouched — transitions must be pure ' +
+          '(OpenSpiel api_test absorption). 보통 이건 게임 규칙 구현이 입력으로 받은 상태 객체를 그 자리에서 직접 수정(배열 push, ' +
+          '필드 재할당 등)하고 그 객체를 그대로 반환할 때 발생합니다. applyChoice 안에서는 상태를 복사한 새 객체를 만들어 반환하세요.',
+      });
+      break;
+    }
+    state = next;
+  }
+  return blockers;
+}
+
 function scoreC2(adapter: AnyGameAdapter, options: Required<ScoreOptions>): AxisResult {
   const blockers: AxisBlocker[] = [];
   const notes: string[] = [];
   let defectCount = 0;
   let maxDecisionsDefectSeen = false;
   let illegalChoiceRejectionChecked = false;
+
+  blockers.push(...checkApplyChoicePurity(adapter, options.seedBase + 2000));
 
   const legalChoicePools: { legal: unknown[]; sourceGameSeed: number; depth: number }[] = [];
   const contentInventory = adapter.contentInventory;

@@ -13,6 +13,7 @@ export type InformationStructure = 'perfect' | 'hidden';
 export type ScoreStructure = 'win-loss-only' | 'scored';
 export type ContentWeight = 'none' | 'light' | 'heavy';
 export type DecisionMagnitude = 'short' | 'long';
+export type UtilityStructure = 'zero-sum' | 'general';
 
 export interface GameClassification {
   readonly matchStructure: MatchStructure;
@@ -23,6 +24,11 @@ export interface GameClassification {
   readonly decisionMagnitude: DecisionMagnitude;
   /** Whether spec.scoreMargin was explicitly declared (vs. defaulted). */
   readonly scoreMarginDeclared: boolean;
+  /** 'zero-sum' only when spec.utility is explicitly declared as such — never
+   * inferred from playerCount/win-loss shape, even for a 2-player game. */
+  readonly utilityStructure: UtilityStructure;
+  /** Whether spec.utility was explicitly declared (vs. defaulted to 'general'). */
+  readonly utilityDeclared: boolean;
 }
 
 /** Content inventory length at or above which contentWeight is 'heavy'. */
@@ -67,5 +73,7 @@ export function classifyGame(
     decisionMagnitude:
       spec.maxDecisionsPerGame >= DECISION_MAGNITUDE_LONG_THRESHOLD ? 'long' : 'short',
     scoreMarginDeclared: spec.scoreMargin !== undefined,
+    utilityStructure: spec.utility === 'zero-sum' ? 'zero-sum' : 'general',
+    utilityDeclared: spec.utility !== undefined,
   };
 }

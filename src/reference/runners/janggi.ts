@@ -35,9 +35,26 @@ import { renderGameSummaryMarkdown } from '../../artifacts/game-summary';
 import { measureNoiseFloor } from '../../loop/calibrate';
 import { recommendBlockCount } from '../../kernel/paired-stats';
 import { eraseAdapter } from '../../loop/erase';
+import { withStrategyFlags } from '../../loop/compose';
+import { mctsBotFactory, type MctsConfig } from '../../search/mcts';
+import type { StrategyFlagSpec } from '../../contract/types';
 import { janggiAdapter } from '../janggi';
 
 const GAME_ID = 'janggi';
+
+/**
+ * Simulation budget (docs/GAP-ANALYSIS-7.md O6). Measured with a throughput
+ * script (scratch, not checked in): janggi's move generation is much more
+ * expensive per node than gomoku's (full-board attack scans for every
+ * candidate move, both in tree traversal and in each random rollout step),
+ * averaging ~18s/game at only 16 simulations. This budget plus the small
+ * tier sizes below keeps the whole mcts-wave-1 well under the
+ * 15-minutes-per-game runner ceiling; rolloutCount is trimmed to 1 (from
+ * mcts.ts's typical default) specifically because rollout steps re-run the
+ * same expensive legal-move generation to the ply cap.
+ */
+const JANGGI_MCTS_CONFIG: MctsConfig = { simulations: 16, uctC: 1.4, rolloutCount: 1, label: 's16' };
+const MCTS_FLAG = 'mcts-s16';
 
 function now(): string {
   return new Date().toISOString();
@@ -293,6 +310,181 @@ function main(): void {
     latestWaveCriteria: waveConfig.criteria,
   });
   writeFileSync(join(rootDir, 'runs', 'janggi', 'summary.md'), summaryMarkdown);
+  console.log('   게임 요약: runs/janggi/summary.md');
+
+  console.log('10) MCTS 후보 웨이브 (mcts-wave-1)');
+  // withStrategyFlags extends the adapter's strategySurface without touching
+  // janggiAdapter itself (loop layer helper, O4) — the mcts flag's apply()
+  // ignores whatever base bot composeBot would otherwise thread through it,
+  // since an MCTS candidate builds its decision from search, not by
+  // modulating a base bot's choice (see src/search/mcts.ts's doc comment on
+  // mctsBotFactory).
+  const mctsFlagSpec: StrategyFlagSpec<unknown, unknown> = {
+    flag: MCTS_FLAG,
+    description: 'UCT MCTS search candidate (docs/GAP-ANALYSIS-7.md O5/O6); ignores the base bot entirely.',
+    apply: () => mctsBotFactory(adapter, JANGGI_MCTS_CONFIG),
+  };
+  const mctsAdapter = withStrategyFlags(adapter, [mctsFlagSpec]);
+
+  const mctsLatest = registry.latest();
+  if (mctsLatest === undefined) {
+    throw new Error('janggi runner: registry has no latest baseline before the MCTS wave');
+  }
+
+  const mctsLedger = new SeedLedger();
+  const mctsReservedAt = now();
+  // Small tier sizes (docs/GAP-ANALYSIS-7.md O6): at ~18s/game and 2
+  // games/block, even the full smoke+prune+holdout budget below stays under
+  // (8+6+6)*2*20s ≈ 13min, inside the 15-minutes-per-game ceiling — and SPRT
+  // typically stops smoke well before maxBlocks.
+  const mctsSmokeMax = 8;
+  const mctsPruneBlocks = 6;
+  const mctsHoldoutBlocks = 6;
+  mctsLedger.reserve({
+    bankId: 'janggi-mcts-smoke',
+    range: { start: 8000, end: 8000 + mctsSmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: mctsReservedAt,
+  });
+  mctsLedger.reserve({
+    bankId: 'janggi-mcts-prune',
+    range: { start: 9000, end: 9000 + mctsPruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: mctsReservedAt,
+  });
+  mctsLedger.reserve({
+    bankId: 'janggi-mcts-holdout',
+    range: { start: 10000, end: 10000 + mctsHoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: mctsReservedAt,
+  });
+
+  const mctsWaveConfig = assembleWaveConfig(mctsAdapter, {
+    waveId: 'mcts-wave-1',
+    candidates: [{ flag: MCTS_FLAG }],
+    opponent: 'heuristic',
+    ledger: mctsLedger,
+    recordedAt: now(),
+    baselineFlags: mctsLatest.flags,
+    baselineVersion: mctsLatest.version,
+    tiers: {
+      smoke: {
+        bankId: 'janggi-mcts-smoke',
+        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+        maxBlocks: mctsSmokeMax,
+        minBlocks: 4,
+      },
+      prune: { bankId: 'janggi-mcts-prune', blocks: mctsPruneBlocks },
+      holdout: { bankId: 'janggi-mcts-holdout', blocks: mctsHoldoutBlocks },
+    },
+    screenProbe: { seeds: [1, 2], botSeedBase: 100 },
+  });
+
+  const mctsReport = runWave(mctsAdapter, mctsWaveConfig);
+  for (const result of mctsReport.results) {
+    console.log(`   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`);
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(`     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} blocks=${stats.blocks}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: mctsReport.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: mctsReport.comparabilityKey,
+    payload: mctsReport,
+    markdown: `# Wave Report — ${mctsReport.waveId}\n\n${mctsReport.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('11) MCTS 웨이브 adoption ledger 기록');
+  const mctsEntries: AdoptionEntry[] = mctsReport.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const mctsAdoptionRecord = ledger.add({
+    waveId: mctsReport.waveId,
+    recordedAt: now(),
+    comparabilityKey: mctsReport.comparabilityKey,
+    baselineVersion: mctsLatest.version,
+    opponentId: mctsWaveConfig.opponent,
+    entries: mctsEntries,
+    nextLoopNotes: [],
+  });
+
+  console.log('12) MCTS near-miss 후보 추출');
+  const mctsNearMiss = extractNearMissCandidates(mctsAdoptionRecord, mctsWaveConfig.criteria);
+  if (mctsNearMiss.length === 0) {
+    console.log('   근접실패 후보 없음');
+  } else {
+    for (const candidate of mctsNearMiss) {
+      console.log(
+        `   flags=${JSON.stringify(candidate.flags)} failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(join(rootDir, 'runs', 'janggi', 'mcts-near-miss.json'), JSON.stringify(mctsNearMiss, null, 2));
+
+  console.log('13) MCTS 웨이브 채택 플래그 registry 승격');
+  const mctsAdoptedFlags = mctsReport.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
+  if (mctsAdoptedFlags.length === 0) {
+    console.log('   이번 MCTS 웨이브에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('janggi runner: registry has no latest version to promote from (MCTS wave)');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((v) => v.sourceWaveId === mctsReport.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 MCTS 웨이브는 이미 승격됨 — 스킵');
+    } else {
+      const newVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...mctsAdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: mctsReport.waveId,
+        notes: `MCTS 웨이브 ${mctsReport.waveId}에서 채택된 플래그 승격: ${mctsAdoptedFlags.join(', ')}`,
+      });
+      console.log(`   승격: ${newVersion.version}, flags=[${newVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('14) persist registry/ledger (MCTS 웨이브 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('15) game-summary 재렌더 (MCTS 웨이브 반영)');
+  const finalSummaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: mctsWaveConfig.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', 'janggi', 'summary.md'), finalSummaryMarkdown);
   console.log('   게임 요약: runs/janggi/summary.md');
 }
 

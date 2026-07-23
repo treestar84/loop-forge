@@ -696,6 +696,24 @@ function encodeChoice(choice: JanggiMove): string {
   return `${choice.from}-${choice.to}`;
 }
 
+/**
+ * MCTS simulation root (docs/GAP-ANALYSIS-7.md O6): the observation carries
+ * the full board, toMove, and ply, so state is losslessly reconstructable
+ * except for `redArrangement`/`blueArrangement`, which are diagnostic-only —
+ * the Elephant/Horse layout they record is already baked into `board` at
+ * createInitialState time and no move-generation logic ever re-reads these
+ * two fields afterward, so a placeholder value here changes no gameplay.
+ */
+function reconstructState(observation: JanggiObservation): JanggiState {
+  return {
+    board: observation.board,
+    toMove: observation.toMove,
+    ply: observation.ply,
+    redArrangement: 0,
+    blueArrangement: 0,
+  };
+}
+
 // -----------------------------------------------------------------------
 // Invariants
 // -----------------------------------------------------------------------
@@ -1023,6 +1041,7 @@ export const janggiAdapter: GameAdapter<JanggiState, JanggiObservation, JanggiCh
     perfectInformation: true,
     scoreMargin: 'none',
     maxDecisionsPerGame: MAX_PLIES,
+    utility: 'zero-sum',
   },
   createInitialState,
   currentDecision,
@@ -1031,6 +1050,7 @@ export const janggiAdapter: GameAdapter<JanggiState, JanggiObservation, JanggiCh
   applyChoice,
   getOutcome,
   encodeChoice,
+  reconstructState,
   invariants: [singleGeneralInvariant, pieceCountInvariant, previousMoverNotInCheckInvariant],
   replayFixtures,
   baselines: {

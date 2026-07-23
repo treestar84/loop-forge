@@ -28,6 +28,7 @@ import type {
   ReplayFixture,
   StrategyFlagSpec,
 } from '../contract/types';
+import { canonicalJson, sha256Digest } from '../kernel/digest';
 import { createRng, shuffled } from '../kernel/rng';
 
 export type Suit = 'A' | 'B';
@@ -269,6 +270,34 @@ function getOutcome(state: MiniTrickState): Outcome | null {
 
 function encodeChoice(choice: MiniTrickCard): string {
   return cardKey(choice);
+}
+
+/**
+ * Information-state key for CFR-family learning (docs/GAP-ANALYSIS-7.md
+ * O7-b, absorbed from OpenSpiel's information_state_string). Built from
+ * exactly the fields `getObservation` already exposes to the viewing player
+ * (their own hand, the trick in progress, the running trick-win tally, how
+ * many tricks have completed) — deliberately the same digest formula
+ * `src/learn/mccfr.ts`'s fallback path uses, since a bot's `decide` only
+ * ever receives an observation (never a state) and must be able to
+ * reconstruct this same key at decision time.
+ *
+ * Known limitation, reported rather than hidden: MiniTrickState does not
+ * retain the specific cards played in *completed* tricks — only trickWins's
+ * aggregate count survives past trick resolution (see applyChoice, which
+ * resets `trick` to `[]` once a trick resolves). A true perfect-recall key
+ * would also distinguish histories that reached the same {hand, trickWins,
+ * tricksCompleted} by a different sequence of completed-trick cards (which
+ * changes what a real player would remember about which specific cards are
+ * no longer live). Until the state (and observation) are extended to carry
+ * that history, declaring this key does not yet achieve full perfect
+ * recall — it only formalizes, as the adapter's authoritative answer, what
+ * was already the best available fallback key for this game.
+ */
+function informationStateKey(state: MiniTrickState, player: PlayerId): string {
+  return sha256Digest(
+    canonicalJson({ decisionPoint: 'play', observation: getObservation(state, player) }),
+  );
 }
 
 function cardConservationInvariant(state: MiniTrickState): string | null {
@@ -541,6 +570,12 @@ export const miniTrickAdapter: GameAdapter<
       [1, 0],
     ],
     maxDecisionsPerGame: 20,
+    // Every game distributes exactly TOTAL_TRICKS (6) trick wins between the
+    // two players, so scores[0] + scores[1] is always 6: a constant-sum
+    // payoff, equivalent to zero-sum after centering (docs/GAP-ANALYSIS-7.md
+    // O7-b). Feeds classifyGame's utilityStructure and mccfr.ts's CFR
+    // convergence-guarantee precondition.
+    utility: 'zero-sum',
   },
   createInitialState,
   currentDecision,
@@ -552,6 +587,7 @@ export const miniTrickAdapter: GameAdapter<
   invariants: [cardConservationInvariant, noDuplicateVisibleCardsInvariant],
   hiddenInfoProbe,
   replayFixtures,
+  informationStateKey,
   baselines: {
     random: randomBaseline,
     heuristic: heuristicBaseline,

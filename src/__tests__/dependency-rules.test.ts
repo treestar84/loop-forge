@@ -10,6 +10,8 @@
  *   onboarding → contract, kernel, loop
  *   artifacts  → contract, kernel, loop
  *   reference  → contract, kernel        (the reference GAME must stay a pure adapter)
+ *   search     → contract, kernel        (MCTS/UCT — docs/GAP-ANALYSIS-7.md O5; runners import it directly, adapters never do)
+ *   learn      → contract, kernel        (MCCFR — docs/GAP-ANALYSIS-7.md O7; runners import it directly, adapters never do)
  *
  * reference/demo.ts is the app boundary and exempt (it wires every layer).
  * Any file under reference/runners/ is also an app boundary — per-game
@@ -30,6 +32,8 @@ const LAYER_ALLOWED: Record<string, readonly string[]> = {
   onboarding: ['contract', 'kernel', 'loop'],
   artifacts: ['contract', 'kernel', 'loop'],
   reference: ['contract', 'kernel'],
+  search: ['contract', 'kernel'],
+  learn: ['contract', 'kernel'],
 };
 
 const APP_BOUNDARY_FILES = new Set(['reference/demo.ts']);

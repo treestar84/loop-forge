@@ -35,9 +35,22 @@ import { renderGameSummaryMarkdown } from '../../artifacts/game-summary';
 import { measureNoiseFloor } from '../../loop/calibrate';
 import { recommendBlockCount } from '../../kernel/paired-stats';
 import { eraseAdapter } from '../../loop/erase';
+import { withStrategyFlags } from '../../loop/compose';
+import { mctsBotFactory, type MctsConfig } from '../../search/mcts';
+import type { StrategyFlagSpec } from '../../contract/types';
 import { gomokuAdapter } from '../gomoku';
 
 const GAME_ID = 'gomoku';
+
+/**
+ * Simulation budget (docs/GAP-ANALYSIS-7.md O6). Measured with a throughput
+ * script (scratch, not checked in): gomoku's cheap per-decision cost
+ * (shallow rollouts on a 15x15 board) averaged ~320ms/game at 64 simulations
+ * — the whole mcts-wave-1 tiers below stay well under a minute, comfortably
+ * inside the 15-minutes-per-game runner budget.
+ */
+const GOMOKU_MCTS_CONFIG: MctsConfig = { simulations: 64, uctC: 1.4, rolloutCount: 2, label: 's64' };
+const MCTS_FLAG = 'mcts-s64';
 
 function now(): string {
   return new Date().toISOString();
@@ -289,6 +302,178 @@ function main(): void {
   console.log('7) game-summary 렌더');
   const summaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, { latestWaveCriteria: waveConfig.criteria });
   writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), summaryMarkdown);
+  console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
+
+  console.log('8) MCTS 후보 웨이브 (mcts-wave-1)');
+  // withStrategyFlags extends the adapter's strategySurface without touching
+  // gomokuAdapter itself (loop layer helper, O4) — the mcts flag's apply()
+  // ignores whatever base bot composeBot would otherwise thread through it,
+  // since an MCTS candidate builds its decision from search, not by
+  // modulating a base bot's choice (see src/search/mcts.ts's doc comment on
+  // mctsBotFactory).
+  const mctsFlagSpec: StrategyFlagSpec<unknown, unknown> = {
+    flag: MCTS_FLAG,
+    description: 'UCT MCTS search candidate (docs/GAP-ANALYSIS-7.md O5/O6); ignores the base bot entirely.',
+    apply: () => mctsBotFactory(adapter, GOMOKU_MCTS_CONFIG),
+  };
+  const mctsAdapter = withStrategyFlags(adapter, [mctsFlagSpec]);
+
+  const mctsLatest = registry.latest();
+  if (mctsLatest === undefined) {
+    throw new Error('gomoku runner: registry has no latest baseline before the MCTS wave');
+  }
+
+  const mctsLedger = new SeedLedger();
+  const mctsReservedAt = now();
+  const mctsSmokeMax = 30;
+  const mctsPruneBlocks = 15;
+  const mctsHoldoutBlocks = 15;
+  mctsLedger.reserve({
+    bankId: 'gomoku-mcts-smoke',
+    range: { start: 8000, end: 8000 + mctsSmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: mctsReservedAt,
+  });
+  mctsLedger.reserve({
+    bankId: 'gomoku-mcts-prune',
+    range: { start: 9000, end: 9000 + mctsPruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: mctsReservedAt,
+  });
+  mctsLedger.reserve({
+    bankId: 'gomoku-mcts-holdout',
+    range: { start: 10000, end: 10000 + mctsHoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: mctsReservedAt,
+  });
+
+  const mctsWaveConfig = assembleWaveConfig(mctsAdapter, {
+    waveId: 'mcts-wave-1',
+    candidates: [{ flag: MCTS_FLAG }],
+    opponent: 'heuristic',
+    ledger: mctsLedger,
+    recordedAt: now(),
+    baselineFlags: mctsLatest.flags,
+    baselineVersion: mctsLatest.version,
+    tiers: {
+      smoke: {
+        bankId: 'gomoku-mcts-smoke',
+        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+        maxBlocks: mctsSmokeMax,
+        minBlocks: 5,
+      },
+      prune: { bankId: 'gomoku-mcts-prune', blocks: mctsPruneBlocks },
+      holdout: { bankId: 'gomoku-mcts-holdout', blocks: mctsHoldoutBlocks },
+    },
+    screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
+  });
+
+  const mctsReport = runWave(mctsAdapter, mctsWaveConfig);
+  for (const result of mctsReport.results) {
+    console.log(`   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`);
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(`     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} blocks=${stats.blocks}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: mctsReport.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: mctsReport.comparabilityKey,
+    payload: mctsReport,
+    markdown: `# Wave Report — ${mctsReport.waveId}\n\n${mctsReport.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('9) MCTS 웨이브 adoption ledger 기록');
+  const mctsEntries: AdoptionEntry[] = mctsReport.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const mctsAdoptionRecord = ledger.add({
+    waveId: mctsReport.waveId,
+    recordedAt: now(),
+    comparabilityKey: mctsReport.comparabilityKey,
+    baselineVersion: mctsLatest.version,
+    opponentId: mctsWaveConfig.opponent,
+    entries: mctsEntries,
+    nextLoopNotes: [],
+  });
+
+  console.log('9.5) MCTS near-miss 후보 추출');
+  const mctsNearMiss = extractNearMissCandidates(mctsAdoptionRecord, mctsWaveConfig.criteria);
+  if (mctsNearMiss.length === 0) {
+    console.log('   근접실패 후보 없음.');
+  } else {
+    for (const candidate of mctsNearMiss) {
+      console.log(
+        `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'mcts-near-miss.json'), JSON.stringify(mctsNearMiss, null, 2));
+  console.log(`   저장: runs/${GAME_ID}/mcts-near-miss.json`);
+
+  console.log('9.6) MCTS 웨이브 채택 플래그 registry 승격');
+  const mctsAdoptedFlags = mctsReport.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
+  if (mctsAdoptedFlags.length === 0) {
+    console.log('   이번 MCTS 웨이브에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('gomoku runner: registry has no latest baseline before MCTS promotion step');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === mctsReport.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 MCTS 웨이브는 이미 승격됨 — 스킵');
+    } else {
+      const nextVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...mctsAdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: mctsReport.waveId,
+        notes: `MCTS 웨이브 ${mctsReport.waveId}에서 채택된 플래그 승격: ${mctsAdoptedFlags.join(', ')}`,
+      });
+      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('10) persist registry/ledger (MCTS 웨이브 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('11) game-summary 재렌더 (MCTS 웨이브 반영)');
+  const finalSummaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: mctsWaveConfig.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), finalSummaryMarkdown);
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 }
 

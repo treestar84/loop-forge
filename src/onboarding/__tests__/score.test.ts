@@ -272,6 +272,59 @@ describe('scoreAdapter — blueprint auto-wiring (W4)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// O3: C2's applyChoice transition-purity check (OpenSpiel api_test
+// absorption) must catch an adapter that mutates its input state in place.
+// ---------------------------------------------------------------------------
+
+describe('scoreAdapter — C2 applyChoice purity check (O3)', () => {
+  interface MutatingState {
+    readonly steps: number[]; // deliberately mutable — the adapter under test pushes into it
+  }
+
+  const mutatingAdapter = eraseAdapter({
+    spec: {
+      gameId: 'o3-mutating-adapter',
+      playerCount: 2,
+      decisionPoints: [{ id: 'step', description: 'increments a shared step counter; ends after 3' }],
+      seatingPlan: [[0, 1], [1, 0]] as const,
+      maxDecisionsPerGame: 5,
+    },
+    createInitialState: (_seed: number): MutatingState => ({ steps: [] }),
+    currentDecision: (state: MutatingState) =>
+      state.steps.length >= 3 ? null : { player: (state.steps.length % 2) as 0 | 1, decisionPoint: 'step' },
+    getObservation: (_state: MutatingState, _player: 0 | 1) => ({}),
+    getLegalChoices: (_state: MutatingState) => ['go'] as const,
+    applyChoice: (state: MutatingState, _choice: 'go'): MutatingState => {
+      // Deliberately mutates the input state in place instead of copying —
+      // this is the bug O3's purity check must catch.
+      state.steps.push(state.steps.length);
+      return state;
+    },
+    getOutcome: (state: MutatingState) =>
+      state.steps.length >= 3 ? { scores: [1, 0], winners: [0 as const] } : null,
+    encodeChoice: (choice: 'go') => choice,
+    baselines: {
+      random: () => ({ id: 'o3-bot', decide: (_dp: string, _obs: unknown, legal: readonly string[]) => legal[0] as 'go' }),
+      heuristic: () => ({ id: 'o3-bot', decide: (_dp: string, _obs: unknown, legal: readonly string[]) => legal[0] as 'go' }),
+    },
+    strategySurface: [],
+  });
+
+  it('blocks C2 with C2_APPLYCHOICE_MUTATED_INPUT when applyChoice mutates its input state', () => {
+    const report = scoreAdapter(mutatingAdapter, { threshold: 0 });
+    const c2 = report.axes.find((a) => a.axis === 'C2-integrity');
+    expect(c2?.blockers.some((b) => b.code === 'C2_APPLYCHOICE_MUTATED_INPUT')).toBe(true);
+    expect(c2?.score).toBe(0);
+  }, 20_000);
+
+  it('does not regress mini-trick (a pure adapter): no C2_APPLYCHOICE_MUTATED_INPUT blocker', () => {
+    const report = scoreAdapter(adapter, { threshold: 65 });
+    const c2 = report.axes.find((a) => a.axis === 'C2-integrity');
+    expect(c2?.blockers.some((b) => b.code === 'C2_APPLYCHOICE_MUTATED_INPUT')).toBe(false);
+  }, 20_000);
+});
+
+// ---------------------------------------------------------------------------
 // Z8: scoreC5's head-to-head significance check must compare against the
 // game's identityCenter (1/playerCount or 1/teamCount), not a hardcoded 0.5
 // — a 2-player coincidence that distorts judgments for 3+ player FFA/team

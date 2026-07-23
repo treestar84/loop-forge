@@ -22,17 +22,32 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 import { eraseAdapter } from '../../loop/erase';
-import { composeBot } from '../../loop/compose';
+import { composeBot, withStrategyFlags } from '../../loop/compose';
 import { runHeadToHead, type HeadToHeadResult } from '../../loop/head-to-head';
+import { canonicalJson, sha256Digest } from '../../kernel/digest';
 import {
   loadOrCreateLedger,
   loadOrCreateRegistry,
 } from '../../artifacts/game-state';
 import { gomokuAdapter } from '../gomoku';
 import { gomokuOpusBot } from '../experiments/gomoku-opus-bot';
+import { gomokuMctsFlagSpec, GOMOKU_MCTS_FLAG } from './shared/gomoku-mcts-flag';
 
 const GAME_ID = 'gomoku';
 const ADOPTED_VERDICT = 'adopted';
+
+/**
+ * v3 follow-up (docs/GAP-ANALYSIS-7.md O6/O7): registry v3 promoted
+ * `mcts-s64` on top of v2's hand-authored flags (runs/gomoku/registry.json).
+ * `mcts-s64` lives on `gomoku.ts`'s runtime-extended adapter
+ * (`withStrategyFlags`), not on `gomokuAdapter.strategySurface` itself, so
+ * `composeBot` would throw "unknown strategy flag" if handed the bare
+ * adapter and registry.latest().flags unchanged. Re-derive the identical
+ * extension here (see shared/gomoku-mcts-flag.ts for why this must match
+ * gomoku.ts's config exactly) so column B/C can compose whatever the
+ * registry currently says, mcts-s64 included.
+ */
+const RUN_SUFFIX = '-v3';
 
 /** Column seed count. Overridable via `--n=<count>` so the timing trial and
  * the full run share one entrypoint. Seeds are drawn from a fixed base so the
@@ -113,19 +128,29 @@ function ci(result: HeadToHeadResult): string {
 function main(): void {
   const rootDir = join(__dirname, '..', '..', '..');
   const n = parseN(process.argv.slice(2));
-  const adapter = eraseAdapter(gomokuAdapter);
+  const bareAdapter = eraseAdapter(gomokuAdapter);
+  // Extend with mcts-s64 so composeBot can resolve it when the registry's
+  // latest flags include it (v3) — additive only, harmless for versions
+  // that don't reference the flag (v1/v2).
+  const adapter = withStrategyFlags(bareAdapter, [gomokuMctsFlagSpec(bareAdapter)]);
+  const specDigest = sha256Digest(canonicalJson(bareAdapter.spec));
   const seeds = buildSeeds(n);
 
   const opusBot = gomokuOpusBot;
   const baseline = gomokuAdapter.baselines.heuristic;
   const resolved = resolveLoopForgeFlags(rootDir);
   const loopForgeBot = composeBot(adapter, resolved.flags);
+  const usesMcts = resolved.flags.includes(GOMOKU_MCTS_FLAG);
 
-  console.log(`=== gomoku 3-column benchmark (N=${n} seeds/column) ===`);
+  console.log(`=== gomoku 3-column benchmark v3 (N=${n} seeds/column) ===`);
   console.log(`  registry latest: ${resolved.registryLatestVersion} flags=[${resolved.registryLatestFlags.join(', ') || '(none)'}]`);
   console.log(`  루프포지봇 composed flags: [${resolved.flags.join(', ') || '(none)'}]`);
+  console.log(`  specDigest: ${specDigest}`);
   if (resolved.registryLatestFlags.length === 0 && resolved.flags.length > 0) {
     console.log('  NOTE: registry latest had no flags; using ledger-adopted flags for column B.');
+  }
+  if (usesMcts) {
+    console.log(`  NOTE: 루프포지봇 flags include "${GOMOKU_MCTS_FLAG}" — per-game cost is much higher than the hand-authored flags (search rollout).`);
   }
 
   const t0 = Date.now();
@@ -156,11 +181,13 @@ function main(): void {
     n,
     seedBase: SEED_BASE,
     botSeedBase: BOT_SEED_BASE,
+    specDigest,
     loopForge: {
       composedFlags: resolved.flags,
       registryLatestVersion: resolved.registryLatestVersion,
       registryLatestFlags: resolved.registryLatestFlags,
       flagSource: resolved.registryLatestFlags.length > 0 ? 'registry-latest' : 'ledger-adopted',
+      usesMcts,
     },
     columns: {
       A_opusVsBaseline: colA,
@@ -173,14 +200,15 @@ function main(): void {
       'candidate/opponent seats are paired-mirrored (runPairedBlock), so first-mover advantage is cancelled.',
       'drawRate here counts blocks with candidateWinFraction===0.5 — i.e. true draws AND seat-split (win one seat, lose the other), not draws alone.',
       'Win rates across different games are NOT comparable (different baselines.heuristic strength); only A vs B vs C within gomoku are.',
+      'v3 run: gomokuAdapter.spec now declares `utility` (docs/GAP-ANALYSIS-7.md O1/O2), which changed specDigest — NOT directly comparable to the pre-v3 benchmark-3col.json/md (different comparability context, docs/INTERPRETATION.md rule 1).',
     ],
   };
-  writeFileSync(join(outDir, 'benchmark-3col.json'), JSON.stringify(jsonPayload, null, 2));
-  console.log(`  저장: runs/${GAME_ID}/benchmark-3col.json`);
+  writeFileSync(join(outDir, `benchmark-3col${RUN_SUFFIX}.json`), JSON.stringify(jsonPayload, null, 2));
+  console.log(`  저장: runs/${GAME_ID}/benchmark-3col${RUN_SUFFIX}.json`);
 
-  const md = renderMarkdown(n, resolved, colA, colB, colC, totalSeconds);
-  writeFileSync(join(outDir, 'benchmark-3col.md'), md);
-  console.log(`  저장: runs/${GAME_ID}/benchmark-3col.md`);
+  const md = renderMarkdown(n, resolved, colA, colB, colC, totalSeconds, specDigest, usesMcts);
+  writeFileSync(join(outDir, `benchmark-3col${RUN_SUFFIX}.md`), md);
+  console.log(`  저장: runs/${GAME_ID}/benchmark-3col${RUN_SUFFIX}.md`);
 }
 
 function renderMarkdown(
@@ -190,12 +218,20 @@ function renderMarkdown(
   colB: HeadToHeadResult,
   colC: HeadToHeadResult,
   totalSeconds: number,
+  specDigest: string,
+  usesMcts: boolean,
 ): string {
   const flagSource = resolved.registryLatestFlags.length > 0 ? 'registry-latest' : 'ledger-adopted';
-  return `# 오목(gomoku) — 3열 벤치마크
+  return `# 오목(gomoku) — 3열 벤치마크 (v3)
 
 생성: ${new Date().toISOString()}
 N = ${n} 시드/열 · 좌석 페어드 미러링 · 게이트 없음(runHeadToHead)
+specDigest = \`${specDigest}\`
+
+> **v3 표기**: registry v3(mcts-s64 승격) 반영. gomoku spec에 \`utility\` 필드가
+> 추가되며 specDigest가 바뀌었으므로(docs/GAP-ANALYSIS-7.md O1/O2), 이 결과는
+> \`benchmark-3col.json/md\`(v2 이전, 구 문맥)와 직접 비교하지 않는다
+> (docs/INTERPRETATION.md 제1규칙: 동일 comparabilityKey 문맥 안에서만 비교).
 
 ## 루프포지봇 구성
 
@@ -206,6 +242,10 @@ ${
   resolved.registryLatestFlags.length === 0 && resolved.flags.length > 0
     ? '- ⚠ registry 최신(v1)에는 플래그가 승격돼 있지 않아, ledger에서 `adopted` 판정된 플래그를 사용함 (BENCHMARK-EXPERIMENT.md §2 B열 정의에 맞춤).\n'
     : ''
+}${
+  usesMcts
+    ? '- ⚠ 합성 플래그에 `mcts-s64`(탐색 후보) 포함 — B/C열은 판당 비용이 hand-authored 플래그보다 훨씬 큼(UCT 롤아웃).\n'
+    : ''
 }
 ## 결과
 
@@ -215,7 +255,7 @@ ${
 | B | 루프포지봇 vs 기본봇 | ${pct(colB.candidateWinRate)} | ${ci(colB)} | ${pct(colB.drawRate)} | ${colB.blocks} |
 | C | Opus봇 vs 루프포지봇 | ${pct(colC.candidateWinRate)} | ${ci(colC)} | ${pct(colC.drawRate)} | ${colC.blocks} |
 
-채택 전략 수: ${resolved.flags.length}/3
+채택 전략 수: ${resolved.flags.length}/4 (v3: blockImmediateThreat, centerProximity, extendLongestLine, mcts-s64)
 
 ## 해석 주의
 
@@ -223,6 +263,7 @@ ${
 - \`draw/split\`은 candidateWinFraction===0.5인 블록 비율 — 순수 무승부와 "한 좌석 승·한 좌석 패"(미러링 분할)를 모두 포함한다. 순수 무승부율이 아니다.
 - 좌석 미러링으로 선공 이점은 상쇄됨.
 - 게이트(SPRT/holdout)를 거치지 않은 순수 집계값(관찰 보고용).
+- 이 파일(v3)은 spec 변경으로 이전 \`benchmark-3col.json/md\`와 직접 비교 불가.
 
 총 소요: ${totalSeconds.toFixed(1)}s
 `;

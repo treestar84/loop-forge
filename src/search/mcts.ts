@@ -4,7 +4,23 @@
  * docs/GAP-ANALYSIS-7.md O5). Ported semantics: UCT child selection
  * (exploit + uctC * sqrt(ln(parentCount)/childCount), unvisited children
  * expanded before any UCT comparison happens), a random-rollout evaluator,
- * and "most-visited root child wins" final action selection.
+ * and "most-visited root child wins, ties broken by total reward" final
+ * action selection (docs/FIX-BACKLOG.md P5 — see mctsSearch's doc comment for
+ * the mcts.py `SearchNode.sort_key` correspondence).
+ *
+ * P5 BEHAVIOR CHANGE NOTICE (docs/FIX-BACKLOG.md P5): this file previously (1)
+ * broke visit-count ties by `encodeChoice` key alone, ignoring accumulated
+ * reward, and (2) expanded `untried` children in `getLegalChoices` FIFO order,
+ * which is a fidelity defect relative to mcts.py's `SearchNode.sort_key =
+ * (outcome, explore_count, total_reward)` and — for adapters whose
+ * `getLegalChoices` has positional structure (e.g. gomoku's board scan order)
+ * — a source of systematic expansion bias. Both are fixed below. Any bot
+ * built on `mctsBotFactory`/`mctsSearch` — including the already-registered
+ * `mcts-s64` gomoku flag — now plays differently than before this fix, even
+ * though its flag name and config are unchanged: registry v3 reconstruction
+ * reproduces a genuinely different bot post-fix. This is the concrete
+ * evidence for why source-closure digests (not just flag names) belong on
+ * the roadmap for registry provenance.
  *
  * Deliberate differences from mcts.py:
  *   - Reward is win/loss taken from `Outcome.winners` (co-winners split
@@ -25,7 +41,7 @@
  */
 
 import type { AnyBotFactory, AnyGameAdapter, Outcome, PlayerId, Rng } from '../contract/types';
-import { createRng } from '../kernel/rng';
+import { createRng, shuffled } from '../kernel/rng';
 
 export interface MctsConfig {
   readonly simulations: number;
@@ -33,6 +49,19 @@ export interface MctsConfig {
   readonly rolloutCount: number;
   /** Stamped into bot ids (e.g. "s64") so the sim budget is legible in adoption records and comparabilityKey-adjacent labels. */
   readonly label: string;
+  /**
+   * Rollout evaluator policy (docs/FIX-BACKLOG.md P1). 'random' (default,
+   * omitted preserves byte-for-byte pre-existing behavior) draws uniformly
+   * from legal choices, matching mcts.py's RandomRolloutEvaluator. 'heuristic'
+   * swaps in the adapter's own `baselines.heuristic` bot to drive every
+   * rollout decision instead — the same "replace the evaluator" pattern
+   * OpenSpiel's mcts.py documents (a RandomRolloutEvaluator is one choice of
+   * evaluator; any policy can stand in for it). This does not let game
+   * knowledge leak into the search layer: the adapter already bundles its own
+   * baseline bot, and the search code only ever calls the adapter-supplied
+   * `decide` through the same GameBot interface every other bot uses.
+   */
+  readonly rolloutPolicy?: 'random' | 'heuristic';
 }
 
 interface ChildEdge {
@@ -67,18 +96,46 @@ function rewardOf(outcome: Outcome, player: PlayerId): number {
   return 1 / outcome.winners.length;
 }
 
-/** One random rollout from `state` to a terminal state, using `rng` for uniform legal-choice draws. */
-function rolloutOnce(adapter: AnyGameAdapter, state: unknown, rng: Rng): Outcome {
+/**
+ * Derive a deterministic bot seed for one heuristic rollout by forking off
+ * the search's injected `rng` with a label unique to this rollout's index
+ * within its `evaluate()` call — keeps the derivation reproducible for a
+ * given (rng, rolloutIndex) pair without ever touching Date.now()/Math.random().
+ */
+function deriveHeuristicRolloutSeed(rng: Rng, rolloutIndex: number): number {
+  return rng.fork(`mcts-heuristic-rollout-${rolloutIndex}`).nextInt(2_147_483_647);
+}
+
+/**
+ * One rollout from `state` to a terminal state. `policy` 'random' draws
+ * uniformly from legal choices via `rng` (mcts.py's RandomRolloutEvaluator).
+ * `policy` 'heuristic' instead lets a single `adapter.baselines.heuristic`
+ * bot instance (seeded via `deriveHeuristicRolloutSeed`) decide every step —
+ * the OpenSpiel evaluator-replacement pattern referenced on MctsConfig.
+ */
+function rolloutOnce(
+  adapter: AnyGameAdapter,
+  state: unknown,
+  rng: Rng,
+  policy: 'random' | 'heuristic',
+  rolloutIndex: number,
+): Outcome {
   let current = state;
   let decisions = 0;
+  const heuristicBot =
+    policy === 'heuristic' ? adapter.baselines.heuristic(deriveHeuristicRolloutSeed(rng, rolloutIndex)) : null;
   while (adapter.currentDecision(current) !== null) {
     if (decisions >= adapter.spec.maxDecisionsPerGame) {
       throw new Error(
         `mcts rollout: exceeded maxDecisionsPerGame (${adapter.spec.maxDecisionsPerGame}) without reaching a terminal state — adapter defect`,
       );
     }
+    const decision = adapter.currentDecision(current) as { player: PlayerId; decisionPoint: string };
     const legal = adapter.getLegalChoices(current);
-    const choice = legal[rng.nextInt(legal.length)];
+    const choice =
+      heuristicBot !== null
+        ? heuristicBot.decide(decision.decisionPoint, adapter.getObservation(current, decision.player), legal)
+        : legal[rng.nextInt(legal.length)];
     current = adapter.applyChoice(current, choice);
     decisions += 1;
   }
@@ -89,12 +146,24 @@ function rolloutOnce(adapter: AnyGameAdapter, state: unknown, rng: Rng): Outcome
   return outcome;
 }
 
-/** RandomRolloutEvaluator (mcts.py): average per-player reward across `rolloutCount` independent rollouts. */
-function evaluate(adapter: AnyGameAdapter, state: unknown, rolloutCount: number, rng: Rng): readonly number[] {
+/**
+ * RandomRolloutEvaluator (mcts.py), or its heuristic-evaluator swap: average
+ * per-player reward across `rolloutCount` independent rollouts. Exported
+ * (docs/FIX-BACKLOG.md P4) so `src/search/ismcts.ts` can reuse the exact same
+ * rollout evaluator instead of re-implementing it — this is purely an added
+ * export, the function body and every existing call site are unchanged.
+ */
+export function evaluate(
+  adapter: AnyGameAdapter,
+  state: unknown,
+  rolloutCount: number,
+  rng: Rng,
+  policy: 'random' | 'heuristic',
+): readonly number[] {
   const playerCount = adapter.spec.playerCount;
   const totals = new Array<number>(playerCount).fill(0);
   for (let i = 0; i < rolloutCount; i += 1) {
-    const outcome = rolloutOnce(adapter, state, rng);
+    const outcome = rolloutOnce(adapter, state, rng, policy, i);
     for (let player = 0; player < playerCount; player += 1) {
       totals[player] = (totals[player] as number) + rewardOf(outcome, player);
     }
@@ -125,8 +194,16 @@ function selectChild(node: SearchNode, uctC: number): ChildEdge {
 /**
  * Run UCT MCTS from `rootState` (which must have a pending decision) and
  * return the chosen root-level choice — the child with the most visits,
- * matching mcts.py's final action selection. Ties broken by the lower
- * `encodeChoice` key for determinism.
+ * matching mcts.py's final action selection. mcts.py's
+ * `SearchNode.sort_key` breaks ties as `(outcome, explore_count,
+ * total_reward)`; this port has no solver (no `outcome`, see the file-level
+ * doc comment's "deliberate differences" list), so ties are broken by
+ * `(explore_count, total_reward)` — most visits, then highest accumulated
+ * reward for the mover who created the child — and only fall through to the
+ * lower `encodeChoice` key when both are equal, purely for determinism
+ * (docs/FIX-BACKLOG.md P5; previously this fell straight to the key, which
+ * silently discarded reward information whenever two children were visited
+ * equally often).
  */
 export function mctsSearch(
   adapter: AnyGameAdapter,
@@ -138,7 +215,13 @@ export function mctsSearch(
   if (rootDecision === null) {
     throw new Error('mctsSearch: rootState has no pending decision (already terminal)');
   }
-  const root = new SearchNode(null, adapter.getLegalChoices(rootState));
+  // Untried children are shuffled with the injected rng (not left in
+  // getLegalChoices order) before any expansion happens — same rng seed
+  // still yields the same shuffle, so this stays fully deterministic, but it
+  // removes the positional bias that a FIFO `.shift()` over an
+  // adapter-ordered legal-choices array would otherwise impose (P5; observed
+  // in gomoku as expansion sticking to the board's first few scanned rows).
+  const root = new SearchNode(null, shuffled(adapter.getLegalChoices(rootState), rng));
 
   for (let sim = 0; sim < config.simulations; sim += 1) {
     let state = rootState;
@@ -156,7 +239,8 @@ export function mctsSearch(
         const choice = node.untried.shift();
         const childState = adapter.applyChoice(state, choice);
         const childDecision = adapter.currentDecision(childState);
-        const childUntried = childDecision === null ? [] : adapter.getLegalChoices(childState);
+        const childUntried =
+          childDecision === null ? [] : shuffled(adapter.getLegalChoices(childState), rng);
         const childNode = new SearchNode(decision.player, childUntried);
         node.children.push({ choice, key: adapter.encodeChoice(choice), node: childNode });
         path.push(childNode);
@@ -176,7 +260,7 @@ export function mctsSearch(
       path.push(node);
     }
 
-    const rewards = evaluate(adapter, state, config.rolloutCount, rng);
+    const rewards = evaluate(adapter, state, config.rolloutCount, rng, config.rolloutPolicy ?? 'random');
     for (const visited of path) {
       visited.exploreCount += 1;
       if (visited.mover !== null) {
@@ -188,11 +272,18 @@ export function mctsSearch(
   if (root.children.length === 0) {
     throw new Error('mctsSearch: root produced no children after search');
   }
+  // Tie-break order mirrors mcts.py's SearchNode.sort_key minus the solver
+  // term: explore_count, then total_reward, then (this port only) the
+  // encodeChoice key for a fully deterministic last resort (docs/FIX-BACKLOG.md P5).
   let best = root.children[0] as ChildEdge;
   for (const child of root.children) {
     if (
       child.node.exploreCount > best.node.exploreCount ||
-      (child.node.exploreCount === best.node.exploreCount && child.key < best.key)
+      (child.node.exploreCount === best.node.exploreCount &&
+        child.node.totalReward > best.node.totalReward) ||
+      (child.node.exploreCount === best.node.exploreCount &&
+        child.node.totalReward === best.node.totalReward &&
+        child.key < best.key)
     ) {
       best = child;
     }

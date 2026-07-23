@@ -209,6 +209,26 @@ export interface GameAdapter<TState, TObservation, TChoice> {
    * only games with spec.perfectInformation === true may declare it.
    */
   reconstructState?(observation: TObservation): TState;
+  /**
+   * Determinization hook for IS-MCTS (Cowling, Powley & Whitehouse 2012,
+   * "Information Set Monte Carlo Tree Search"; docs/FIX-BACKLOG.md P4,
+   * docs/GAP-ANALYSIS-7.md §2's previously-deferred "IS-MCTS + 결정화" item).
+   * Hidden-information games cannot losslessly reconstruct a full state from
+   * one player's observation (that is exactly what makes them hidden-info —
+   * see `reconstructState`'s doc comment), so a search bot for such a game
+   * instead samples one *plausible* full state consistent with everything
+   * `player` actually knows: implementations must return a state whose
+   * `getObservation(returned, player)` reproduces the caller's `observation`
+   * exactly (own hand, public zones, counts, revealed info — anything the
+   * viewer already sees) and must only use `rng` to fill in the parts the
+   * viewer does NOT see (opponent hands, shuffled deck order, …), resampled
+   * without contradicting what is known (e.g. respecting revealed-card
+   * counts). This does not weaken the bot contract — bots still only ever
+   * see observations, never states — this hook exists purely for the search
+   * harness (IS-MCTS, `src/search/ismcts.ts`) to build a simulation root; a
+   * regular `GameBot` never calls it and never receives a sampled state.
+   */
+  sampleStateFromObservation?(observation: TObservation, player: PlayerId, rng: Rng): TState;
 
   /** Baseline ecosystem — mandatory for calibration and the ladder floor. */
   readonly baselines: {

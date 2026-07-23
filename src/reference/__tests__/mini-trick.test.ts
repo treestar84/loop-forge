@@ -1,6 +1,7 @@
 import { createRng } from '../../kernel/rng';
 import {
   miniTrickAdapter,
+  type MiniTrickCard,
   type MiniTrickChoice,
   type MiniTrickState,
 } from '../mini-trick';
@@ -167,6 +168,81 @@ describe('mini-trick observations hide opponent information (C3)', () => {
   });
 });
 
+describe('mini-trick informationStateKey perfect recall (docs/GAP-ANALYSIS-7.md §3)', () => {
+  it('assigns different keys to states sharing {hand, trickWins, tricksCompleted, trick} but reached via a different completed-trick history', () => {
+    const adapter = miniTrickAdapter;
+    const informationStateKey = adapter.informationStateKey;
+    if (!informationStateKey) {
+      throw new Error('expected miniTrickAdapter to declare informationStateKey');
+    }
+
+    const sharedHand: MiniTrickCard[] = [
+      { suit: 'A', rank: 4 },
+      { suit: 'B', rank: 7 },
+    ];
+    const baseFields = {
+      hands: [sharedHand, []] as const,
+      stock: [],
+      trick: [],
+      leader: 0 as const,
+      trickWins: [1, 1] as const,
+      tricksCompleted: 1,
+    };
+
+    const stateA: MiniTrickState = {
+      ...baseFields,
+      completedTricks: [
+        [
+          { player: 0 as const, card: { suit: 'A', rank: 1 } },
+          { player: 1 as const, card: { suit: 'A', rank: 2 } },
+        ],
+      ],
+    };
+    const stateB: MiniTrickState = {
+      ...baseFields,
+      completedTricks: [
+        [
+          { player: 0 as const, card: { suit: 'B', rank: 8 } },
+          { player: 1 as const, card: { suit: 'A', rank: 3 } },
+        ],
+      ],
+    };
+
+    // Sanity check: the two states really do agree on every field the
+    // pre-perfect-recall fallback key would have used.
+    expect(stateA.hands).toEqual(stateB.hands);
+    expect(stateA.trickWins).toEqual(stateB.trickWins);
+    expect(stateA.tricksCompleted).toEqual(stateB.tricksCompleted);
+    expect(stateA.trick).toEqual(stateB.trick);
+    expect(stateA.completedTricks).not.toEqual(stateB.completedTricks);
+
+    expect(informationStateKey(stateA, 0)).not.toEqual(informationStateKey(stateB, 0));
+  });
+
+  it('produces a stable key that only depends on (decisionPoint, observation) — matches a fresh observation built from the same state', () => {
+    const adapter = miniTrickAdapter;
+    const informationStateKey = adapter.informationStateKey;
+    if (!informationStateKey) {
+      throw new Error('expected miniTrickAdapter to declare informationStateKey');
+    }
+    let state = adapter.createInitialState(77);
+    const bot = adapter.baselines.random(77);
+    for (let step = 0; step < 8; step += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) break;
+      const legal = adapter.getLegalChoices(state);
+      const observation = adapter.getObservation(state, decision.player);
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice) as MiniTrickState;
+    }
+    const decision = adapter.currentDecision(state);
+    if (!decision) return;
+    const keyFirst = informationStateKey(state, decision.player);
+    const keySecond = informationStateKey(state, decision.player);
+    expect(keyFirst).toEqual(keySecond);
+  });
+});
+
 describe('mini-trick strategySurface (C6)', () => {
   function findFlag(flag: string) {
     const found = miniTrickAdapter.strategySurface.find((f) => f.flag === flag);
@@ -201,6 +277,7 @@ describe('mini-trick strategySurface (C6)', () => {
       leader: 0,
       trickWins: [0, 0],
       tricksCompleted: 0,
+      completedTricks: [],
     };
     // Follower is player 0 here for this synthetic single-player check of
     // decision logic; use adapter.getObservation/getLegalChoices as normal.
@@ -262,6 +339,7 @@ describe('mini-trick strategySurface (C6)', () => {
       leader: 0,
       trickWins: [0, 0],
       tricksCompleted: 0,
+      completedTricks: [],
     };
     const observation = adapter.getObservation(state, 0);
     const legal = adapter.getLegalChoices(state);

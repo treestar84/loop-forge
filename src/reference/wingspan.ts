@@ -88,6 +88,7 @@ import type {
   PendingDecision,
   PlayerId,
   ReplayFixture,
+  Rng,
   StrategyFlagSpec,
 } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
@@ -174,6 +175,17 @@ export interface WingspanObservation {
   readonly feederFood: number;
   readonly deckCount: number;
   readonly active: PlayerId;
+  /**
+   * Turns elapsed so far (`WingspanState.gameTurn`) — directly observable
+   * bookkeeping (both players can count turns), not hidden information, same
+   * rationale as hearthstone's `turnNumber` field
+   * (src/reference/hearthstone.ts's `HearthstoneObservation` doc comment).
+   * Needed by `sampleStateFromObservation` below to reconstruct a
+   * `WingspanState` — without it a determinized state could not tell how
+   * close the game is to `TOTAL_TURNS`, corrupting `turnBoundInvariant` and
+   * `endTurn`'s game-over check for the rest of the simulated playout.
+   */
+  readonly gameTurn: number;
 }
 
 export type WingspanChoice =
@@ -371,6 +383,7 @@ function getObservation(state: WingspanState, player: PlayerId): WingspanObserva
     feederFood: state.feederFood,
     deckCount: state.deck.length,
     active: state.active,
+    gameTurn: state.gameTurn,
   };
 }
 
@@ -400,6 +413,87 @@ function encodeChoice(choice: WingspanChoice): string {
       throw new Error(`encodeChoice: unhandled choice ${JSON.stringify(exhaustive)}`);
     }
   }
+}
+
+/**
+ * IS-MCTS determinization hook (docs/FIX-BACKLOG.md P4, contract/types.ts's
+ * `GameAdapter.sampleStateFromObservation` doc comment). Wingspan's hidden
+ * structure is simpler than both splendor's (perfect information, no hook
+ * needed) and hearthstone's/dominion's two-player-owned-decks shape: every
+ * bird id in `BIRD_IDS` is globally unique and appears in exactly one zone
+ * across the *entire* game (`cardConservationInvariant`/
+ * `noDuplicateCardsInvariant` above) — there is a single shared deck (not one
+ * per player), and a bird id needs no per-instance suffix the way
+ * hearthstone's mirrored 2-copy card pool does (`hearthstone.ts`'s
+ * `p{playerIndex}-{defId}-{copy}` scheme), since each of the 20 core birds
+ * exists as exactly one physical card.
+ *
+ * What is preserved byte-for-byte (the viewer already knows all of it):
+ *   - own hand (`selfHand`), both players' boards (`boards` — birds are
+ *     played face-up, always public), both players' food counts, the shared
+ *     tray (dealt face-up, `Tray(capacity=3)`), the shared feeder's food
+ *     count, `active`, and `gameTurn` (see the field's own doc comment on
+ *     `WingspanObservation` for why turn count is observable, not hidden)
+ *
+ * What gets resampled (the only thing the viewer truly does not know):
+ *   - the opponent's hand contents plus the shared deck's contents and
+ *     order, resolved together as a single pool by conservation (the full
+ *     20-bird universe minus every known public zone: own hand + both
+ *     boards + tray) — mirrors hearthstone's opponent hand+deck pool
+ *     derivation (`hearthstone.ts`'s own doc comment), except here the pool
+ *     covers the single shared deck rather than an opponent-owned deck,
+ *     since wingspan's `drawDeck` pulls from one shared pile both players
+ *     draw from blind.
+ *
+ * `viewer` governs only *where* the reconstructed data lands in the returned
+ * state's `players` tuple, never which cards belong to "own" vs "opponent" —
+ * that is always `observation.self` (the true owner baked into the
+ * observation itself by `getObservation`), independent of whatever `viewer`
+ * a caller passes in. Same rationale as hearthstone's `sampleStateFromObservation`
+ * doc comment, which explains why `ismcts.ts`'s `detectViewer` probe depends
+ * on this distinction.
+ */
+function sampleStateFromObservation(observation: WingspanObservation, viewer: PlayerId, rng: Rng): WingspanState {
+  const selfBoard = observation.boards[0];
+  const opponentBoard = observation.boards[1];
+  const selfFood = observation.food[0];
+  const opponentFood = observation.food[1];
+
+  const known = new Set<string>([...observation.selfHand, ...selfBoard, ...opponentBoard, ...observation.tray]);
+  const hiddenPool = BIRD_IDS.filter((id) => !known.has(id));
+  const expectedPoolSize = observation.opponentHandCount + observation.deckCount;
+  if (hiddenPool.length !== expectedPoolSize) {
+    throw new Error(
+      `sampleStateFromObservation: hidden pool reconstruction has ${hiddenPool.length} birds but ` +
+        `opponentHandCount+deckCount reports ${expectedPoolSize} — observation is internally inconsistent.`,
+    );
+  }
+  const shuffledPool = shuffled(hiddenPool, rng.fork('wingspan-determinize-hidden'));
+  const opponentHand = shuffledPool.slice(0, observation.opponentHandCount);
+  const deck = shuffledPool.slice(observation.opponentHandCount);
+
+  const players: [WingspanPlayerState, WingspanPlayerState] = [
+    { hand: [], board: [], food: 0 },
+    { hand: [], board: [], food: 0 },
+  ];
+  players[viewer] = { hand: observation.selfHand, board: selfBoard, food: selfFood };
+  players[otherPlayer(viewer)] = { hand: opponentHand, board: opponentBoard, food: opponentFood };
+
+  return {
+    players,
+    deck,
+    tray: observation.tray,
+    feederFood: observation.feederFood,
+    active: observation.active,
+    gameTurn: observation.gameTurn,
+    gameOver: false,
+    // Content-coverage bookkeeping only (see `exercisedContent`), not read by
+    // any legality/gameplay logic — safe to reset for a determinization that
+    // only ever exists for the duration of one search simulation (same
+    // rationale as hearthstone's `playedCardIds` reset in its own
+    // `sampleStateFromObservation`).
+    playedBirdIds: [],
+  };
 }
 
 // --- Invariants -------------------------------------------------------
@@ -715,6 +809,7 @@ export const wingspanAdapter: GameAdapter<WingspanState, WingspanObservation, Wi
   applyChoice,
   getOutcome,
   encodeChoice,
+  sampleStateFromObservation,
   invariants: [
     cardConservationInvariant,
     noDuplicateCardsInvariant,

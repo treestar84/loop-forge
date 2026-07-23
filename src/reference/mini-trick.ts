@@ -57,6 +57,16 @@ export interface MiniTrickState {
   readonly leader: PlayerId;
   readonly trickWins: readonly [number, number];
   readonly tricksCompleted: number;
+  /**
+   * Every completed trick's two plays, in the order they were played, in the
+   * order the tricks were completed (docs/GAP-ANALYSIS-7.md §3). In
+   * trick-taking games every card played is public information the instant
+   * it lands, so retaining this history (rather than discarding it once a
+   * trick resolves, as the pre-perfect-recall version of this adapter did)
+   * costs no hidden-information leak — it is exactly what a real player
+   * watching the table would remember.
+   */
+  readonly completedTricks: readonly (readonly MiniTrickTrickEntry[])[];
 }
 
 export interface MiniTrickObservation {
@@ -66,6 +76,8 @@ export interface MiniTrickObservation {
   readonly trickWins: readonly [number, number];
   readonly isLeader: boolean;
   readonly tricksCompleted: number;
+  /** Public history of completed tricks — see MiniTrickState.completedTricks. */
+  readonly completedTricks: readonly (readonly MiniTrickTrickEntry[])[];
 }
 
 export type MiniTrickChoice = MiniTrickCard;
@@ -149,6 +161,7 @@ function createInitialState(seed: number): MiniTrickState {
     leader: 0,
     trickWins: [0, 0],
     tricksCompleted: 0,
+    completedTricks: [],
   };
 }
 
@@ -193,6 +206,7 @@ function getObservation(
     trickWins: state.trickWins,
     isLeader: state.leader === player,
     tricksCompleted: state.tricksCompleted,
+    completedTricks: state.completedTricks,
   };
 }
 
@@ -248,6 +262,7 @@ function applyChoice(
     leader: winner,
     trickWins,
     tricksCompleted: state.tricksCompleted + 1,
+    completedTricks: [...state.completedTricks, trick],
   };
 }
 
@@ -276,23 +291,24 @@ function encodeChoice(choice: MiniTrickCard): string {
  * Information-state key for CFR-family learning (docs/GAP-ANALYSIS-7.md
  * O7-b, absorbed from OpenSpiel's information_state_string). Built from
  * exactly the fields `getObservation` already exposes to the viewing player
- * (their own hand, the trick in progress, the running trick-win tally, how
- * many tricks have completed) — deliberately the same digest formula
- * `src/learn/mccfr.ts`'s fallback path uses, since a bot's `decide` only
- * ever receives an observation (never a state) and must be able to
- * reconstruct this same key at decision time.
+ * (their own hand, the running trick-win tally, how many tricks have
+ * completed, the trick in progress, and — since perfect recall was closed,
+ * see below — the full public history of completed-trick cards) —
+ * deliberately the same digest formula `src/learn/mccfr.ts`'s fallback path
+ * uses, since a bot's `decide` only ever receives an observation (never a
+ * state) and must be able to reconstruct this same key at decision time.
  *
- * Known limitation, reported rather than hidden: MiniTrickState does not
- * retain the specific cards played in *completed* tricks — only trickWins's
- * aggregate count survives past trick resolution (see applyChoice, which
- * resets `trick` to `[]` once a trick resolves). A true perfect-recall key
- * would also distinguish histories that reached the same {hand, trickWins,
- * tricksCompleted} by a different sequence of completed-trick cards (which
- * changes what a real player would remember about which specific cards are
- * no longer live). Until the state (and observation) are extended to carry
- * that history, declaring this key does not yet achieve full perfect
- * recall — it only formalizes, as the adapter's authoritative answer, what
- * was already the best available fallback key for this game.
+ * Perfect recall now holds: `MiniTrickState.completedTricks` retains every
+ * completed trick's cards (all public information the instant they're
+ * played — see the field doc on `MiniTrickState.completedTricks`), and
+ * `getObservation` exposes that history, so two states that share
+ * {hand, trickWins, tricksCompleted, trick} but were reached by a different
+ * sequence of completed-trick cards now produce different keys — the gap
+ * flagged in docs/GAP-ANALYSIS-7.md §3 ("mini-trick의 state가 완료 트릭의
+ * 카드 이력을 버려 현재로선 불가") is closed. This key remains, by
+ * construction, a pure function of (decisionPoint, observation) — required
+ * so that `policyBotFactory` (which only ever sees an observation at replay
+ * time) can reproduce the same key training produced.
  */
 function informationStateKey(state: MiniTrickState, player: PlayerId): string {
   return sha256Digest(
@@ -301,23 +317,35 @@ function informationStateKey(state: MiniTrickState, player: PlayerId): string {
 }
 
 function cardConservationInvariant(state: MiniTrickState): string | null {
+  if (state.completedTricks.length !== state.tricksCompleted) {
+    return `completedTricks length (${state.completedTricks.length}) does not match tricksCompleted (${state.tricksCompleted})`;
+  }
+  const completedCardCount = state.completedTricks.reduce((sum, trick) => sum + trick.length, 0);
   const total =
     state.hands[0].length +
     state.hands[1].length +
     state.stock.length +
     state.trick.length +
-    state.tricksCompleted * 2;
+    completedCardCount;
   return total === TOTAL_CARDS
     ? null
-    : `card conservation violated: visible+resolved total is ${total}, expected ${TOTAL_CARDS}`;
+    : `card conservation violated: current+historical total is ${total}, expected ${TOTAL_CARDS}`;
 }
 
+// "Visible" here means everywhere a card's identity is known to at least one
+// party at the time of the check: own/opponent hands, the stock (known only
+// to the dealer/adapter, never a player), the trick in progress, and every
+// completed trick's history (public the instant those cards were played —
+// see MiniTrickState.completedTricks). Hidden-info integrity is unaffected:
+// hands[1]/stock stay opaque to player 0's observation regardless of this
+// invariant, which only checks for duplicate card identities across state.
 function noDuplicateVisibleCardsInvariant(state: MiniTrickState): string | null {
   const visible = [
     ...state.hands[0],
     ...state.hands[1],
     ...state.stock,
     ...state.trick.map((entry) => entry.card),
+    ...state.completedTricks.flatMap((trick) => trick.map((entry) => entry.card)),
   ];
   const seen = new Set<string>();
   for (const card of visible) {

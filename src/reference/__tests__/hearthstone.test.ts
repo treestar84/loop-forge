@@ -64,6 +64,7 @@ function player(overrides: Partial<HearthstonePlayerState> = {}): HearthstonePla
     manaCurrent: 10,
     fatigue: 0,
     heroPowerUsed: false,
+    graveyard: [],
     ...overrides,
   };
 }
@@ -265,6 +266,7 @@ describe('hearthstone rules (C2)', () => {
     const next = adapter.applyChoice(flipped, { kind: 'endTurn' }) as HearthstoneState;
     expect(next.players[0].hand).toHaveLength(10);
     expect(next.players[0].deck).toHaveLength(0); // still drawn/removed from deck, just burned
+    expect(next.players[0].graveyard).toEqual([card('d0', 'war-golem')]); // burned card is tracked, not vanished
   });
 
   it('the board cannot exceed 7 minions', () => {
@@ -439,5 +441,93 @@ describe('hearthstone strategySurface (C6)', () => {
     expect(baseChoice).toEqual({ kind: 'play', cardInstanceId: 'h-boar' });
     expect(variantChoice).toEqual({ kind: 'heroPower', targetId: 'hero:1' });
     expect(variantChoice).not.toEqual(baseChoice);
+  });
+});
+
+describe('hearthstone sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () => {
+  function advanceState(seed: number, steps: number): HearthstoneState {
+    const adapter = hearthstoneAdapter;
+    let state = adapter.createInitialState(seed);
+    const bot0 = adapter.baselines.random(seed);
+    const bot1 = adapter.baselines.random(seed + 5000);
+    for (let i = 0; i < steps; i += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) break;
+      const observation = adapter.getObservation(state, decision.player);
+      const legal = adapter.getLegalChoices(state);
+      const bot = decision.player === 0 ? bot0 : bot1;
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice) as HearthstoneState;
+    }
+    return state;
+  }
+
+  it('preserves everything the viewer already knows and reproduces the same observation', () => {
+    const adapter = hearthstoneAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('hearthstoneAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(41, 40);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 40 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(9001));
+    const reobserved = adapter.getObservation(sampled, decision.player);
+    expect(reobserved).toEqual(observation);
+  });
+
+  it('produces a sampled state that satisfies every invariant', () => {
+    const adapter = hearthstoneAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('hearthstoneAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(53, 55);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 55 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(123));
+    for (const invariant of adapter.invariants ?? []) {
+      expect(invariant(sampled)).toBeNull();
+    }
+    // Determinization must not change whose turn it is or what kind of
+    // decision is pending — only the hidden hand/deck contents may differ.
+    expect(adapter.currentDecision(sampled)).toEqual(decision);
+  });
+
+  it('resamples different hidden card placements across rng seeds while keeping every observed field identical', () => {
+    const adapter = hearthstoneAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('hearthstoneAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(29, 40);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 40 steps');
+    const observation = adapter.getObservation(state, decision.player);
+    const opponentId = decision.player === 0 ? 1 : 0;
+
+    const sampledA = adapter.sampleStateFromObservation(observation, decision.player, createRng(1));
+    const sampledB = adapter.sampleStateFromObservation(observation, decision.player, createRng(2));
+
+    expect(adapter.getObservation(sampledA, decision.player)).toEqual(observation);
+    expect(adapter.getObservation(sampledB, decision.player)).toEqual(observation);
+
+    // Same multiset of unseen cards either way (the viewer's own deck plus
+    // the opponent's hand+deck pool), but — almost certainly — a different
+    // concrete placement, proving the rng actually drives the resample.
+    const poolOf = (s: HearthstoneState): string[] =>
+      [...s.players[decision.player]!.deck, ...s.players[opponentId]!.hand, ...s.players[opponentId]!.deck]
+        .map((c) => c.instanceId)
+        .sort();
+    expect(poolOf(sampledA)).toEqual(poolOf(sampledB));
+
+    const arrangementOf = (s: HearthstoneState): string =>
+      JSON.stringify([
+        s.players[decision.player]!.deck.map((c) => c.instanceId),
+        s.players[opponentId]!.hand.map((c) => c.instanceId),
+        s.players[opponentId]!.deck.map((c) => c.instanceId),
+      ]);
+    expect(arrangementOf(sampledA)).not.toEqual(arrangementOf(sampledB));
   });
 });

@@ -58,6 +58,7 @@ import type {
   PendingDecision,
   PlayerId,
   ReplayFixture,
+  Rng,
   StrategyFlagSpec,
 } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
@@ -234,17 +235,38 @@ export interface DominionObservation {
   readonly supply: Readonly<Record<CardName, number>>;
   readonly kingdomCards: readonly CardName[];
   readonly pending: PendingSubdecision | null;
+  /**
+   * Trash pile contents — public in real Dominion (any player may inspect
+   * it), unlike either player's deck or the opponent's hand. Needed (see
+   * `sampleStateFromObservation` below) so the card-conservation arithmetic
+   * that separates "known" cards from the opponent's hidden hand+deck pool
+   * has a place to put trashed cards; without it they'd silently get
+   * miscounted into that hidden pool.
+   */
+  readonly trash: readonly CardName[];
   readonly own: {
     readonly hand: readonly CardName[];
     readonly discard: readonly CardName[];
     readonly play: readonly CardName[];
     readonly deckCount: number;
+    /**
+     * Multiset of card names in the viewer's own draw pile — order-free by
+     * construction (a `Record`, not an array), since a real player knows
+     * every card they've ever gained/drawn/discarded and therefore knows
+     * their own deck's *composition*, but not the exact top-to-bottom draw
+     * *order* (see `deck` doc comment on `PlayerState`: "index 0 is the top
+     * card" — that ordering is exactly what stays hidden, even from the
+     * owning player, and is what `sampleStateFromObservation` reshuffles).
+     */
+    readonly deckComposition: Readonly<Partial<Record<CardName, number>>>;
+    readonly turnsTaken: number;
   };
   readonly opponent: {
     readonly handCount: number;
     readonly discard: readonly CardName[];
     readonly play: readonly CardName[];
     readonly deckCount: number;
+    readonly turnsTaken: number;
   };
 }
 
@@ -618,6 +640,20 @@ function applyChoice(state: DominionState, choice: DominionChoice): DominionStat
 
 // --- Observation / outcome -----------------------------------------------
 
+function countsOf(cards: readonly CardName[]): Partial<Record<CardName, number>> {
+  const counts: Partial<Record<CardName, number>> = {};
+  for (const c of cards) counts[c] = (counts[c] ?? 0) + 1;
+  return counts;
+}
+
+function expandCounts(counts: Readonly<Partial<Record<CardName, number>>>): CardName[] {
+  const result: CardName[] = [];
+  for (const [name, count] of Object.entries(counts) as Array<[CardName, number]>) {
+    for (let i = 0; i < count; i += 1) result.push(name);
+  }
+  return result;
+}
+
 function getObservation(state: DominionState, player: PlayerId): DominionObservation {
   const self = getPlayer(state, player);
   const opponent = getPlayer(state, otherPlayer(player));
@@ -631,18 +667,150 @@ function getObservation(state: DominionState, player: PlayerId): DominionObserva
     supply: state.supply,
     kingdomCards: state.kingdomCards,
     pending: state.pending,
+    trash: state.trash,
     own: {
       hand: self.hand,
       discard: self.discard,
       play: self.play,
       deckCount: self.deck.length,
+      deckComposition: countsOf(self.deck),
+      turnsTaken: self.turnsTaken,
     },
     opponent: {
       handCount: opponent.hand.length,
       discard: opponent.discard,
       play: opponent.play,
       deckCount: opponent.deck.length,
+      turnsTaken: opponent.turnsTaken,
     },
+  };
+}
+
+/**
+ * IS-MCTS determinization hook (docs/FIX-BACKLOG.md P4, contract/types.ts's
+ * `GameAdapter.sampleStateFromObservation` doc comment). Unlike Splendor
+ * (perfect information — every zone is public, only deck *draw order* is
+ * hidden), Dominion is a real hidden-information game: the opponent's hand
+ * composition is never visible, and this adapter's `own` observation only
+ * ever exposed deck *counts*, never composition, forcing a design decision
+ * about what "the viewer's own deck" even means here.
+ *
+ * What is preserved byte-for-byte (the viewer already knows all of it):
+ *   - own hand, own discard, own play area (exact card lists)
+ *   - the market supply, both players' discard piles, both players' play
+ *     areas, the trash pile (all public zones in real Dominion)
+ *   - every zone's *card count* (own deck, opponent hand, opponent deck)
+ *   - `active`/`phase`/`actions`/`buys`/`coins`/`pending`/`kingdomCards`
+ *     (all directly observable turn state, not hidden information at all)
+ *   - each player's `turnsTaken` (own and opponent) — public bookkeeping
+ *     needed downstream for the TURN_CAP stalemate check and the
+ *     fewer-turns-wins tiebreak in `getOutcome`, so it must resample
+ *     identically to the real value, not a default.
+ *
+ * What gets resampled (the only two things the viewer truly does not know):
+ *   - the viewer's own deck *order* — composition is knowable (a real player
+ *     has tracked every card they've gained over the game) via
+ *     `own.deckComposition`, but the exact top-to-bottom sequence isn't
+ *     (nobody peeks ahead at their own future draws), so it is reshuffled
+ *     fresh per determinization. This also matters for search soundness:
+ *     if `own.deck`'s true order were exposed and reused as-is, IS-MCTS
+ *     would get to see its own upcoming draws during rollouts — an
+ *     information leak beyond what `getObservation` actually grants.
+ *   - the opponent's hand + deck, *both* composition and order — resolved
+ *     together as a single pool (mirrors `dominionHiddenInfoProbe` below),
+ *     since a viewer cannot distinguish "in opponent's hand" from "in
+ *     opponent's deck" for any specific unseen card, only the aggregate pool
+ *     those two zones share. The pool is derived by conservation: for each
+ *     card name, `totalUniverse(name) - (every public/self count already
+ *     known)` must equal exactly what's left for the opponent's hidden hand
+ *     + deck combined — this is why `trash` and `turnsTaken` had to be added
+ *     to the observation (P4 note: without `trash`, trashed cards would get
+ *     silently miscounted into the opponent's hidden pool, corrupting every
+ *     later conservation invariant on the sampled state).
+ */
+function sampleStateFromObservation(observation: DominionObservation, viewer: PlayerId, rng: Rng): DominionState {
+  const allNames = uniqueNames([...BASIC_CARDS, ...observation.kingdomCards]);
+
+  const ownDeck = shuffled(expandCounts(observation.own.deckComposition), rng.fork('dominion-determinize-own-deck'));
+  if (ownDeck.length !== observation.own.deckCount) {
+    throw new Error(
+      `sampleStateFromObservation: own deck composition sums to ${ownDeck.length} cards but deckCount reports ${observation.own.deckCount}`,
+    );
+  }
+
+  const pool: CardName[] = [];
+  for (const name of allNames) {
+    const universe = totalUniverse(name, observation.kingdomCards);
+    const known =
+      observation.supply[name] +
+      countOf(observation.trash, name) +
+      countOf(observation.own.hand, name) +
+      countOf(observation.own.discard, name) +
+      countOf(observation.own.play, name) +
+      (observation.own.deckComposition[name] ?? 0) +
+      countOf(observation.opponent.discard, name) +
+      countOf(observation.opponent.play, name);
+    const remaining = universe - known;
+    if (remaining < 0) {
+      throw new Error(
+        `sampleStateFromObservation: card accounting mismatch for ${name} — ${known} known copies exceeds the ` +
+          `${universe}-copy universe. This indicates the observation is internally inconsistent.`,
+      );
+    }
+    for (let i = 0; i < remaining; i += 1) pool.push(name);
+  }
+  const expectedPoolSize = observation.opponent.handCount + observation.opponent.deckCount;
+  if (pool.length !== expectedPoolSize) {
+    throw new Error(
+      `sampleStateFromObservation: opponent hidden pool size mismatch — conservation leaves ${pool.length} unseen ` +
+        `cards but observation reports handCount+deckCount=${expectedPoolSize}.`,
+    );
+  }
+  const shuffledPool = shuffled(pool, rng.fork('dominion-determinize-opponent'));
+  const opponentHand = shuffledPool.slice(0, observation.opponent.handCount);
+  const opponentDeck = shuffledPool.slice(observation.opponent.handCount);
+
+  const opponentId = otherPlayer(viewer);
+  const players: [PlayerState, PlayerState] = [
+    { deck: [], hand: [], discard: [], play: [], turnsTaken: 0 },
+    { deck: [], hand: [], discard: [], play: [], turnsTaken: 0 },
+  ];
+  players[viewer] = {
+    deck: ownDeck,
+    hand: observation.own.hand,
+    discard: observation.own.discard,
+    play: observation.own.play,
+    turnsTaken: observation.own.turnsTaken,
+  };
+  players[opponentId] = {
+    deck: opponentDeck,
+    hand: opponentHand,
+    discard: observation.opponent.discard,
+    play: observation.opponent.play,
+    turnsTaken: observation.opponent.turnsTaken,
+  };
+
+  return {
+    // A fresh, RNG-derived seed — never the real game's seed (not part of the
+    // observation, and reusing any fixed value across many per-simulation
+    // determinizations would correlate their future reshuffle draws).
+    seed: rng.nextInt(2 ** 31),
+    players,
+    supply: observation.supply,
+    kingdomCards: observation.kingdomCards,
+    active: observation.active,
+    phase: observation.phase,
+    actions: observation.actions,
+    buys: observation.buys,
+    coins: observation.coins,
+    pending: observation.pending,
+    reshuffleSeq: [0, 0],
+    gameOver: false,
+    // Content-coverage bookkeeping only (see `exercisedContent`), not read by
+    // any gameplay/legality logic — safe to reset for a determinization that
+    // only ever exists for the duration of one search simulation.
+    playedKingdom: [],
+    trash: observation.trash,
   };
 }
 
@@ -1123,6 +1291,7 @@ export const dominionAdapter: GameAdapter<DominionState, DominionObservation, Do
   applyChoice,
   getOutcome,
   encodeChoice,
+  sampleStateFromObservation,
   invariants: [cardConservationInvariant, nonNegativeSupplyInvariant, nonNegativeResourcesInvariant],
   contentInventory,
   exercisedContent,

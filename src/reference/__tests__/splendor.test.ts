@@ -1,3 +1,4 @@
+import { createRng } from '../../kernel/rng';
 import { splendorAdapter, type SplendorChoice, type SplendorState } from '../splendor';
 
 function playSelfPlay(
@@ -246,5 +247,83 @@ describe('splendor strategySurface (C6)', () => {
       state = adapter.applyChoice(state, choice) as SplendorState;
     }
     expect(sawReserve).toBe(true);
+  });
+});
+
+describe('splendor sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () => {
+  function advanceState(seed: number, steps: number): SplendorState {
+    const adapter = splendorAdapter;
+    let state = adapter.createInitialState(seed);
+    const bot0 = adapter.baselines.random(seed);
+    const bot1 = adapter.baselines.random(seed + 5000);
+    for (let i = 0; i < steps; i += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) break;
+      const observation = adapter.getObservation(state, decision.player);
+      const legal = adapter.getLegalChoices(state);
+      const bot = decision.player === 0 ? bot0 : bot1;
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice) as SplendorState;
+    }
+    return state;
+  }
+
+  it('preserves everything the viewer already knows and reproduces the same observation', () => {
+    const adapter = splendorAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('splendorAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(41, 60);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 60 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(9001));
+    const reobserved = adapter.getObservation(sampled, decision.player);
+    expect(reobserved).toEqual(observation);
+  });
+
+  it('produces a sampled state that satisfies every invariant', () => {
+    const adapter = splendorAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('splendorAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(53, 80);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 80 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(123));
+    for (const invariant of adapter.invariants ?? []) {
+      expect(invariant(sampled)).toBeNull();
+    }
+    // Determinization must not change whose turn it is or what kind of
+    // decision is pending — only the hidden deck order may differ.
+    expect(adapter.currentDecision(sampled)).toEqual(decision);
+  });
+
+  it('resamples a different deck order across rng seeds while keeping every observed field identical', () => {
+    const adapter = splendorAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('splendorAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(29, 60);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 60 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampledA = adapter.sampleStateFromObservation(observation, decision.player, createRng(1));
+    const sampledB = adapter.sampleStateFromObservation(observation, decision.player, createRng(2));
+
+    expect(adapter.getObservation(sampledA, decision.player)).toEqual(observation);
+    expect(adapter.getObservation(sampledB, decision.player)).toEqual(observation);
+
+    const deckOrderA = [1, 2, 3].flatMap((level) => sampledA.decks[level as 1 | 2 | 3].map((c) => c.id));
+    const deckOrderB = [1, 2, 3].flatMap((level) => sampledB.decks[level as 1 | 2 | 3].map((c) => c.id));
+    // Same multiset of unseen cards either way, but (almost certainly) a
+    // different order — proving the rng actually drives the resample rather
+    // than being ignored.
+    expect([...deckOrderA].sort()).toEqual([...deckOrderB].sort());
+    expect(deckOrderA).not.toEqual(deckOrderB);
   });
 });

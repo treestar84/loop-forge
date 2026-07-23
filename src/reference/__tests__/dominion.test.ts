@@ -1,4 +1,5 @@
 import { dominionAdapter, type DominionChoice, type DominionState } from '../dominion';
+import { createRng } from '../../kernel/rng';
 
 function playSelfPlay(
   seed: number,
@@ -293,5 +294,87 @@ describe('dominion strategySurface (C6)', () => {
       state = adapter.applyChoice(state, choice) as DominionState;
     }
     expect(found).toBe(true);
+  });
+});
+
+describe('dominion sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () => {
+  function advanceState(seed: number, steps: number): DominionState {
+    const adapter = dominionAdapter;
+    let state = adapter.createInitialState(seed);
+    const bot0 = adapter.baselines.random(seed);
+    const bot1 = adapter.baselines.random(seed + 5000);
+    for (let i = 0; i < steps; i += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) break;
+      const observation = adapter.getObservation(state, decision.player);
+      const legal = adapter.getLegalChoices(state);
+      const bot = decision.player === 0 ? bot0 : bot1;
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice) as DominionState;
+    }
+    return state;
+  }
+
+  it('preserves everything the viewer already knows and reproduces the same observation', () => {
+    const adapter = dominionAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('dominionAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(41, 60);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 60 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(9001));
+    const reobserved = adapter.getObservation(sampled, decision.player);
+    expect(reobserved).toEqual(observation);
+  });
+
+  it('produces a sampled state that satisfies every invariant', () => {
+    const adapter = dominionAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('dominionAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(53, 80);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 80 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(123));
+    for (const invariant of adapter.invariants ?? []) {
+      expect(invariant(sampled)).toBeNull();
+    }
+    // Determinization must not change whose turn it is or what kind of
+    // decision is pending — only the hidden hand/deck contents may differ.
+    expect(adapter.currentDecision(sampled)).toEqual(decision);
+  });
+
+  it('resamples different hidden card placements across rng seeds while keeping every observed field identical', () => {
+    const adapter = dominionAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('dominionAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(29, 60);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 60 steps');
+    const observation = adapter.getObservation(state, decision.player);
+    const opponentId = decision.player === 0 ? 1 : 0;
+
+    const sampledA = adapter.sampleStateFromObservation(observation, decision.player, createRng(1));
+    const sampledB = adapter.sampleStateFromObservation(observation, decision.player, createRng(2));
+
+    expect(adapter.getObservation(sampledA, decision.player)).toEqual(observation);
+    expect(adapter.getObservation(sampledB, decision.player)).toEqual(observation);
+
+    // Same multiset of unseen cards either way (the viewer's own deck plus
+    // the opponent's hand+deck pool), but — almost certainly — a different
+    // concrete placement, proving the rng actually drives the resample.
+    const poolOf = (s: DominionState): string[] =>
+      [...s.players[decision.player]!.deck, ...s.players[opponentId]!.hand, ...s.players[opponentId]!.deck].sort();
+    expect(poolOf(sampledA)).toEqual(poolOf(sampledB));
+
+    const arrangementOf = (s: DominionState): string =>
+      JSON.stringify([s.players[decision.player]!.deck, s.players[opponentId]!.hand, s.players[opponentId]!.deck]);
+    expect(arrangementOf(sampledA)).not.toEqual(arrangementOf(sampledB));
   });
 });

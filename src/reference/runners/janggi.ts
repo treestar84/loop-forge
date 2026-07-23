@@ -39,6 +39,7 @@ import { withStrategyFlags } from '../../loop/compose';
 import { mctsBotFactory, type MctsConfig } from '../../search/mcts';
 import type { StrategyFlagSpec } from '../../contract/types';
 import { janggiAdapter } from '../janggi';
+import { JANGGI_MCTS2_S128_HR_CONFIG, JANGGI_MCTS2_S128_HR_FLAG, janggiMctsFlagSpecFor } from './shared/janggi-mcts-flag';
 
 const GAME_ID = 'janggi';
 
@@ -485,6 +486,223 @@ function main(): void {
     latestWaveCriteria: mctsWaveConfig.criteria,
   });
   writeFileSync(join(rootDir, 'runs', 'janggi', 'summary.md'), finalSummaryMarkdown);
+  console.log('   게임 요약: runs/janggi/summary.md');
+
+  /**
+   * 16) mcts-wave-2 (docs/FIX-BACKLOG.md P2/P5) — re-attempting janggi's
+   * search family now that both blockers behind mcts-wave-1's smoke 0.000
+   * failure are addressed: P2 optimized move generation/check detection
+   * (~950x speedup, ~18.7ms/game random self-play measured post-fix, vs
+   * ~17.8s/game pre-fix), and P5 fixed search/mcts.ts's
+   * budget<branching-factor tie-break/expansion pathology. New candidate
+   * `mcts2-s128-hr` (heuristic rollout, simulations=128 — see
+   * shared/janggi-mcts-flag.ts's JANGGI_MCTS2_S128_HR_CONFIG comment for the
+   * full throughput+branching-factor measurement and rationale for choosing
+   * 128 over 64).
+   *
+   * `tiers.regression` is included for gate consistency with every other
+   * search-candidate wave in this codebase (O10), even though — since
+   * registry v1 carries zero strategy flags — the regression tier's
+   * baseline-composite bot resolves to the exact same raw
+   * `baselines.heuristic` opponent every other tier already faces. That
+   * duplication is expected for a v1 baseline (there is no adopted
+   * override yet to regress against) and will stop being a duplicate the
+   * moment any janggi candidate is promoted past v1.
+   *
+   * Tier-size budget arithmetic (1 block = 2 games; all four tiers face the
+   * same ~14.6s/game average cost class, 12.4-18.3s observed range, since
+   * regression's opponent is also raw heuristic per the note above):
+   *   smoke (maxBlocks=8, SPRT may stop earlier) + prune (6) + holdout (6)
+   *   + regression (6) = 26 blocks max = 52 games
+   *   52 games * ~14.6s avg ≈ 759s (≈12.7 min), 52 * ~18.3s worst ≈ 952s
+   *   (≈15.9 min) — comfortably under the 30-minute wave ceiling even at the
+   *   observed worst-case per-game cost.
+   *
+   * New seed banks (janggi-mcts2-*, ranges 30000-33005) do not overlap any
+   * range used by janggi-runner-*, janggi-mcts-* (mcts-wave-1, ranges
+   * 1-90/1000-1029/2000-2029/8000-10005), or janggi-benchmark.ts's fixed
+   * seeds (50000-51999) / botSeedBase values (700001-700003, 800000,
+   * 900000-900099).
+   */
+  console.log('16) MCTS 후보 웨이브 2 (mcts-wave-2, P2 최적화 + P5 수정 후 s128-hr 재도전)');
+  const mctsWave2FlagSpec = janggiMctsFlagSpecFor(adapter, JANGGI_MCTS2_S128_HR_CONFIG, JANGGI_MCTS2_S128_HR_FLAG);
+  const mctsWave2Adapter = withStrategyFlags(adapter, [mctsWave2FlagSpec]);
+
+  const mctsWave2Latest = registry.latest();
+  if (mctsWave2Latest === undefined) {
+    throw new Error('janggi runner: registry has no latest baseline before mcts-wave-2');
+  }
+
+  const mctsWave2Ledger = new SeedLedger();
+  const mctsWave2ReservedAt = now();
+  const mctsWave2SmokeMax = 8;
+  const mctsWave2PruneBlocks = 6;
+  const mctsWave2HoldoutBlocks = 6;
+  const mctsWave2RegressionBlocks = 6;
+  mctsWave2Ledger.reserve({
+    bankId: 'janggi-mcts2-smoke',
+    range: { start: 30000, end: 30000 + mctsWave2SmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: mctsWave2ReservedAt,
+  });
+  mctsWave2Ledger.reserve({
+    bankId: 'janggi-mcts2-prune',
+    range: { start: 31000, end: 31000 + mctsWave2PruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: mctsWave2ReservedAt,
+  });
+  mctsWave2Ledger.reserve({
+    bankId: 'janggi-mcts2-holdout',
+    range: { start: 32000, end: 32000 + mctsWave2HoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: mctsWave2ReservedAt,
+  });
+  mctsWave2Ledger.reserve({
+    bankId: 'janggi-mcts2-regression',
+    range: { start: 33000, end: 33000 + mctsWave2RegressionBlocks - 1 },
+    purpose: 'regression',
+    reservedAt: mctsWave2ReservedAt,
+  });
+
+  const mctsWave2Config = assembleWaveConfig(mctsWave2Adapter, {
+    waveId: 'mcts-wave-2',
+    candidates: [{ flag: JANGGI_MCTS2_S128_HR_FLAG }],
+    opponent: 'heuristic',
+    ledger: mctsWave2Ledger,
+    recordedAt: now(),
+    baselineFlags: mctsWave2Latest.flags,
+    baselineVersion: mctsWave2Latest.version,
+    tiers: {
+      smoke: {
+        bankId: 'janggi-mcts2-smoke',
+        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+        maxBlocks: mctsWave2SmokeMax,
+        minBlocks: 4,
+      },
+      prune: { bankId: 'janggi-mcts2-prune', blocks: mctsWave2PruneBlocks },
+      holdout: { bankId: 'janggi-mcts2-holdout', blocks: mctsWave2HoldoutBlocks },
+      regression: { bankId: 'janggi-mcts2-regression', blocks: mctsWave2RegressionBlocks },
+    },
+    screenProbe: { seeds: [1, 2], botSeedBase: 100 },
+  });
+
+  const mctsWave2Report = runWave(mctsWave2Adapter, mctsWave2Config);
+  for (const result of mctsWave2Report.results) {
+    console.log(
+      `   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`,
+    );
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(`     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} blocks=${stats.blocks}`);
+      }
+    }
+    if (result.warnings.length > 0) {
+      for (const warning of result.warnings) {
+        console.log(`     ⚠ ${warning}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: mctsWave2Report.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: mctsWave2Report.comparabilityKey,
+    payload: mctsWave2Report,
+    markdown: `# Wave Report — ${mctsWave2Report.waveId}\n\n${mctsWave2Report.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('17) mcts-wave-2 adoption ledger 기록');
+  const mctsWave2Entries: AdoptionEntry[] = mctsWave2Report.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const mctsWave2AdoptionRecord = ledger.add({
+    waveId: mctsWave2Report.waveId,
+    recordedAt: now(),
+    comparabilityKey: mctsWave2Report.comparabilityKey,
+    baselineVersion: mctsWave2Latest.version,
+    opponentId: mctsWave2Config.opponent,
+    entries: mctsWave2Entries,
+    nextLoopNotes: [],
+  });
+
+  console.log('17.5) mcts-wave-2 near-miss 후보 추출');
+  const mctsWave2NearMiss = extractNearMissCandidates(mctsWave2AdoptionRecord, mctsWave2Config.criteria);
+  if (mctsWave2NearMiss.length === 0) {
+    console.log('   근접실패 후보 없음');
+  } else {
+    for (const candidate of mctsWave2NearMiss) {
+      console.log(
+        `   flags=${JSON.stringify(candidate.flags)} failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(
+    join(rootDir, 'runs', 'janggi', 'mcts-wave-2-near-miss.json'),
+    JSON.stringify(mctsWave2NearMiss, null, 2),
+  );
+
+  console.log('17.6) mcts-wave-2 채택 플래그 registry 승격');
+  const mctsWave2AdoptedFlags = mctsWave2Report.results
+    .filter((r) => r.verdict === 'adopted')
+    .flatMap((r) => r.flags);
+  if (mctsWave2AdoptedFlags.length === 0) {
+    console.log('   이번 mcts-wave-2에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('janggi runner: registry has no latest version to promote from (mcts-wave-2)');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((v) => v.sourceWaveId === mctsWave2Report.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 mcts-wave-2는 이미 승격됨 — 스킵');
+    } else {
+      const newVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...mctsWave2AdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: mctsWave2Report.waveId,
+        notes: `mcts-wave-2에서 채택된 플래그 승격: ${mctsWave2AdoptedFlags.join(', ')}`,
+      });
+      console.log(`   승격: ${newVersion.version}, flags=[${newVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('18) persist registry/ledger (mcts-wave-2 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('19) game-summary 재렌더 (mcts-wave-2 반영)');
+  const finalSummaryMarkdown2 = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: mctsWave2Config.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', 'janggi', 'summary.md'), finalSummaryMarkdown2);
   console.log('   게임 요약: runs/janggi/summary.md');
 }
 

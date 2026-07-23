@@ -317,3 +317,85 @@ describe('wingspan strategySurface (C6)', () => {
     expect(variantChoice).toEqual({ kind: 'drawTray', cardId: 'bald-eagle' });
   });
 });
+
+describe('wingspan sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () => {
+  function advanceState(seed: number, steps: number): WingspanState {
+    const adapter = wingspanAdapter;
+    let state = adapter.createInitialState(seed);
+    const bot0 = adapter.baselines.random(seed);
+    const bot1 = adapter.baselines.random(seed + 5000);
+    for (let i = 0; i < steps; i += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) break;
+      const observation = adapter.getObservation(state, decision.player);
+      const legal = adapter.getLegalChoices(state);
+      const bot = decision.player === 0 ? bot0 : bot1;
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice) as WingspanState;
+    }
+    return state;
+  }
+
+  it('preserves everything the viewer already knows and reproduces the same observation', () => {
+    const adapter = wingspanAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('wingspanAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(41, 8);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 8 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(9001));
+    const reobserved = adapter.getObservation(sampled, decision.player);
+    expect(reobserved).toEqual(observation);
+  });
+
+  it('produces a sampled state that satisfies every invariant', () => {
+    const adapter = wingspanAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('wingspanAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(53, 12);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 12 steps');
+    const observation = adapter.getObservation(state, decision.player);
+
+    const sampled = adapter.sampleStateFromObservation(observation, decision.player, createRng(123));
+    for (const invariant of adapter.invariants ?? []) {
+      expect(invariant(sampled)).toBeNull();
+    }
+    // Determinization must not change whose turn it is or what kind of
+    // decision is pending — only the hidden opponent-hand/deck contents may differ.
+    expect(adapter.currentDecision(sampled)).toEqual(decision);
+  });
+
+  it('resamples different hidden card placements across rng seeds while keeping every observed field identical', () => {
+    const adapter = wingspanAdapter;
+    if (adapter.sampleStateFromObservation === undefined) {
+      throw new Error('wingspanAdapter must declare sampleStateFromObservation');
+    }
+    const state = advanceState(29, 10);
+    const decision = adapter.currentDecision(state);
+    if (!decision) throw new Error('expected an in-progress game after 10 steps');
+    const observation = adapter.getObservation(state, decision.player);
+    const opponentId = decision.player === 0 ? 1 : 0;
+
+    const sampledA = adapter.sampleStateFromObservation(observation, decision.player, createRng(1));
+    const sampledB = adapter.sampleStateFromObservation(observation, decision.player, createRng(2));
+
+    expect(adapter.getObservation(sampledA, decision.player)).toEqual(observation);
+    expect(adapter.getObservation(sampledB, decision.player)).toEqual(observation);
+
+    // Same multiset of unseen birds either way (opponent's hand plus the
+    // shared deck), but — almost certainly — a different concrete
+    // placement, proving the rng actually drives the resample.
+    const poolOf = (s: WingspanState): string[] =>
+      [...s.players[opponentId]!.hand, ...s.deck].slice().sort();
+    expect(poolOf(sampledA)).toEqual(poolOf(sampledB));
+
+    const arrangementOf = (s: WingspanState): string =>
+      JSON.stringify([s.players[opponentId]!.hand, s.deck]);
+    expect(arrangementOf(sampledA)).not.toEqual(arrangementOf(sampledB));
+  });
+});

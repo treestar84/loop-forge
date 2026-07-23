@@ -26,6 +26,7 @@
 | 모듈 | 원 구현 | 이식 범위 |
 |---|---|---|
 | `src/search/mcts.ts` | `open_spiel/python/algorithms/mcts.py` | UCT 선택·랜덤 롤아웃 평가기. chance/동시수 처리는 범위 밖(Loop Forge는 랜덤성을 시드에 접음) |
+| `src/search/ismcts.ts` | Cowling, Powley & Whitehouse (2012) "Information Set Monte Carlo Tree Search"(IEEE TCIAIG) + `open_spiel/algorithms/is_mcts.{h,cc}` | SO-ISMCTS: 정보집합 트리(루트 관찰 기준 행동열 키), 결정화별 합법 간선 제한, availability-count UCB1. mcts.ts의 롤아웃 평가기를 재사용(중복 이식 아님) |
 | `src/learn/mccfr.ts` | `open_spiel/python/algorithms/outcome_sampling_mccfr.py` | outcome-sampling MCCFR. chance 샘플링을 게임 시드 샘플링으로 대응 |
 
 ## 참고: 로프-포지 자체의 설계 아이디어 출처

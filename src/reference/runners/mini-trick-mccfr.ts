@@ -65,6 +65,40 @@ const MCCFR_ITERATIONS = 200_000;
 const MCCFR_TRAINING_SEED = 555_555;
 const MCCFR_FLAG = `mccfr-os-${MCCFR_ITERATIONS}`;
 
+/**
+ * Perfect-recall training budget (docs/FIX-BACKLOG.md P3, docs/GAP-ANALYSIS-7.md
+ * §3): `informationStateKey` now folds in the full public completed-trick
+ * history (see mini-trick.ts), so the information-set space is far denser
+ * per iteration than the pre-perfect-recall table above — a memory-safety
+ * measurement was required before committing to a training budget (the prior
+ * attempt at 1,000,000 iterations exhausted system memory).
+ *
+ * Measured with a throughput/memory scratch script (not checked in;
+ * process.memoryUsage() after training, one iteration count per process so
+ * V8 heap state from a prior run can't leak into the next measurement):
+ *
+ *   | iterations | infosetCount | heapUsed  | rss       | trainingMs |
+ *   |-----------:|-------------:|----------:|----------:|-----------:|
+ *   |     10,000 |      119,994 |  109.5 MB |  246.8 MB |        829 |
+ *   |     30,000 |      359,879 |  322.9 MB |  463.7 MB |      2,472 |
+ *   |    100,000 |    1,198,699 |  950.6 MB | 1,121.7 MB|      8,525 |
+ *
+ * infosetCount scales linearly at ~12.0 infosets/iteration across all three
+ * points (11.999, 11.996, 11.987) — expected, since each mini-trick decision
+ * now keys on the full completed-trick history. Fitting heapUsed linearly
+ * against iterations using the two largest (most representative-at-scale)
+ * points, (30_000, 322.9) and (100_000, 950.6): slope ≈ 8.97 KB/iteration,
+ * intercept ≈ 53.9 MB. Solving heapUsed(iterations) = 1,500 MB (the 1.5GB
+ * ceiling) gives iterations ≈ 161,300; 150,000 was chosen to keep a ~100MB
+ * safety margin below that ceiling (extrapolated heapUsed(150_000) ≈ 1,398
+ * MB) rather than training exactly at the edge of the estimate. A fresh
+ * training seed (disjoint from MCCFR_TRAINING_SEED above) keeps the two
+ * tables independently reproducible.
+ */
+const MCCFR_PR_ITERATIONS = 150_000;
+const MCCFR_PR_TRAINING_SEED = 555_777;
+const MCCFR_PR_FLAG = `mccfr-os-${MCCFR_PR_ITERATIONS}-pr`;
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -358,6 +392,226 @@ function main(): void {
   console.log('8) game-summary 렌더');
   const summaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, { latestWaveCriteria: mccfrWaveConfig.criteria });
   writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), summaryMarkdown);
+  console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
+
+  /**
+   * 9) mccfr-wave-2 (docs/FIX-BACKLOG.md P3) — perfect-recall MCCFR candidate
+   * `mccfr-os-<iters>-pr`, trained against the same mini-trick adapter but
+   * now with `informationStateKey` closing the perfect-recall gap
+   * (docs/GAP-ANALYSIS-7.md §3: completed-trick history is folded into both
+   * state and observation, see mini-trick.ts). Adds a `tiers.regression`
+   * gate (O10) after holdout, paired against the current baseline composite
+   * bot (registry.latest()'s flags, currently v1/no flags — i.e. plain
+   * heuristic) rather than special-casing this learned candidate: same
+   * unconditional gate every other candidate faces (docs/GAP-ANALYSIS-7.md
+   * §3, "학습봇도 게이트를 그대로 통과해야 adopted").
+   */
+  console.log('9) outcome-sampling MCCFR 학습 (perfect recall)');
+  const prTrainStart = Date.now();
+  const prPolicyTable = trainOutcomeSamplingMccfr(adapter, {
+    iterations: MCCFR_PR_ITERATIONS,
+    seed: MCCFR_PR_TRAINING_SEED,
+  });
+  const prTrainingMs = Date.now() - prTrainStart;
+  console.log(
+    `   iterations=${prPolicyTable.meta.iterations} epsilon=${prPolicyTable.meta.epsilon} ` +
+      `infosetKeySource=${prPolicyTable.meta.infosetKeySource} infosetCount=${prPolicyTable.meta.infosetCount} ` +
+      `trainingMs=${prTrainingMs}`,
+  );
+
+  const prPolicyDigest = policyTableDigest(prPolicyTable);
+  const prPolicyPath = join(rootDir, 'runs', GAME_ID, `policy-${MCCFR_PR_FLAG}.json`);
+  writeFileSync(
+    prPolicyPath,
+    JSON.stringify({ digest: prPolicyDigest, trainingMs: prTrainingMs, table: prPolicyTable }, null, 2),
+  );
+  console.log(`   저장: runs/${GAME_ID}/policy-${MCCFR_PR_FLAG}.json (digest=${prPolicyDigest})`);
+
+  console.log('10) MCCFR 후보 웨이브 2 (mccfr-wave-2, perfect recall + regression 티어)');
+  const prFlagSpec: StrategyFlagSpec<unknown, unknown> = {
+    flag: MCCFR_PR_FLAG,
+    description: `Perfect-recall outcome-sampling MCCFR policy-table candidate (docs/FIX-BACKLOG.md P3, ${MCCFR_PR_ITERATIONS} iterations); ignores the base bot entirely.`,
+    apply: () => policyBotFactoryFor(adapter, prPolicyTable),
+  };
+  const mccfrWave2Adapter = withStrategyFlags(adapter, [prFlagSpec]);
+
+  const mccfrWave2Latest = registry.latest();
+  if (mccfrWave2Latest === undefined) {
+    throw new Error('mini-trick MCCFR runner: registry has no latest baseline before mccfr-wave-2');
+  }
+
+  // Fresh seed range: disjoint from demo.ts's 500-3149ish/400000/700000/
+  // 800000/900000 ranges and from mccfr-wave-1's 20000/21000/22000/23000
+  // ranges above (screenProbe included) — this wave reserves the 30000s.
+  const mccfrWave2Ledger = new SeedLedger();
+  const mccfrWave2ReservedAt = now();
+  const mccfrWave2SmokeMax = 80;
+  const mccfrWave2PruneBlocks = clampedBlocks;
+  const mccfrWave2HoldoutBlocks = clampedBlocks;
+  const mccfrWave2RegressionBlocks = clampedBlocks;
+  mccfrWave2Ledger.reserve({
+    bankId: 'mini-trick-mccfr2-smoke',
+    range: { start: 30_000, end: 30_000 + mccfrWave2SmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: mccfrWave2ReservedAt,
+  });
+  mccfrWave2Ledger.reserve({
+    bankId: 'mini-trick-mccfr2-prune',
+    range: { start: 31_000, end: 31_000 + mccfrWave2PruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: mccfrWave2ReservedAt,
+  });
+  mccfrWave2Ledger.reserve({
+    bankId: 'mini-trick-mccfr2-holdout',
+    range: { start: 32_000, end: 32_000 + mccfrWave2HoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: mccfrWave2ReservedAt,
+  });
+  mccfrWave2Ledger.reserve({
+    bankId: 'mini-trick-mccfr2-regression',
+    range: { start: 34_000, end: 34_000 + mccfrWave2RegressionBlocks - 1 },
+    purpose: 'regression',
+    reservedAt: mccfrWave2ReservedAt,
+  });
+
+  const mccfrWave2Config = assembleWaveConfig(mccfrWave2Adapter, {
+    waveId: 'mccfr-wave-2',
+    candidates: [{ flag: MCCFR_PR_FLAG }],
+    opponent: 'heuristic',
+    ledger: mccfrWave2Ledger,
+    recordedAt: now(),
+    baselineFlags: mccfrWave2Latest.flags,
+    baselineVersion: mccfrWave2Latest.version,
+    tiers: {
+      smoke: {
+        bankId: 'mini-trick-mccfr2-smoke',
+        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+        maxBlocks: mccfrWave2SmokeMax,
+        minBlocks: 5,
+      },
+      prune: { bankId: 'mini-trick-mccfr2-prune', blocks: mccfrWave2PruneBlocks },
+      holdout: { bankId: 'mini-trick-mccfr2-holdout', blocks: mccfrWave2HoldoutBlocks },
+      regression: { bankId: 'mini-trick-mccfr2-regression', blocks: mccfrWave2RegressionBlocks },
+    },
+    screenProbe: { seeds: [33_000, 33_001, 33_002, 33_003, 33_004], botSeedBase: 33_100 },
+  });
+
+  const mccfrWave2Report = runWave(mccfrWave2Adapter, mccfrWave2Config);
+  for (const result of mccfrWave2Report.results) {
+    console.log(`   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`);
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(`     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} blocks=${stats.blocks}`);
+      }
+    }
+    if (result.warnings.length > 0) {
+      for (const warning of result.warnings) {
+        console.log(`     ⚠ ${warning}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: mccfrWave2Report.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: mccfrWave2Report.comparabilityKey,
+    payload: mccfrWave2Report,
+    markdown: `# Wave Report — ${mccfrWave2Report.waveId}\n\n${mccfrWave2Report.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('11) mccfr-wave-2 adoption ledger 기록');
+  const mccfrWave2Entries: AdoptionEntry[] = mccfrWave2Report.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const mccfrWave2AdoptionRecord = ledger.add({
+    waveId: mccfrWave2Report.waveId,
+    recordedAt: now(),
+    comparabilityKey: mccfrWave2Report.comparabilityKey,
+    baselineVersion: mccfrWave2Latest.version,
+    opponentId: mccfrWave2Config.opponent,
+    entries: mccfrWave2Entries,
+    nextLoopNotes: [
+      `perfect-recall MCCFR 정책 테이블: iterations=${MCCFR_PR_ITERATIONS}, infosetKeySource=${prPolicyTable.meta.infosetKeySource}, infosetCount=${prPolicyTable.meta.infosetCount}, digest=${prPolicyDigest}.`,
+    ],
+  });
+
+  console.log('11.5) mccfr-wave-2 near-miss 후보 추출');
+  const mccfrWave2NearMiss = extractNearMissCandidates(mccfrWave2AdoptionRecord, mccfrWave2Config.criteria);
+  if (mccfrWave2NearMiss.length === 0) {
+    console.log('   근접실패 후보 없음.');
+  } else {
+    for (const candidate of mccfrWave2NearMiss) {
+      console.log(
+        `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(
+    join(rootDir, 'runs', GAME_ID, 'mccfr-wave-2-near-miss.json'),
+    JSON.stringify(mccfrWave2NearMiss, null, 2),
+  );
+  console.log(`   저장: runs/${GAME_ID}/mccfr-wave-2-near-miss.json`);
+
+  console.log('11.6) mccfr-wave-2 채택 플래그 registry 승격');
+  const mccfrWave2AdoptedFlags = mccfrWave2Report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
+  if (mccfrWave2AdoptedFlags.length === 0) {
+    console.log('   이번 mccfr-wave-2에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('mini-trick MCCFR runner: registry has no latest baseline before mccfr-wave-2 promotion step');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === mccfrWave2Report.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 mccfr-wave-2는 이미 승격됨 — 스킵');
+    } else {
+      const nextVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...mccfrWave2AdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: mccfrWave2Report.waveId,
+        notes: `mccfr-wave-2에서 채택된 플래그 승격: ${mccfrWave2AdoptedFlags.join(', ')}`,
+      });
+      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('12) persist registry/ledger (mccfr-wave-2 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('13) game-summary 재렌더 (mccfr-wave-2 반영)');
+  const finalSummaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: mccfrWave2Config.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), finalSummaryMarkdown);
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 }
 

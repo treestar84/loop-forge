@@ -46,6 +46,7 @@ import type {
   PendingDecision,
   PlayerId,
   ReplayFixture,
+  Rng,
   StrategyFlagSpec,
 } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
@@ -679,6 +680,76 @@ function getObservation(state: SplendorState, player: PlayerId): SplendorObserva
   };
 }
 
+/**
+ * IS-MCTS determinization hook (docs/FIX-BACKLOG.md P4, contract/types.ts's
+ * `GameAdapter.sampleStateFromObservation` doc comment). Splendor's
+ * `getObservation` above already exposes both players' full `PlayerState`
+ * (gems/cards/reserved/nobles) plus the whole board/bank/nobles pool
+ * unfiltered — the only information ANY viewer never sees is the internal
+ * draw ORDER of each tier's undrawn deck (deckCounts only exposes lengths).
+ * So determinization here is narrow and viewer-independent: keep every
+ * observed field byte-for-byte (players, board, bank, nobles, active,
+ * takenColors, pendingNobleChoices), and resample only each tier's deck
+ * order from the cards that are neither on the board nor already owned or
+ * reserved by either player — shuffled with `rng` so it never contradicts
+ * `deckCounts` (the resampled deck for a tier always has exactly
+ * `deckCounts[level]` cards drawn from the tier's true remaining pool).
+ * `isLastRound` is recomputed (monotonic: true once any player's score has
+ * ever reached WIN_SCORE, and score never decreases, so this is sound from
+ * the observation alone) rather than guessed; `staleTurns`/`gameOver` are
+ * set to safe defaults (0 / false) since the observation carries no signal
+ * for the exact stale-turn count and a determinization is only ever sampled
+ * while the real game still has a pending decision.
+ */
+function sampleStateFromObservation(observation: SplendorObservation, _viewer: PlayerId, rng: Rng): SplendorState {
+  const knownIds = new Set<string>();
+  for (const level of LEVELS) {
+    for (const card of observation.board[level]) knownIds.add(card.id);
+  }
+  for (const player of observation.players) {
+    for (const color of COLORS) {
+      for (const card of player.cards[color]) knownIds.add(card.id);
+    }
+    for (const card of player.reserved) knownIds.add(card.id);
+  }
+
+  const levelSources: Record<Level, readonly SplendorCard[]> = { 1: ALL_LEVEL_1, 2: ALL_LEVEL_2, 3: ALL_LEVEL_3 };
+  const decks: Record<Level, readonly SplendorCard[]> = { 1: [], 2: [], 3: [] };
+  for (const level of LEVELS) {
+    const remaining = levelSources[level].filter((card) => !knownIds.has(card.id));
+    const expected = observation.deckCounts[level];
+    if (remaining.length !== expected) {
+      throw new Error(
+        `sampleStateFromObservation: level ${level} deck count mismatch — observation reports ${expected} ` +
+          `remaining cards but ${remaining.length} unseen cards exist against the fixed ${levelSources[level].length}-card pool. ` +
+          'This indicates the observation is internally inconsistent (board/players/deckCounts do not add up).',
+      );
+    }
+    decks[level] = shuffled(remaining, rng.fork(`splendor-determinize-level${level}`));
+  }
+
+  const claimedNobleIds = observation.players.flatMap((player) => player.nobles.map((noble) => noble.id));
+  const revealedNobleIds = [...observation.nobles.map((noble) => noble.id), ...claimedNobleIds];
+  const revealedCardIds = [...knownIds];
+  const isLastRound = observation.players.some((player) => score(player) >= WIN_SCORE);
+
+  return {
+    players: observation.players,
+    board: observation.board,
+    decks,
+    noblePool: observation.nobles,
+    revealedNobleIds,
+    bank: observation.bank,
+    active: observation.active,
+    takenColors: observation.takenColors,
+    pendingNobleChoices: observation.pendingNobleChoices,
+    isLastRound,
+    gameOver: false,
+    revealedCardIds,
+    staleTurns: 0,
+  };
+}
+
 function getOutcome(state: SplendorState): Outcome | null {
   if (currentDecision(state) !== null) return null;
   const scores = state.players.map((p) => score(p));
@@ -1057,6 +1128,7 @@ export const splendorAdapter: GameAdapter<SplendorState, SplendorObservation, Sp
   applyChoice,
   getOutcome,
   encodeChoice,
+  sampleStateFromObservation,
   invariants: [
     cardConservationInvariant,
     noDuplicateCardsInvariant,

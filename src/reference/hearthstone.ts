@@ -51,6 +51,7 @@ import type {
   PendingDecision,
   PlayerId,
   ReplayFixture,
+  Rng,
   StrategyFlagSpec,
 } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
@@ -151,6 +152,20 @@ export interface HearthstonePlayerState {
   readonly manaCurrent: number;
   readonly fatigue: number;
   readonly heroPowerUsed: boolean;
+  /**
+   * Cards permanently removed from this player's play area — played spells
+   * (consumed on cast, tracked nowhere else), minions that have died
+   * (`pruneDeadMinions` drops them from `board` with no other record), and
+   * cards burned by drawing into a full 10-card hand (`drawCardFor`; the
+   * card leaves the deck but never enters the hand). A public zone: both
+   * players observe a spell being cast, a minion dying, or a burn happening,
+   * same rationale as dominion's `trash` (src/reference/dominion.ts's P4
+   * doc comment) — needed so `sampleStateFromObservation` below can account
+   * for every card in this player's fixed 24-card universe (`buildDeck`)
+   * without silently miscounting a dead/played/burned card back into the
+   * hidden pool.
+   */
+  readonly graveyard: readonly CardInstance[];
 }
 
 export interface HearthstoneState {
@@ -174,6 +189,8 @@ export interface HearthstoneObservation {
   readonly myBoard: readonly MinionInstance[];
   readonly myDeckSize: number;
   readonly myFatigue: number;
+  /** Own graveyard — see `HearthstonePlayerState.graveyard` doc comment. */
+  readonly myGraveyard: readonly CardInstance[];
   readonly opponentHero: HeroState;
   readonly opponentMana: { readonly current: number; readonly max: number };
   readonly opponentHeroPowerUsed: boolean;
@@ -181,6 +198,8 @@ export interface HearthstoneObservation {
   readonly opponentHandSize: number;
   readonly opponentDeckSize: number;
   readonly opponentFatigue: number;
+  /** Opponent graveyard — public zone, same doc comment as `myGraveyard`. */
+  readonly opponentGraveyard: readonly CardInstance[];
 }
 
 export type HearthstoneChoice =
@@ -235,6 +254,7 @@ export function createInitialState(seed: number): HearthstoneState {
     manaCurrent: 1,
     fatigue: 0,
     heroPowerUsed: false,
+    graveyard: [],
   };
   const player1: HearthstonePlayerState = {
     hero: { health: STARTING_HERO_HEALTH },
@@ -245,6 +265,7 @@ export function createInitialState(seed: number): HearthstoneState {
     manaCurrent: 0,
     fatigue: 0,
     heroPowerUsed: false,
+    graveyard: [],
   };
 
   return {
@@ -295,10 +316,20 @@ function locate(
   throw new Error(`locate: no such target ${targetId}`);
 }
 
+function pruneOneDead(p: HearthstonePlayerState): HearthstonePlayerState {
+  const dead = p.board.filter((m) => m.health <= 0);
+  if (dead.length === 0) return p;
+  return {
+    ...p,
+    board: p.board.filter((m) => m.health > 0),
+    graveyard: [...p.graveyard, ...dead.map((m) => ({ instanceId: m.instanceId, defId: m.defId }))],
+  };
+}
+
 function pruneDeadMinions(state: HearthstoneState): HearthstoneState {
   const players: [HearthstonePlayerState, HearthstonePlayerState] = [
-    { ...state.players[0], board: state.players[0].board.filter((m) => m.health > 0) },
-    { ...state.players[1], board: state.players[1].board.filter((m) => m.health > 0) },
+    pruneOneDead(state.players[0]),
+    pruneOneDead(state.players[1]),
   ];
   return { ...state, players };
 }
@@ -334,7 +365,17 @@ function drawCardFor(state: HearthstoneState, player: PlayerId): HearthstoneStat
   }
   const card = p.deck[0] as CardInstance;
   const restDeck = p.deck.slice(1);
-  const hand = p.hand.length < MAX_HAND_SIZE ? [...p.hand, card] : p.hand;
+  // A draw into a full hand burns the card (real Hearthstone behavior — see
+  // file header's "10-card hand burn" note): it leaves the deck but does not
+  // enter the hand. It still has to land in `graveyard` (a burn is a public
+  // event, same as a played spell or a dead minion) — otherwise it vanishes
+  // from every tracked zone and `sampleStateFromObservation`'s conservation
+  // accounting (own-universe minus hand/board/graveyard === deck size)
+  // silently drifts out of sync with the real deck size.
+  if (p.hand.length >= MAX_HAND_SIZE) {
+    return withPlayerState(state, player, { ...p, deck: restDeck, graveyard: [...p.graveyard, card] });
+  }
+  const hand = [...p.hand, card];
   return withPlayerState(state, player, { ...p, deck: restDeck, hand });
 }
 
@@ -440,6 +481,12 @@ function applyPlay(state: HearthstoneState, choice: Extract<HearthstoneChoice, {
     next = applyBattlecry(next, player, def.battlecry, choice.targetId);
   } else {
     next = applySpellEffect(next, player, def.effect, choice.targetId);
+    // Spells are consumed on cast — they don't sit on the board where death
+    // would already send them to the graveyard, so record them here instead.
+    next = withPlayer(next, player, (p) => ({
+      ...p,
+      graveyard: [...p.graveyard, { instanceId: cardInstance.instanceId, defId: cardInstance.defId }],
+    }));
   }
   return checkGameOver(next);
 }
@@ -646,6 +693,7 @@ function getObservation(state: HearthstoneState, viewer: PlayerId): HearthstoneO
     myBoard: me.board,
     myDeckSize: me.deck.length,
     myFatigue: me.fatigue,
+    myGraveyard: me.graveyard,
     opponentHero: opp.hero,
     opponentMana: { current: opp.manaCurrent, max: opp.manaMax },
     opponentHeroPowerUsed: opp.heroPowerUsed,
@@ -653,6 +701,7 @@ function getObservation(state: HearthstoneState, viewer: PlayerId): HearthstoneO
     opponentHandSize: opp.hand.length,
     opponentDeckSize: opp.deck.length,
     opponentFatigue: opp.fatigue,
+    opponentGraveyard: opp.graveyard,
   };
 }
 
@@ -672,13 +721,149 @@ function getOutcome(state: HearthstoneState): Outcome | null {
   return { scores, winners };
 }
 
+/**
+ * IS-MCTS determinization hook (docs/FIX-BACKLOG.md P4, contract/types.ts's
+ * `GameAdapter.sampleStateFromObservation` doc comment). Hearthstone's
+ * hidden structure differs from both splendor (perfect information — every
+ * zone public) and dominion (anonymous multiset cards, needing an explicit
+ * `deckComposition` field, src/reference/dominion.ts's own doc comment):
+ * every card here carries a globally unique, *deterministic* instanceId
+ * (`buildDeck`'s `p{playerIndex}-{defId}-{copy}` scheme, fixed by the mirror
+ * deck's card pool — independent of the game's random seed, which only ever
+ * controls shuffle order). That determinism means each side's full 24-card
+ * instance universe can be reconstructed directly from `buildDeck(player)`
+ * without needing any extra composition bookkeeping in the observation.
+ *
+ * What is preserved byte-for-byte (the viewer already knows all of it):
+ *   - own hero health, own mana, own heroPowerUsed, own hand (full
+ *     CardInstance list), own board (full MinionInstance list with exact
+ *     stats)
+ *   - opponent hero health/mana/heroPowerUsed, opponent board (minions are
+ *     summoned face-up — always public in this adapter)
+ *   - both players' graveyards (`myGraveyard`/`opponentGraveyard`) — a
+ *     played spell or a minion's death is an observable public event, same
+ *     "public zone" rationale as dominion's `trash` (P4 note: without it,
+ *     dead/played cards would get silently miscounted back into a hidden
+ *     pool, corrupting the conservation check below)
+ *   - `active`/`turnNumber` and both sides' `fatigue` counters — directly
+ *     observable bookkeeping, not hidden information
+ *
+ * What gets resampled (the only things the viewer truly does not know):
+ *   - the viewer's own deck *order*: composition is fully knowable (their
+ *     own fixed instance universe minus hand/board/graveyard) but a real
+ *     player doesn't see their own future draws, so it's reshuffled fresh
+ *     per determinization — same reasoning, and the same information-leak
+ *     concern (IS-MCTS peeking at its own future draws) as dominion's
+ *     own-deck reshuffle.
+ *   - the opponent's hand + deck, both composition and order: resolved
+ *     together as a single pool by conservation (opponent's full 24-instance
+ *     universe minus their known public zones — board + graveyard) — mirrors
+ *     `hiddenInfoProbe` below and dominion's opponent-pool derivation, since
+ *     a viewer cannot distinguish "in opponent's hand" from "in opponent's
+ *     deck" for any specific unseen card, only the aggregate pool those two
+ *     zones share.
+ *
+ * `viewer` governs only *where* the reconstructed data lands in the
+ * returned state's `players` tuple, never which cards belong to "own" vs
+ * "opponent" — that is always `observation.self` (the true owner baked into
+ * the observation itself by `getObservation`), independent of whatever
+ * `viewer` a caller passes in. This matters for `ismcts.ts`'s `detectViewer`
+ * probe, which deliberately calls this function with the *wrong* candidate
+ * player to rule it out via a failed `getObservation` round-trip — if the
+ * own/opponent instance-id universes were derived from `viewer` instead,
+ * a wrong-candidate probe would try to reconcile the wrong player's
+ * `p{viewer}-*` id namespace against `observation.myHand`'s actual
+ * `p{self}-*` ids and throw instead of just producing a (correctly)
+ * non-matching state.
+ */
+function sampleStateFromObservation(observation: HearthstoneObservation, viewer: PlayerId, rng: Rng): HearthstoneState {
+  const selfPlayer = observation.self;
+  const opponentOfSelf = otherPlayer(selfPlayer);
+
+  function idsOf(cards: readonly { readonly instanceId: string }[]): Set<string> {
+    return new Set(cards.map((c) => c.instanceId));
+  }
+
+  // --- own deck: full 24-card universe minus hand/board/graveyard, order resampled.
+  const ownUniverse = buildDeck(selfPlayer);
+  const ownKnown = new Set<string>([
+    ...idsOf(observation.myHand),
+    ...idsOf(observation.myBoard),
+    ...idsOf(observation.myGraveyard),
+  ]);
+  const ownDeckInstances = ownUniverse.filter((c) => !ownKnown.has(c.instanceId));
+  if (ownDeckInstances.length !== observation.myDeckSize) {
+    throw new Error(
+      `sampleStateFromObservation: own deck reconstruction has ${ownDeckInstances.length} cards but ` +
+        `myDeckSize reports ${observation.myDeckSize} — observation is internally inconsistent.`,
+    );
+  }
+  const ownDeck = shuffled(ownDeckInstances, rng.fork('hearthstone-determinize-own-deck'));
+
+  // --- opponent hand+deck pool: full universe minus known public zones (board + graveyard).
+  const opponentUniverse = buildDeck(opponentOfSelf);
+  const opponentKnown = new Set<string>([...idsOf(observation.opponentBoard), ...idsOf(observation.opponentGraveyard)]);
+  const opponentPool = opponentUniverse.filter((c) => !opponentKnown.has(c.instanceId));
+  const expectedPoolSize = observation.opponentHandSize + observation.opponentDeckSize;
+  if (opponentPool.length !== expectedPoolSize) {
+    throw new Error(
+      `sampleStateFromObservation: opponent hidden pool reconstruction has ${opponentPool.length} cards but ` +
+        `observation reports handSize+deckSize=${expectedPoolSize} — observation is internally inconsistent.`,
+    );
+  }
+  const shuffledPool = shuffled(opponentPool, rng.fork('hearthstone-determinize-opponent'));
+  const opponentHand = shuffledPool.slice(0, observation.opponentHandSize);
+  const opponentDeck = shuffledPool.slice(observation.opponentHandSize);
+
+  const players: [HearthstonePlayerState, HearthstonePlayerState] = [
+    { hero: { health: 0 }, hand: [], deck: [], board: [], manaMax: 0, manaCurrent: 0, fatigue: 0, heroPowerUsed: false, graveyard: [] },
+    { hero: { health: 0 }, hand: [], deck: [], board: [], manaMax: 0, manaCurrent: 0, fatigue: 0, heroPowerUsed: false, graveyard: [] },
+  ];
+  players[viewer] = {
+    hero: observation.myHero,
+    hand: observation.myHand,
+    deck: ownDeck,
+    board: observation.myBoard,
+    manaMax: observation.myMana.max,
+    manaCurrent: observation.myMana.current,
+    fatigue: observation.myFatigue,
+    heroPowerUsed: observation.myHeroPowerUsed,
+    graveyard: observation.myGraveyard,
+  };
+  players[otherPlayer(viewer)] = {
+    hero: observation.opponentHero,
+    hand: opponentHand,
+    deck: opponentDeck,
+    board: observation.opponentBoard,
+    manaMax: observation.opponentMana.max,
+    manaCurrent: observation.opponentMana.current,
+    fatigue: observation.opponentFatigue,
+    heroPowerUsed: observation.opponentHeroPowerUsed,
+    graveyard: observation.opponentGraveyard,
+  };
+
+  return {
+    players,
+    active: observation.active,
+    turnNumber: observation.turnNumber,
+    gameOver: false,
+    // Content-coverage bookkeeping only (see `exercisedContent`), not read by
+    // any legality/gameplay logic — safe to reset for a determinization that
+    // only ever exists for the duration of one search simulation (same
+    // rationale as dominion's `playedKingdom` reset in its own
+    // `sampleStateFromObservation`).
+    playedCardIds: [],
+    usedHeroPower: false,
+  };
+}
+
 // --- Invariants -------------------------------------------------------
 
 function noDuplicateInstanceIdsInvariant(state: HearthstoneState): string | null {
   const seen = new Set<string>();
   for (const p of state.players) {
-    for (const c of [...p.hand, ...p.deck]) {
-      if (seen.has(c.instanceId)) return `duplicate card instance ${c.instanceId} found in hand/deck`;
+    for (const c of [...p.hand, ...p.deck, ...p.graveyard]) {
+      if (seen.has(c.instanceId)) return `duplicate card instance ${c.instanceId} found in hand/deck/graveyard`;
       seen.add(c.instanceId);
     }
     for (const m of p.board) {
@@ -1051,6 +1236,7 @@ export const hearthstoneAdapter: GameAdapter<HearthstoneState, HearthstoneObserv
   applyChoice,
   getOutcome,
   encodeChoice,
+  sampleStateFromObservation,
   invariants: [
     noDuplicateInstanceIdsInvariant,
     manaBoundsInvariant,

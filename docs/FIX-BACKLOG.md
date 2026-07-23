@@ -7,15 +7,21 @@
 
 ## 미착수
 
-고도화 라운드 (2026-07-23, 사용자 승인 — 5개 전부 적용 판정):
-
 | ID | 항목 | 출처 |
 |---|---|---|
-| O10 | 승격 게이트가 raw heuristic만 상대해 base-무시(override)형 후보의 "현 기준선 대비 회귀"를 검출 못 함 — 오목 v3(순수 mcts-s64)가 v2 합성봇보다 약한데도 승격됨(B열 100%→87.5%, 문맥 상이 주의). holdout 통과 후 "현 기준선 합성봇 vs 후보" regression 티어 추가(옵션, 미설정 시 기존 동작 불변) | GAP-ANALYSIS-7 §1.5 |
-| P1 | `search/mcts` 롤아웃 정책 옵션 — 랜덤 → `baselines.heuristic` 롤아웃(게임 중립 유지). 오목 `mcts-s64-hr` 후보로 재도전(regression 티어 포함 새 웨이브) | 리더보드 결과 2 (C열 100% 열세) |
-| P2 | 장기 이동 생성/장군 판정 성능 최적화 — **행동 보존**(고정 시드 trajectory digest 전후 완전 동일 강제). 목표 5배 이상, 달성 시 장기 MCTS 예산 상향 재실험 | GAP-ANALYSIS-7 §1.5 (s16 전패) |
-| P3 | mini-trick 관찰에 공개 행동 이력 추가 → `informationStateKey` perfect recall 달성 → MCCFR 재학습·재도전(새 플래그명 `mccfr-os-<iters>-pr`, 새 뱅크) | GAP-ANALYSIS-7 §3 |
-| P4 | contract에 `sampleStateFromObservation?`(결정화 훅) + `search/ismcts.ts` — 스플랜더 실증 먼저, 도미니언·하스스톤 단계 확장 | GAP-ANALYSIS-7 §2 이연분 해제 |
+| P6 | **(전 게임 스윕에서 발견)** scored 게임의 `minScoreDiff` 고정 임계(5)가 "승률 압도·점수차 소폭" 스타일 후보를 일괄 차단 — 스플랜더 ismcts-s128-hr(prune 승률 0.900, 점수차 3.67)·도미니언 ismcts-s64-hr(0.933, CI 0.83–1.00, 점수차 3.40)·윙스팬 ismcts-s256-hr(**1.000**, 점수차 4.07) 3게임 연속 screened. 점수차 임계를 게임 캘리브레이션(노이즈 플로어·점수 스케일)에서 파생하도록 blueprint 연결 + near-miss 추출이 점수차 탈락도 잡게 보강 + 결정화 왕복 검증의 온보딩 품질 검사 효용(하스스톤 회계 버그 2건 적발) ONBOARDING-GUIDE 반영 | GAP-ANALYSIS-8 §2 |
+
+## 완료 — 고도화 라운드 + 전 게임 스윕 (2026-07-23~24, `docs/GAP-ANALYSIS-8.md`)
+
+| ID | 처치 내용 | 증거 |
+|---|---|---|
+| O10 | regression 티어(kernel/gates TierId + wave-runner tiers.regression, 상대=현 기준선 합성봇, 실패 시 near-miss 강등, 미설정 시 기존 동작·digest 불변) | 신규 테스트 9건(override 회귀 검출·동급 통과·digest 고정), 오목 v4 채택에서 첫 실전 검증(regression 0.600 확인 후 승격) |
+| P1 | `rolloutPolicy: 'random'\|'heuristic'` 옵션(기본 random, 기존 동작 불변). mcts-s64-hr 자체는 screen no-op → P5 발견의 계기 | mcts-wave-2 실행 기록, 27수 100% 동일 프로브 — 근본 원인은 P5로 이관·해결 |
+| P2 | 장기 이동생성·장군판정 최적화(+267/-34), 행동 보존 강제 | 30시드 trajectory 지문 전후 완전 일치(2회 재현), 커밋 28476bc |
+| P3 | mini-trick perfect recall + 메모리 계단 측정(150k iters, heapUsed≈1.4GB) + mccfr-wave-2 | scoreAdapter 재채점 완전 동일, mccfr-os-150000-pr screened(prune 0.550), registry v1 유지 |
+| P4 | `sampleStateFromObservation` 훅 + `search/ismcts.ts`(SO-ISMCTS, availability-count UCB1) + 결정화 4게임(스플랜더·도미니언·하스스톤·윙스팬) 구현·검증 | 게임별 왕복·invariants·시드 민감성 3종 테스트, 하스스톤 회계 버그 2건 적발·수정(graveyard 존, 드로우 번) |
+| P5 | mcts.ts 타이브레이크에 보상 반영 + 확장 순서 rng 셔플(이식 충실도 회복). 기존 mcts-s64 재조립 행동 변화는 주석·문서에 명시 | 수정 직후 오목 mcts2-s256-hr adopted(v4) — no-op 병리 해소 실증 |
+| 스윕 | 전 7게임 순차 실행(무거운 연산 동시 1개·nice·힙 오버라이드 금지): 채택 2(오목 v4, 하스스톤 v2) / 점수차 탈락 3(P6) / 실력 미달 2(장기 0.375, mini-trick 0.550) | GAP-ANALYSIS-8 §1 표, 전 게임 registry가 verdict와 정확히 일치함을 메인 세션에서 직접 확인 |
 
 이연 항목(IS-MCTS+결정화·레지스트리 버전 표현 일반화·정확 exploitability·
 vanilla CFR·동시수·O8 sampled exploitability)은 `docs/GAP-ANALYSIS-7.md` §2에
@@ -23,8 +29,10 @@ vanilla CFR·동시수·O8 sampled exploitability)은 `docs/GAP-ANALYSIS-7.md` �
 
 ## 처치 순서 권고
 
-O10이 다음 라운드 최우선 — 탐색/학습 후보가 늘수록 override형 후보 비중이 커져
-회귀 미검출 위험이 커진다.
+P6이 다음 라운드 최우선 — 은닉 게임 3종(스플랜더·도미니언·윙스팬)에서 승률
+압도 후보가 전부 점수차 고정 임계에 막혀 있어, 임계 캘리브레이션 없이는 이
+게임들에서 채택이 구조적으로 불가능하다. 이후 후보: 하스스톤 v2·오목 v4의
+3열 벤치마크 재실행(리더보드 갱신), 오목 C열(vs Opus) 역전 재도전.
 
 ## 완료 — OpenSpiel 흡수 라운드 (2026-07-23, `docs/GAP-ANALYSIS-7.md`)
 
@@ -60,6 +68,7 @@ O10이 다음 라운드 최우선 — 탐색/학습 후보가 늘수록 override
 | W5 | `assembleWaveConfig` 헬퍼 신설(`src/loop/assemble-wave-config.ts`), `demo.ts`가 이를 쓰도록 리팩터 | `npm run demo` 리팩터 전후 WaveReport reportDigest(sha256) 완전 동일 확인 |
 | W6 | 벤치마크/채택 이력 렌더링이 승/패전용 게임의 scoreDiff를 숨기고 identityCenter 컨텍스트를 표시 | 인자 생략 시 기존 출력과 바이트 동일(하위호환), win-loss-only 전달 시 "N/A — 승/패 전용" 라벨 확인 |
 | W7 | 오목 어댑터에 `scoreMargin:'none'` 선언 + `ONBOARDING-GUIDE.md` §8 신설, `INTERPRETATION.md` §3.5 상호참조 추가 | 오목 재채점: `scoreStructure=win-loss-only`, overall=100, ready=true 유지 확인 |
+| P3 | mini-trick `MiniTrickState.completedTricks`(완료 트릭 카드 이력, public) 추가 → `getObservation`/`informationStateKey`에 노출 → perfect recall 달성(같은 {hand, trickWins, tricksCompleted, trick}이라도 완료 트릭 이력이 다르면 다른 키). 메모리 안전 3점 계단 측정(10k/30k/100k iterations)으로 외삽해 heapUsed 1.5GB 이하 최대치 150,000 iterations 선정, `mccfr-os-150000-pr` 학습(15.3s, 1,797,073 infosets, `runs/mini-trick/policy-mccfr-os-150000-pr.json`) 후 `mccfr-wave-2`(regression 티어 포함, 새 시드 뱅크 4개: 30000/31000/32000/34000)로 재도전 | scoreAdapter 재채점 C0~C7 완전 동일(diff 전후 axes 점수 무변화, blocker 0개), mccfr-wave-2: screen→smoke 통과(0.578) 후 prune 탈락 **screened**(mccfr-wave-1의 0.528 screened와 나란히 비교 — 시드 문맥 상이하므로 절대 수치 직접 비교 금지, INTERPRETATION 제1규칙), 2회 실행 모두 registry `['v1']` 유지(중복 승격 없음), tsc 0에러/36 suites/415 tests 통과 |
 | H1 | `score.ts`의 20개 blocker `remediation`에 게임-규칙 언어 브릿지 문장 추가, `report.ts`에 축 범례 한 줄 추가 | 전/후 예시로 확인, 기존 테스트가 `includes()` 방식이라 무손상 |
 | Z3 / H5 | `src/reference/runners/` 디렉토리 신설, `dependency-rules.test.ts`가 `reference/runners/`로 시작하는 모든 경로를 app-boundary로 자동 인식(접두어 매칭) — 게임이 늘어나도 예외 목록 수동 추가 불필요 | `src/reference/runners/gomoku.ts`로 실증, 레이어·결정론 규칙 유지 확인 |
 | H7 | `src/artifacts/game-state.ts` 신설 — `runs/<gameId>/registry.json`·`ledger.json` 재로드/저장 헬퍼 | 오목 러너 2회 연속 실행을 메인 세션에서 직접 재현: 1회차 anchors=2/records=1 → 2회차 anchors=2(재등록 안 함)/records=2(누적) |

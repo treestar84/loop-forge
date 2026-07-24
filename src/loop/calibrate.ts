@@ -141,6 +141,17 @@ export interface NoiseFloorResult extends BootstrapResult {
    *   });
    */
   readonly blockStdDev: number;
+  /**
+   * Sample standard deviation (n-1) of `candidateScoreDelta` across the same
+   * identity paired-seed blocks — the noise-floor input for deriving a
+   * game-specific `minScoreDiff` gate threshold (docs/FIX-BACKLOG.md P6):
+   * a fixed threshold like the DEFAULT_CRITERIA's 5 has no relationship to
+   * a given game's score scale or its identity-self-play noise, so it can
+   * reject candidates whose score-diff margin is real but small relative to
+   * a larger-scoring game's noise. See kernel/blueprint.ts's
+   * `recommendedMinScoreDiff` for how this value is turned into a threshold.
+   */
+  readonly scoreDiffStdDev: number;
 }
 
 function sampleStdDev(values: readonly number[]): number {
@@ -182,5 +193,6 @@ export function measureNoiseFloor(
   }
   const bootstrap = bootstrapPairedSeedBlocks(outcomes, options);
   const blockStdDev = sampleStdDev(outcomes.map((outcome) => outcome.candidateWinFraction));
-  return { ...bootstrap, blockStdDev };
+  const scoreDiffStdDev = sampleStdDev(outcomes.map((outcome) => outcome.candidateScoreDelta));
+  return { ...bootstrap, blockStdDev, scoreDiffStdDev };
 }

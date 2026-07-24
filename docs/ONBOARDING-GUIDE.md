@@ -252,3 +252,23 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
 `src/kernel/classify.ts`/`blueprint.ts`를 직접 확장할 근거로 §7에 새 조항을 먼저
 추가하고 갭 분석 문서에 기록하라 — 이 자동화 계층도 손으로 설계된 규칙 위에 있을
 뿐, 모든 미래 게임 계열을 예측하지 못한다.
+
+## 9. 결정화 훅과 점수차 임계 (전 게임 스윕·P6 반영, 2026-07-25)
+
+- **은닉 정보 게임은 `sampleStateFromObservation`(결정화 훅) 구현을 권장한다** —
+  IS-MCTS 후보 투입의 전제일 뿐 아니라, 왕복 검증
+  (`getObservation(sampled, viewer) === observation` + invariants 통과)이
+  어댑터의 카드/자원 회계 버그를 드러내는 **온보딩 품질 검사 장치**를 겸한다.
+  실증: 하스스톤 온보딩은 C0~C7을 전부 통과한 상태였지만, 결정화 왕복 검증이
+  "소멸 카드 존(graveyard) 부재"와 "손패 캡 드로우 번 미기록" 2건의 실제 회계
+  결함을 적발했다(GAP-ANALYSIS-8 §2). 구현 시 3종 테스트(왕복 일치 · invariants ·
+  시드 민감성)를 함께 고정하라.
+- **spec 선언 지침**: `scoreMargin`('none'|'scored')과 `utility`('zero-sum'|'general')는
+  기본값에 맡기지 말고 명시 선언하라 — 분류기(classifyGame)와 블루프린트가 이
+  선언으로 승격 기준을 조립한다.
+- **점수차 임계는 고정 상수가 아니다(P6)**: scored 게임의 `minScoreDiff`는
+  캘리브레이션(`measureNoiseFloor().scoreDiffStdDev`)의 2σ로 파생하는 것이 정본
+  (`deriveBlueprint().recommendedMinScoreDiff`). 게임마다 점수 단위가 다르므로
+  범게임 상수는 INTERPRETATION 제1규칙 위반이다. 항등 노이즈가 0으로 붕괴하는
+  게임(스플랜더·윙스팬 실측)은 임계 0 + 경고가 정상이며, 노이즈 차단은 승률
+  게이트·CI·regression 티어가 계속 담당한다.

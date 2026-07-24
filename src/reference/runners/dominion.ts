@@ -522,6 +522,214 @@ function main(): void {
   });
   writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), finalSummaryMarkdown, 'utf8');
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
+
+  /**
+   * 15) ismcts-wave-2 (docs/FIX-BACKLOG.md P6, docs/GAP-ANALYSIS-8.md §2).
+   * ismcts-wave-1 above was screened purely on the fixed cross-game
+   * DEFAULT_CRITERIA.minScoreDiff=5: prune winRate=0.933 (CI 0.83-1.00)
+   * cleared minWinRate comfortably, but pointScoreDiff=3.40 fell short of a
+   * threshold with no relationship to dominion's own score scale. P6 derives
+   * a game-calibrated threshold instead — 2 x the identity-self-play
+   * scoreDiffStdDev already measured in step 2's `noiseFloor` — and passes it
+   * through `assembleWaveConfig`'s `calibration` argument so
+   * `deriveBlueprint`'s `recommendedMinScoreDiff` becomes this wave's
+   * `criteria.minScoreDiff`. Same candidate/logic as ismcts-wave-1
+   * (`ismctsAdapter` / `DOMINION_ISMCTS_S64_HR_FLAG`, unchanged) — only the
+   * gate criteria differ. New seed banks (dominion-ismcts2-*, ranges
+   * 40000-43019) do not overlap ismcts-wave-1's 30000-33019 range or any
+   * dominion-runner-* range.
+   */
+  console.log('15) IS-MCTS 후보 웨이브 2 (ismcts-wave-2, P6: 점수차 임계 캘리브레이션 파생)');
+  const derivedMinScoreDiff = noiseFloor.scoreDiffStdDev > 0 ? 2 * noiseFloor.scoreDiffStdDev : 0;
+  console.log(
+    `   캘리브레이션: scoreDiffStdDev=${noiseFloor.scoreDiffStdDev.toFixed(4)}, ` +
+      `파생 임계=${derivedMinScoreDiff.toFixed(4)} (기존 고정 임계=5)`,
+  );
+
+  const ismcts2Latest = registry.latest();
+  if (ismcts2Latest === undefined) {
+    throw new Error('dominion runner: registry has no latest baseline before ismcts-wave-2');
+  }
+
+  const ismcts2Ledger = new SeedLedger();
+  const ismcts2ReservedAt = now();
+  const ismcts2SmokeMax = 30;
+  const ismcts2PruneBlocks = 15;
+  const ismcts2HoldoutBlocks = 15;
+  const ismcts2RegressionBlocks = 20;
+  ismcts2Ledger.reserve({
+    bankId: 'dominion-ismcts2-smoke',
+    range: { start: 40000, end: 40000 + ismcts2SmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: ismcts2ReservedAt,
+  });
+  ismcts2Ledger.reserve({
+    bankId: 'dominion-ismcts2-prune',
+    range: { start: 41000, end: 41000 + ismcts2PruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: ismcts2ReservedAt,
+  });
+  ismcts2Ledger.reserve({
+    bankId: 'dominion-ismcts2-holdout',
+    range: { start: 42000, end: 42000 + ismcts2HoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: ismcts2ReservedAt,
+  });
+  ismcts2Ledger.reserve({
+    bankId: 'dominion-ismcts2-regression',
+    range: { start: 43000, end: 43000 + ismcts2RegressionBlocks - 1 },
+    purpose: 'regression',
+    reservedAt: ismcts2ReservedAt,
+  });
+
+  const ismcts2WaveConfig = assembleWaveConfig(
+    ismctsAdapter,
+    {
+      waveId: 'ismcts-wave-2',
+      candidates: [{ flag: DOMINION_ISMCTS_S64_HR_FLAG }],
+      opponent: 'heuristic',
+      ledger: ismcts2Ledger,
+      recordedAt: now(),
+      baselineFlags: ismcts2Latest.flags,
+      baselineVersion: ismcts2Latest.version,
+      tiers: {
+        smoke: {
+          bankId: 'dominion-ismcts2-smoke',
+          sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+          maxBlocks: ismcts2SmokeMax,
+          minBlocks: 5,
+        },
+        prune: { bankId: 'dominion-ismcts2-prune', blocks: ismcts2PruneBlocks },
+        holdout: { bankId: 'dominion-ismcts2-holdout', blocks: ismcts2HoldoutBlocks },
+        regression: { bankId: 'dominion-ismcts2-regression', blocks: ismcts2RegressionBlocks },
+      },
+      screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
+    },
+    { blockStdDev: noiseFloor.blockStdDev, scoreDiffStdDev: noiseFloor.scoreDiffStdDev },
+  );
+  console.log(
+    `   criteria.minScoreDiff=${ismcts2WaveConfig.criteria.minScoreDiff.toFixed(4)} (블루프린트 파생, 기존 고정값 5와 비교)`,
+  );
+
+  const ismcts2Report = runWave(ismctsAdapter, ismcts2WaveConfig);
+  for (const result of ismcts2Report.results) {
+    console.log(
+      `   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`,
+    );
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(
+          `     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} scoreDiff=${stats.pointScoreDiff.toFixed(3)} blocks=${stats.blocks}`,
+        );
+      }
+    }
+    if (result.warnings.length > 0) {
+      for (const warning of result.warnings) {
+        console.log(`     ⚠ ${warning}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: ismcts2Report.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: ismcts2Report.comparabilityKey,
+    payload: ismcts2Report,
+    markdown: `# Wave Report — ${ismcts2Report.waveId}\n\n${ismcts2Report.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('16) ismcts-wave-2 adoption ledger 기록');
+  const ismcts2Entries: AdoptionEntry[] = ismcts2Report.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const ismcts2AdoptionRecord = ledger.add({
+    waveId: ismcts2Report.waveId,
+    recordedAt: now(),
+    comparabilityKey: ismcts2Report.comparabilityKey,
+    baselineVersion: ismcts2Latest.version,
+    opponentId: ismcts2WaveConfig.opponent,
+    entries: ismcts2Entries,
+    nextLoopNotes: [],
+  });
+
+  console.log('16.5) ismcts-wave-2 near-miss 후보 추출');
+  const ismcts2NearMiss = extractNearMissCandidates(ismcts2AdoptionRecord, ismcts2WaveConfig.criteria);
+  if (ismcts2NearMiss.length === 0) {
+    console.log('   근접실패 후보 없음.');
+  } else {
+    for (const candidate of ismcts2NearMiss) {
+      console.log(
+        `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(
+    join(rootDir, 'runs', GAME_ID, 'ismcts-wave-2-near-miss.json'),
+    JSON.stringify(ismcts2NearMiss, null, 2),
+  );
+  console.log(`   저장: runs/${GAME_ID}/ismcts-wave-2-near-miss.json`);
+
+  console.log('16.6) ismcts-wave-2 채택 플래그 registry 승격');
+  const ismcts2AdoptedFlags = ismcts2Report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
+  if (ismcts2AdoptedFlags.length === 0) {
+    console.log('   이번 ismcts-wave-2에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('dominion runner: registry has no latest baseline before ismcts-wave-2 promotion step');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === ismcts2Report.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 ismcts-wave-2는 이미 승격됨 — 스킵');
+    } else {
+      const nextVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...ismcts2AdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: ismcts2Report.waveId,
+        notes: `ismcts-wave-2에서 채택된 플래그 승격 (P6 파생 임계): ${ismcts2AdoptedFlags.join(', ')}`,
+      });
+      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('17) persist registry/ledger (ismcts-wave-2 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('18) game-summary 재렌더 (ismcts-wave-2 반영)');
+  const wave2SummaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: ismcts2WaveConfig.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), wave2SummaryMarkdown, 'utf8');
+  console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 }
 
 main();

@@ -92,4 +92,29 @@ describe('finalVerdict', () => {
     const stats: TierStats = { pointWinRate: 0.3, pointScoreDiff: -10 };
     expect(finalVerdict([], stats, DEFAULT_CRITERIA)).toBe('failed');
   });
+
+  // P6 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-8.md §2): smoke-passed
+  // candidates that fail a later fixed tier (prune/holdout) purely on
+  // scoreDiff — winRate already clears the bar — are near-miss, not
+  // screened. This is the exact pattern that blocked splendor/dominion/
+  // wingspan's IS-MCTS candidates (winRate 0.90-1.00, scoreDiff just under 5).
+  it('near-miss (not screened) when smoke passed but a later tier fails on scoreDiff alone', () => {
+    const stats: TierStats = { pointWinRate: 0.9, pointScoreDiff: 3.67 };
+    expect(finalVerdict(['screen', 'smoke'], stats, DEFAULT_CRITERIA)).toBe('near-miss');
+  });
+
+  it('still screened when smoke passed and the later-tier failure is not scoreDiff-only (winRate also short)', () => {
+    const stats: TierStats = { pointWinRate: 0.4, pointScoreDiff: 3 };
+    expect(finalVerdict(['screen', 'smoke'], stats, DEFAULT_CRITERIA)).toBe('screened');
+  });
+
+  it('still screened when smoke passed and the later-tier failure clears scoreDiff but not winRate', () => {
+    const stats: TierStats = { pointWinRate: 0.4, pointScoreDiff: 10 };
+    expect(finalVerdict(['screen', 'smoke'], stats, DEFAULT_CRITERIA)).toBe('screened');
+  });
+
+  it('near-miss remains at boundary: winRate exactly at minWinRate, scoreDiff just under minScoreDiff, smoke passed', () => {
+    const stats: TierStats = { pointWinRate: 0.53, pointScoreDiff: 4.99 };
+    expect(finalVerdict(['screen', 'smoke'], stats, DEFAULT_CRITERIA)).toBe('near-miss');
+  });
 });

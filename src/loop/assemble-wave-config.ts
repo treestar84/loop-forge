@@ -43,10 +43,16 @@ export function assembleWaveConfig(
   const classification = classifyGame(adapter.spec, adapter.contentInventory);
   const blueprint = deriveBlueprint(classification, calibration);
 
+  // P6 (docs/FIX-BACKLOG.md): prefer the calibration-derived threshold
+  // (recommendedMinScoreDiff) over the uncalibrated promotionMinScoreDiff
+  // fallback whenever calibration data was actually supplied — callers that
+  // don't pass `calibration` get byte-identical behavior to before P6, since
+  // deriveBlueprint's recommendedMinScoreDiff falls back to the same
+  // DEFAULT_CRITERIA.minScoreDiff in that case anyway (kernel/blueprint.ts).
   const criteria: PromotionCriteria =
     overrides?.criteria ?? {
       minWinRate: blueprint.promotionMinWinRate,
-      minScoreDiff: blueprint.promotionMinScoreDiff,
+      minScoreDiff: blueprint.recommendedMinScoreDiff,
     };
   const signalCollapseThreshold =
     overrides?.signalCollapseThreshold ?? blueprint.signalCollapseThreshold;

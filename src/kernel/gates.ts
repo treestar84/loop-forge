@@ -28,6 +28,14 @@ export interface PromotionCriteria {
 
 export const DEFAULT_CRITERIA: PromotionCriteria = {
   minWinRate: 0.53,
+  // minScoreDiff=5 is an uncalibrated cross-game fallback, not a
+  // game-specific threshold — it has no relationship to any one game's
+  // score scale or identity-self-play noise floor (docs/FIX-BACKLOG.md P6:
+  // 3 hidden-info games in a row had winRate 0.90-1.00 candidates screened
+  // out purely on this fixed number). The game-calibrated threshold is
+  // `deriveBlueprint(...).recommendedMinScoreDiff` (kernel/blueprint.ts) —
+  // callers should prefer that over this default whenever calibration data
+  // (measureNoiseFloor's scoreDiffStdDev) is available.
   minScoreDiff: 5,
 };
 
@@ -69,10 +77,26 @@ export function finalVerdict(
   if (passed.has('holdout')) {
     return 'adopted';
   }
+
+  // P6 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-8.md §2): a candidate that
+  // passed smoke — so it is behaviorally distinct AND already cleared the
+  // win-rate/score-diff bar once under SPRT — but then fails a later fixed
+  // tier (prune/holdout) purely on scoreDiff while still meeting minWinRate
+  // is a near-miss, not a plain "screened". This is checked BEFORE the
+  // smoke-passed screened fallback below, and does not relax the AND gate
+  // itself: judgeTier still requires both winRate and scoreDiff to pass a
+  // tier. Only the *label* on this particular failure mode changes, so the
+  // scoreDiff-only shortfall surfaces to extractNearMissCandidates instead
+  // of being indistinguishable from every other kind of screened failure.
+  const isScoreDiffOnlyShortfall =
+    lastStats.pointWinRate >= criteria.minWinRate && lastStats.pointScoreDiff < criteria.minScoreDiff;
+  if (passed.has('smoke') && isScoreDiffOnlyShortfall) {
+    return 'near-miss';
+  }
   if (passed.has('smoke')) {
     return 'screened';
   }
-  if (lastStats.pointWinRate >= criteria.minWinRate && lastStats.pointScoreDiff < criteria.minScoreDiff) {
+  if (isScoreDiffOnlyShortfall) {
     return 'near-miss';
   }
   return 'failed';

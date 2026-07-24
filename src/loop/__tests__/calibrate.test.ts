@@ -105,4 +105,22 @@ describe('measureNoiseFloor', () => {
     });
     expect(result.blockStdDev).toBeGreaterThanOrEqual(0);
   });
+
+  // P6 (docs/FIX-BACKLOG.md): scoreDiffStdDev is the calibration input
+  // deriveBlueprint's recommendedMinScoreDiff (kernel/blueprint.ts) consumes.
+  it('reports a non-negative scoreDiffStdDev, deterministic for the same seeds', () => {
+    const seeds = Array.from({ length: 40 }, (_, i) => 30_000 + i);
+    const first = measureNoiseFloor(adapter, adapter.baselines.random, seeds, 400, {
+      iterations: 500,
+      confidenceLevel: 0.95,
+      seed: 999,
+    });
+    const second = measureNoiseFloor(adapter, adapter.baselines.random, seeds, 400, {
+      iterations: 500,
+      confidenceLevel: 0.95,
+      seed: 999,
+    });
+    expect(first.scoreDiffStdDev).toBeGreaterThanOrEqual(0);
+    expect(second.scoreDiffStdDev).toBe(first.scoreDiffStdDev);
+  });
 });

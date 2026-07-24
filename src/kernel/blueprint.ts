@@ -21,6 +21,18 @@ export interface PipelineBlueprint {
   readonly c3Required: boolean;
   readonly contentCoverageRequired: boolean;
   readonly benchmarkShowScoreDiff: boolean;
+  /**
+   * Game-calibrated `minScoreDiff` gate threshold (docs/FIX-BACKLOG.md P6):
+   * "2 sigma of identity noise" — a margin distinguishable from the
+   * identity-self-play noise floor, since the gate's purpose is to reject
+   * noise, not to demand an arbitrarily-sized margin (INTERPRETATION.md §1's
+   * comparabilityKey-scoped-comparison rule applies equally here: a fixed
+   * cross-game constant like DEFAULT_CRITERIA.minScoreDiff has no relation
+   * to any one game's score scale). See the branches below for exactly how
+   * this is derived; `promotionMinScoreDiff` above is left untouched as the
+   * uncalibrated fallback for callers that don't pass `scoreDiffStdDev`.
+   */
+  readonly recommendedMinScoreDiff: number;
   readonly warnings: readonly string[];
 }
 
@@ -40,7 +52,16 @@ const RECOMMEND_TARGET_EFFECT = 0.03;
 
 export interface BlueprintCalibration {
   readonly blockStdDev?: number;
+  /** Identity-noise-floor standard deviation of score-delta (P6, from
+   * `measureNoiseFloor`'s `scoreDiffStdDev`) — drives `recommendedMinScoreDiff`. */
+  readonly scoreDiffStdDev?: number;
 }
+
+/** "Noise floor x this multiplier" — a margin twice the identity-self-play
+ * score-delta standard deviation is distinguishable from noise under a
+ * normal approximation (docs/FIX-BACKLOG.md P6): the gate's job is to reject
+ * noise, not to impose an arbitrary fixed margin. */
+const SCORE_DIFF_NOISE_MULTIPLIER = 2;
 
 export function deriveBlueprint(
   classification: GameClassification,
@@ -65,13 +86,47 @@ export function deriveBlueprint(
 
   let c5IdentitySeedCount = C5_IDENTITY_SEED_COUNT_DEFAULT;
   let c5HeadToHeadSeedCount = C5_HEAD_TO_HEAD_SEED_COUNT_DEFAULT;
-  if (calibration?.blockStdDev !== undefined) {
+  // Guard blockStdDev>0 before calling recommendBlockCount (found while
+  // wiring P6's scoreDiffStdDev through assembleWaveConfig): a collapsed
+  // identity-noise-floor measurement (blockStdDev===0, e.g. splendor's
+  // seat-mirroring signal collapse) previously reached recommendBlockCount
+  // unguarded and threw, even though every runner already has to
+  // clamp-fallback around this exact case manually (R5). Falls back to the
+  // seed-count defaults above, same as passing no calibration at all.
+  if (calibration?.blockStdDev !== undefined && calibration.blockStdDev > 0) {
     const recommended = recommendBlockCount({
       blockStdDev: calibration.blockStdDev,
       targetEffect: RECOMMEND_TARGET_EFFECT,
     });
     c5IdentitySeedCount = recommended;
     c5HeadToHeadSeedCount = recommended;
+  }
+
+  // P6: minScoreDiff threshold derivation, in priority order —
+  // 1) win-loss-only games never have a meaningful score margin (unchanged
+  //    invariant, see promotionMinScoreDiff above).
+  // 2) scored + a real (>0) noise-floor measurement -> 2 sigma of that noise.
+  // 3) scored + a measurement that collapsed to exactly 0 (deterministic
+  //    identity self-play, R5's clamp-fallback pattern) -> threshold 0, but
+  //    flagged with a warning since a 0 threshold means the gate can't
+  //    distinguish "real margin" from "no margin" for this game.
+  // 4) scored + no calibration provided at all -> the uncalibrated
+  //    DEFAULT_CRITERIA.minScoreDiff fallback (kernel/gates.ts).
+  let recommendedMinScoreDiff: number;
+  if (classification.scoreStructure === 'win-loss-only') {
+    recommendedMinScoreDiff = 0;
+  } else if (calibration?.scoreDiffStdDev !== undefined) {
+    if (calibration.scoreDiffStdDev === 0) {
+      recommendedMinScoreDiff = 0;
+      warnings.push(
+        'scoreDiffStdDev=0 — 항등 자기대국 점수차가 완전히 붕괴(결정론적 동점), ' +
+          'recommendedMinScoreDiff를 0으로 폴백함(노이즈와 실제 마진을 구별할 수 없음)',
+      );
+    } else {
+      recommendedMinScoreDiff = SCORE_DIFF_NOISE_MULTIPLIER * calibration.scoreDiffStdDev;
+    }
+  } else {
+    recommendedMinScoreDiff = DEFAULT_CRITERIA.minScoreDiff;
   }
 
   return {
@@ -87,6 +142,7 @@ export function deriveBlueprint(
     c3Required: classification.informationStructure === 'hidden',
     contentCoverageRequired: classification.contentWeight !== 'none',
     benchmarkShowScoreDiff: classification.scoreStructure !== 'win-loss-only',
+    recommendedMinScoreDiff,
     warnings,
   };
 }

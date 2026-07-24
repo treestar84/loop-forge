@@ -7,9 +7,14 @@
 
 ## 미착수
 
-| ID | 항목 | 출처 |
+_(없음 — P6까지 전부 완료, 2026-07-25. 다음 라운드 후보는 GAP-ANALYSIS-8 §5 참고:
+벤치마크 일괄 재실행, 소스 클로저 digest, 오목 C열 역전, registry 버전 표현 일반화.)_
+
+## 완료 — P6 (2026-07-24~25, `docs/GAP-ANALYSIS-8.md` §4.5)
+
+| ID | 처치 내용 | 증거 |
 |---|---|---|
-| P6 | **(전 게임 스윕에서 발견)** scored 게임의 `minScoreDiff` 고정 임계(5)가 "승률 압도·점수차 소폭" 스타일 후보를 일괄 차단 — 스플랜더 ismcts-s128-hr(prune 승률 0.900, 점수차 3.67)·도미니언 ismcts-s64-hr(0.933, CI 0.83–1.00, 점수차 3.40)·윙스팬 ismcts-s256-hr(**1.000**, 점수차 4.07) 3게임 연속 screened. 점수차 임계를 게임 캘리브레이션(노이즈 플로어·점수 스케일)에서 파생하도록 blueprint 연결 + near-miss 추출이 점수차 탈락도 잡게 보강 + 결정화 왕복 검증의 온보딩 품질 검사 효용(하스스톤 회계 버그 2건 적발) ONBOARDING-GUIDE 반영 | GAP-ANALYSIS-8 §2 |
+| P6 | ① `measureNoiseFloor().scoreDiffStdDev` 신설 → `deriveBlueprint().recommendedMinScoreDiff`(win-loss-only→0 / scored+실측→2σ / 항등 붕괴→0+경고 / 미보정→폴백 5) → `assembleWaveConfig` 기본 배선. ② `finalVerdict`: smoke 통과 후 점수차-단독-탈락은 screened보다 near-miss 우선. ③ 3게임 재도전(ismcts-wave-2, 새 뱅크): 스플랜더·도미니언은 holdout까지 통과 후 **regression에서 챔피언 열세(0.325/0.275)로 near-miss** — P6(오탈락 제거)와 O10(오채택 차단)의 상호 보완이 실측 증명. **윙스팬 ismcts-s256-hr 전 티어 1.000으로 adopted → v2**. ④ 부수: deriveBlueprint의 blockStdDev=0 무가드 예외(잠재 버그) 수정, ONBOARDING-GUIDE §9 성문화 | 신규 테스트 11건 포함 37 suites/450 tests 통과, 3게임 scoreDiffStdDev 전부 0.0000 실측(항등 붕괴), `runs/{splendor,dominion,wingspan}/ismcts-wave-2/`, wingspan registry `['v1','v2']` |
 
 ## 완료 — 고도화 라운드 + 전 게임 스윕 (2026-07-23~24, `docs/GAP-ANALYSIS-8.md`)
 

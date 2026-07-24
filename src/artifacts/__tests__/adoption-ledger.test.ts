@@ -143,6 +143,45 @@ describe('extractNearMissCandidates', () => {
     expect(candidates[0]?.pointWinRate).toBeCloseTo(0.2);
   });
 
+  // P6 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-8.md §2): the exact real-world
+  // pattern that blocked splendor/dominion/wingspan — smoke passed, prune
+  // failed on scoreDiff alone while winRate already clears the bar.
+  // gates.ts's finalVerdict now labels this 'near-miss' (previously
+  // 'screened'), so it must structure cleanly here too.
+  it('structures a smoke-passed/prune-scoreDiff-only-shortfall near-miss with scoreDiffGap>0 and winRateGap<=0', () => {
+    const record: AdoptionRecord = {
+      waveId: 'wave-p6',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      comparabilityKey: 'sha256-deadbeef',
+      baselineVersion: 'v1',
+      opponentId: 'heuristic',
+      entries: [
+        {
+          flags: ['ismcts-s128-hr'],
+          verdict: 'near-miss',
+          tierStats: {
+            smoke: { pointWinRate: 0.9, pointScoreDiff: 6, blocks: 20 },
+            prune: {
+              pointWinRate: 0.9,
+              pointScoreDiff: 3.67,
+              blocks: 15,
+              winRateCI: { lower: 0.8, upper: 1.0 },
+            },
+          },
+        },
+      ],
+      nextLoopNotes: [],
+    };
+    const candidates = extractNearMissCandidates(record, DEFAULT_CRITERIA);
+    expect(candidates).toHaveLength(1);
+    const candidate = candidates[0];
+    expect(candidate?.failedAtTier).toBe('prune');
+    expect(candidate?.pointWinRate).toBeCloseTo(0.9);
+    expect(candidate?.pointScoreDiff).toBeCloseTo(3.67);
+    expect(candidate?.gap.scoreDiffGap).toBeGreaterThan(0);
+    expect(candidate?.gap.winRateGap).toBeLessThanOrEqual(0);
+  });
+
   it('returns an empty array when there are no near-miss entries', () => {
     const record: AdoptionRecord = {
       waveId: 'wave-clean',

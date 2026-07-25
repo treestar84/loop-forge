@@ -94,6 +94,21 @@ describe('BaselineRegistry — versions', () => {
     expect(restored.latest()).toEqual(registry.latest());
   });
 
+  it('round-trips a version carrying an optional sourceDigest', () => {
+    const registry = new BaselineRegistry();
+    registry.register({ ...v1(), sourceDigest: 'sha256-abc123' });
+    const restored = BaselineRegistry.fromJSON(JSON.parse(JSON.stringify(registry.toJSON())));
+    expect(restored.get('v1')?.sourceDigest).toBe('sha256-abc123');
+    expect(restored.get('v1')).toEqual(registry.get('v1'));
+  });
+
+  it('loads a version with no sourceDigest field unchanged (backward compatibility)', () => {
+    const registry = new BaselineRegistry();
+    registry.register(v1());
+    const restored = BaselineRegistry.fromJSON(JSON.parse(JSON.stringify(registry.toJSON())));
+    expect(restored.get('v1')?.sourceDigest).toBeUndefined();
+  });
+
   it('fromJSON rejects malformed input', () => {
     expect(() => BaselineRegistry.fromJSON(null)).toThrow();
     expect(() => BaselineRegistry.fromJSON({})).toThrow();

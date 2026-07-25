@@ -48,8 +48,27 @@ import {
   GOMOKU_MCTS2_S256_HR_FLAG,
   gomokuMctsFlagSpecFor,
 } from './shared/gomoku-mcts-flag';
+import { computeSourceDigest } from '../../artifacts/source-digest';
 
 const GAME_ID = 'gomoku';
+
+/**
+ * Source closure (approximate — see artifacts/source-digest.ts's doc
+ * comment) for this game's flag-behavior-relevant code: the adapter itself,
+ * search/mcts.ts (this game's flags are all MCTS configs), this game's
+ * shared MCTS flag spec, and loop/compose.ts (every registered version's
+ * flags are reassembled through composeBot, so a change there can change
+ * every version's behavior too). Written for the exact P5 incident this
+ * feature targets (see the P5 BEHAVIOR CHANGE NOTICE above): a
+ * search/mcts.ts fix silently changed "mcts-s64"'s reassembly behavior with
+ * no way to detect it from the version record.
+ */
+const SOURCE_FILES = [
+  join(__dirname, '..', 'gomoku.ts'),
+  join(__dirname, '..', '..', 'search', 'mcts.ts'),
+  join(__dirname, 'shared', 'gomoku-mcts-flag.ts'),
+  join(__dirname, '..', '..', 'loop', 'compose.ts'),
+];
 
 /**
  * Simulation budget (docs/GAP-ANALYSIS-7.md O6). Measured with a throughput
@@ -147,6 +166,21 @@ function main(): void {
   console.log('2) load-or-create registry/ledger from runs/gomoku/');
   const registry = loadOrCreateRegistry(rootDir, GAME_ID);
   const ledger = loadOrCreateLedger(rootDir, GAME_ID);
+  const sourceDigest = computeSourceDigest(SOURCE_FILES);
+  const priorLatest = registry.latest();
+  // Warn-only, not a block (docs/GAP-ANALYSIS-8.md §2 v1 policy): a source
+  // drift since the last registered version means that version's flags may
+  // now reassemble differently than when it was adopted (exactly the P5
+  // mcts-s64 incident above), but stopping the runner here would make every
+  // code fix to search/mcts.ts also block every game's runner —
+  // reproducibility status should stay visible, not gate experimentation.
+  if (priorLatest?.sourceDigest !== undefined && priorLatest.sourceDigest !== sourceDigest) {
+    console.log(
+      `   ⚠ source drift detected: registry latest (${priorLatest.version}) was registered with sourceDigest=${priorLatest.sourceDigest}, current source=${sourceDigest} — this version's flags may now reassemble differently than when it was adopted (see artifacts/source-digest.ts).`,
+    );
+  } else if (priorLatest !== undefined && priorLatest.sourceDigest === undefined) {
+    console.log(`   registry latest (${priorLatest.version}) predates sourceDigest tracking — no drift check possible`);
+  }
 
   console.log('3) baseline v1 + anchors (register only if missing)');
   if (registry.get('v1') === undefined) {
@@ -157,6 +191,7 @@ function main(): void {
       createdAt: now(),
       sourceWaveId: null,
       notes: '순정 heuristic 기준선 (플래그 없음).',
+      sourceDigest,
     });
     console.log('   registered v1');
   } else {
@@ -307,6 +342,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: report.waveId,
         notes: `웨이브 ${report.waveId}에서 채택된 플래그 승격: ${adoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }
@@ -496,6 +532,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: mctsReport.waveId,
         notes: `MCTS 웨이브 ${mctsReport.waveId}에서 채택된 플래그 승격: ${mctsAdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }
@@ -711,6 +748,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: mctsWave2Report.waveId,
         notes: `mcts-wave-2에서 채택된 플래그 승격: ${mctsWave2AdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }
@@ -937,6 +975,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: mctsWave3Report.waveId,
         notes: `mcts-wave-3에서 채택된 플래그 승격: ${mctsWave3AdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }

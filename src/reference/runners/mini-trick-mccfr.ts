@@ -47,8 +47,23 @@ import { withStrategyFlags } from '../../loop/compose';
 import { policyTableDigest, trainOutcomeSamplingMccfr, policyBotFactoryFor } from '../../learn/mccfr';
 import type { StrategyFlagSpec } from '../../contract/types';
 import { miniTrickAdapter } from '../mini-trick';
+import { computeSourceDigest } from '../../artifacts/source-digest';
 
 const GAME_ID = 'mini-trick';
+
+/**
+ * Source closure (approximate — see artifacts/source-digest.ts's doc
+ * comment) for this game's flag-behavior-relevant code: the adapter itself,
+ * learn/mccfr.ts (this game's flags are all trained MCCFR policy tables),
+ * and loop/compose.ts (every registered version's flags are reassembled
+ * through composeBot, so a change there can change every version's behavior
+ * too). No search/*.ts entry — this runner never invokes MCTS/IS-MCTS.
+ */
+const SOURCE_FILES = [
+  join(__dirname, '..', 'mini-trick.ts'),
+  join(__dirname, '..', '..', 'learn', 'mccfr.ts'),
+  join(__dirname, '..', '..', 'loop', 'compose.ts'),
+];
 
 /**
  * Training budget: measured with a throughput scratch script (not checked
@@ -173,6 +188,21 @@ function main(): void {
   console.log('2) load-or-create registry/ledger from runs/mini-trick/');
   const registry = loadOrCreateRegistry(rootDir, GAME_ID);
   const ledger = loadOrCreateLedger(rootDir, GAME_ID);
+  const sourceDigest = computeSourceDigest(SOURCE_FILES);
+  const priorLatest = registry.latest();
+  // Warn-only, not a block (docs/GAP-ANALYSIS-8.md §2 v1 policy): a source
+  // drift since the last registered version means that version's flags may
+  // now reassemble differently than when it was adopted, but stopping the
+  // runner here would make every code fix to learn/mccfr.ts also block this
+  // game's runner — reproducibility status should stay visible, not gate
+  // experimentation.
+  if (priorLatest?.sourceDigest !== undefined && priorLatest.sourceDigest !== sourceDigest) {
+    console.log(
+      `   ⚠ source drift detected: registry latest (${priorLatest.version}) was registered with sourceDigest=${priorLatest.sourceDigest}, current source=${sourceDigest} — this version's flags may now reassemble differently than when it was adopted (see artifacts/source-digest.ts).`,
+    );
+  } else if (priorLatest !== undefined && priorLatest.sourceDigest === undefined) {
+    console.log(`   registry latest (${priorLatest.version}) predates sourceDigest tracking — no drift check possible`);
+  }
 
   console.log('3) baseline v1 + anchors (register only if missing)');
   if (registry.get('v1') === undefined) {
@@ -183,6 +213,7 @@ function main(): void {
       createdAt: now(),
       sourceWaveId: null,
       notes: '순정 heuristic 기준선 (플래그 없음).',
+      sourceDigest,
     });
     console.log('   registered v1');
   } else {
@@ -379,6 +410,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: report.waveId,
         notes: `MCCFR 웨이브 ${report.waveId}에서 채택된 플래그 승격: ${adoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }
@@ -597,6 +629,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: mccfrWave2Report.waveId,
         notes: `mccfr-wave-2에서 채택된 플래그 승격: ${mccfrWave2AdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }

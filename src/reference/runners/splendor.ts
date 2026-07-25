@@ -36,10 +36,27 @@ import { extractNearMissCandidates, type AdoptionEntry } from '../../artifacts/a
 import { renderGameSummaryMarkdown } from '../../artifacts/game-summary';
 import { eraseAdapter } from '../../loop/erase';
 import { withStrategyFlags } from '../../loop/compose';
+import { computeSourceDigest } from '../../artifacts/source-digest';
 import { splendorAdapter } from '../splendor';
 import { SPLENDOR_ISMCTS_S128_HR_FLAG, splendorIsmctsFlagSpec } from './shared/splendor-ismcts-flag';
 
 const GAME_ID = 'splendor';
+
+/**
+ * Source closure (approximate — see artifacts/source-digest.ts's doc
+ * comment) for this game's flag-behavior-relevant code: the adapter itself,
+ * both search algorithms this runner's flags can invoke, this game's shared
+ * IS-MCTS flag spec, and loop/compose.ts (every registered version's flags
+ * are reassembled through composeBot, so a change there can change every
+ * version's behavior too).
+ */
+const SOURCE_FILES = [
+  join(__dirname, '..', 'splendor.ts'),
+  join(__dirname, '..', '..', 'search', 'mcts.ts'),
+  join(__dirname, '..', '..', 'search', 'ismcts.ts'),
+  join(__dirname, 'shared', 'splendor-ismcts-flag.ts'),
+  join(__dirname, '..', '..', 'loop', 'compose.ts'),
+];
 
 function now(): string {
   return new Date().toISOString();
@@ -124,6 +141,22 @@ function main(): void {
   console.log('3) load-or-create registry/ledger from runs/splendor/');
   const registry = loadOrCreateRegistry(rootDir, GAME_ID);
   const ledger = loadOrCreateLedger(rootDir, GAME_ID);
+  const sourceDigest = computeSourceDigest(SOURCE_FILES);
+  const priorLatest = registry.latest();
+  // Warn-only, not a block (docs/GAP-ANALYSIS-8.md §2 v1 policy): a source
+  // drift since the last registered version means that version's flags may
+  // now reassemble differently than when it was adopted (the P5 mcts-s64
+  // reassembly-change incident this feature was built to surface), but
+  // stopping the runner here would make every code fix to search/mcts.ts or
+  // search/ismcts.ts also block every game's runner — reproducibility status
+  // should stay visible, not gate experimentation.
+  if (priorLatest?.sourceDigest !== undefined && priorLatest.sourceDigest !== sourceDigest) {
+    console.log(
+      `   ⚠ source drift detected: registry latest (${priorLatest.version}) was registered with sourceDigest=${priorLatest.sourceDigest}, current source=${sourceDigest} — this version's flags may now reassemble differently than when it was adopted (see artifacts/source-digest.ts).`,
+    );
+  } else if (priorLatest !== undefined && priorLatest.sourceDigest === undefined) {
+    console.log(`   registry latest (${priorLatest.version}) predates sourceDigest tracking — no drift check possible`);
+  }
 
   console.log('4) baseline v1 + anchors (register only if missing)');
   if (registry.get('v1') === undefined) {
@@ -134,6 +167,7 @@ function main(): void {
       createdAt: now(),
       sourceWaveId: null,
       notes: '순정 heuristic 기준선 (플래그 없음).',
+      sourceDigest,
     });
     console.log('   registered v1');
   } else {
@@ -254,6 +288,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: report.waveId,
         notes: `웨이브 ${report.waveId}에서 채택된 플래그 승격: ${adoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${newVersion.version}, flags=[${newVersion.flags.join(', ')}]`);
     }
@@ -484,6 +519,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: ismctsReport.waveId,
         notes: `ismcts-wave-1에서 채택된 플래그 승격: ${ismctsAdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }
@@ -697,6 +733,7 @@ function main(): void {
         createdAt: now(),
         sourceWaveId: ismcts2Report.waveId,
         notes: `ismcts-wave-2에서 채택된 플래그 승격 (P6 파생 임계): ${ismcts2AdoptedFlags.join(', ')}`,
+        sourceDigest,
       });
       console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
     }

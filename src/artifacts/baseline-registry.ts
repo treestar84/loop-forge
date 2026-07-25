@@ -22,6 +22,19 @@ export interface BaselineVersion {
   readonly createdAt: string;
   readonly sourceWaveId: string | null;
   readonly notes: string;
+  /**
+   * Optional source closure digest (source-digest.ts's `computeSourceDigest`)
+   * of the files that decided this version's flags' behavior at
+   * registration time. Approximation only — a source-file-level closure, not
+   * a hermetic build seal; transpiled output and imported library code are
+   * out of scope (see source-digest.ts's doc comment for the full
+   * rationale). Optional and backward-compatible: existing registry.json
+   * files predate this field and load with it simply absent, and existing
+   * version records are never backfilled (a digest computed after the fact
+   * would not reflect the truth at registration time — docs/GAP-ANALYSIS-8.md
+   * §2's honesty requirement).
+   */
+  readonly sourceDigest?: string;
 }
 
 export type BenchmarkAnchorKind = 'random' | 'heuristic' | 'baseline';
@@ -41,6 +54,7 @@ function cloneBaselineVersion(version: BaselineVersion): BaselineVersion {
     createdAt: version.createdAt,
     sourceWaveId: version.sourceWaveId,
     notes: version.notes,
+    ...(version.sourceDigest !== undefined ? { sourceDigest: version.sourceDigest } : {}),
   };
 }
 
@@ -227,6 +241,7 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
   const createdAt = record['createdAt'];
   const sourceWaveId = record['sourceWaveId'];
   const notes = record['notes'];
+  const sourceDigest = record['sourceDigest'];
 
   if (typeof version !== 'string' || version.length === 0) {
     throw new Error('BaselineRegistry.fromJSON: version must be a non-empty string');
@@ -246,6 +261,9 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
   if (typeof notes !== 'string') {
     throw new Error(`BaselineRegistry.fromJSON: version "${version}" notes must be a string`);
   }
+  if (sourceDigest !== undefined && typeof sourceDigest !== 'string') {
+    throw new Error(`BaselineRegistry.fromJSON: version "${version}" sourceDigest must be a string when present`);
+  }
   return {
     version,
     flags: [...(flags as string[])],
@@ -253,6 +271,7 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
     createdAt,
     sourceWaveId,
     notes,
+    ...(sourceDigest !== undefined ? { sourceDigest } : {}),
   };
 }
 

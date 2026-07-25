@@ -1,9 +1,10 @@
 /**
- * hearthstone-benchmark — the 3-column win-rate benchmark of
- * docs/BENCHMARK-EXPERIMENT.md, run for hearthstone. This is NOT an onboarding
- * runner (that is reference/runners/hearthstone.ts, which scores conformance
- * and runs gated waves); it is a pure gate-free aggregation that compares three
- * bots head-to-head:
+ * hearthstone-benchmark-v2 — v2 follow-up to the 3-column win-rate benchmark
+ * of docs/BENCHMARK-EXPERIMENT.md, run for hearthstone after ismcts-wave-1
+ * (docs/FIX-BACKLOG.md P4) promoted `ismcts-s128-hr` into registry v2. This is
+ * NOT an onboarding runner (that is reference/runners/hearthstone.ts, which
+ * scores conformance and runs gated waves); it is a pure gate-free
+ * aggregation that compares three bots head-to-head:
  *
  *   A. Opus 설계봇      vs 기본봇(baselines.heuristic)
  *   B. 루프포지봇        vs 기본봇(baselines.heuristic)
@@ -12,9 +13,15 @@
  * "Opus 설계봇" = reference/experiments/hearthstone-opus-bot.ts, a one-shot LLM
  * design that never touched the Loop Forge scoring/wave/gate pipeline.
  * "루프포지봇" = baselines.heuristic with the wave-adopted strategy flags
- * composed on top (loop/compose.ts). Hearthstone adopted ZERO flags (all three
- * candidates failed the screen), so column B's bot is the pristine heuristic
- * and its win rate is ~50% by construction — reported honestly per §4.
+ * composed on top (loop/compose.ts). The v1 version of this file (git history)
+ * predates ismcts-wave-1 and never extended the adapter's strategySurface with
+ * the ismcts-s128-hr flag spec, so composeBot(['ismcts-s128-hr']) would throw
+ * "unknown strategy flag" once the registry promoted it — this v2 file fixes
+ * that by composing the same withStrategyFlags extension
+ * reference/runners/hearthstone.ts's ismcts-wave-1 uses (mirrors
+ * gomoku-benchmark-v4.ts's precedent for the same class of bug). Column B is
+ * therefore, for the first time, the actual ismcts-s128-hr candidate rather
+ * than the pristine heuristic.
  *
  * Lives under reference/runners/, so it is an app boundary (determinism-exempt,
  * may wire every layer) per src/__tests__/dependency-rules.test.ts.
@@ -24,7 +31,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 import { eraseAdapter } from '../../loop/erase';
-import { composeBot } from '../../loop/compose';
+import { composeBot, withStrategyFlags } from '../../loop/compose';
 import { runHeadToHead, type HeadToHeadResult } from '../../loop/head-to-head';
 import {
   loadOrCreateLedger,
@@ -32,19 +39,30 @@ import {
 } from '../../artifacts/game-state';
 import { hearthstoneAdapter } from '../hearthstone';
 import { hearthstoneOpusBot } from '../experiments/hearthstone-opus-bot';
+import { hearthstoneIsmctsFlagSpec } from './shared/hearthstone-ismcts-flag';
 
 const GAME_ID = 'hearthstone';
 const ADOPTED_VERDICT = 'adopted';
+const RUN_SUFFIX = '-v2';
 
-/** Column seed count. Overridable via `--n=<count>` so the timing trial and
- * the full run share one entrypoint. Seeds are drawn from a fixed base so the
- * benchmark is fully reproducible. */
-const DEFAULT_N = 2000;
-const SEED_BASE = 50_000;
+/**
+ * N chosen from an empirical timing trial (this file run with `--n=3`, nice
+ * -n 10, single process, output not checked in — see task report for the raw
+ * log): A) 0.0s/3 blocks (negligible — both bots are cheap heuristic-style
+ * decisions), B) 1.2s/3 blocks (~0.4s/block), C) 1.5s/3 blocks (~0.5s/block).
+ * Combined B+C rate ≈ 0.9s/block. N=1600 keeps the whole run at
+ * ~1600*0.9s ≈ 1,440s (24.0 min), inside the 30-minute (1,800s) wave budget
+ * with headroom for per-game variance (hearthstone games have variable
+ * length depending on when lethal is found).
+ */
+const DEFAULT_N = 1600;
+const SEED_BASE = 55_000;
 
 /** Distinct bot-seed bases per column so the three matchups never share a
- * derived bot-seed stream (cross-contamination guard, per task spec). */
-const BOT_SEED_BASE = { A: 910_001, B: 910_002, C: 910_003 } as const;
+ * derived bot-seed stream (cross-contamination guard, per task spec). Also
+ * distinct from the v1 file's bases (910_001-3) since v1 never persisted an
+ * output and this run uses a different seed range anyway. */
+const BOT_SEED_BASE = { A: 950_101, B: 950_102, C: 950_103 } as const;
 
 function parseN(argv: readonly string[]): number {
   for (const arg of argv) {
@@ -114,7 +132,13 @@ function ci(result: HeadToHeadResult): string {
 function main(): void {
   const rootDir = join(__dirname, '..', '..', '..');
   const n = parseN(process.argv.slice(2));
-  const adapter = eraseAdapter(hearthstoneAdapter);
+  const bareAdapter = eraseAdapter(hearthstoneAdapter);
+  // registry v2's adopted flag (ismcts-s128-hr) is only present on the
+  // runner's wave-time adapter (reference/runners/hearthstone.ts's
+  // ismcts-wave-1), never on hearthstoneAdapter itself — extend here with the
+  // exact same spec so composeBot can resolve it (same fix as
+  // gomoku-benchmark-v4.ts).
+  const adapter = withStrategyFlags(bareAdapter, [hearthstoneIsmctsFlagSpec(bareAdapter)]);
   const seeds = buildSeeds(n);
 
   const opusBot = hearthstoneOpusBot;
@@ -122,11 +146,15 @@ function main(): void {
   const resolved = resolveLoopForgeFlags(rootDir);
   const loopForgeBot = composeBot(adapter, resolved.flags);
 
-  console.log(`=== hearthstone 3-column benchmark (N=${n} seeds/column) ===`);
+  console.log(`=== hearthstone 3-column benchmark v2 (N=${n} seeds/column) ===`);
   console.log(`  registry latest: ${resolved.registryLatestVersion} flags=[${resolved.registryLatestFlags.join(', ') || '(none)'}]`);
   console.log(`  루프포지봇 composed flags: [${resolved.flags.join(', ') || '(none)'}]`);
   if (resolved.flags.length === 0) {
     console.log('  NOTE: 0 adopted flags → column B bot == baselines.heuristic (win rate ~50% by construction).');
+  } else {
+    console.log(
+      '  NOTE: 루프포지봇 flags include ismcts-s128-hr — per-game cost is much higher than the pristine heuristic (SO-ISMCTS search rollout).',
+    );
   }
 
   const t0 = Date.now();
@@ -174,16 +202,17 @@ function main(): void {
       'Gate-free aggregation (runHeadToHead): no screen/smoke/prune/holdout gating.',
       'candidate/opponent seats are paired-mirrored (runPairedBlock), so first-mover advantage is cancelled.',
       'drawRate here counts blocks with candidateWinFraction===0.5 — i.e. true draws AND seat-split (win one seat, lose the other), not draws alone.',
-      'Hearthstone adopted 0/3 flags (all candidates failed the screen), so column B == baselines.heuristic and its win rate is ~50% by construction — a "no improvement yet" signal, not a failure (BENCHMARK-EXPERIMENT.md §4).',
+      'v2 run: registry v2 promoted ismcts-s128-hr (docs/FIX-BACKLOG.md P4, ismcts-wave-1) on top of v1 — the v1 version of this file predated that promotion and never extended the adapter strategySurface with the flag, so its column B silently fell back to the pristine heuristic (composeBot would have thrown otherwise). This v2 run is the FIRST time column B reflects the actual adopted candidate.',
+      `N=${n} chosen from an empirical timing trial (task report) to stay inside the 30-minute wave budget given ismcts-s128-hr's per-game cost (~287.8ms/game in isolation, shared/hearthstone-ismcts-flag.ts).`,
       'Win rates across different games are NOT comparable (different baselines.heuristic strength); only A vs B vs C within hearthstone are.',
     ],
   };
-  writeFileSync(join(outDir, 'benchmark-3col.json'), JSON.stringify(jsonPayload, null, 2));
-  console.log(`  저장: runs/${GAME_ID}/benchmark-3col.json`);
+  writeFileSync(join(outDir, `benchmark-3col${RUN_SUFFIX}.json`), JSON.stringify(jsonPayload, null, 2));
+  console.log(`  저장: runs/${GAME_ID}/benchmark-3col${RUN_SUFFIX}.json`);
 
   const md = renderMarkdown(n, resolved, colA, colB, colC, totalSeconds);
-  writeFileSync(join(outDir, 'benchmark-3col.md'), md);
-  console.log(`  저장: runs/${GAME_ID}/benchmark-3col.md`);
+  writeFileSync(join(outDir, `benchmark-3col${RUN_SUFFIX}.md`), md);
+  console.log(`  저장: runs/${GAME_ID}/benchmark-3col${RUN_SUFFIX}.md`);
 }
 
 function renderMarkdown(
@@ -195,21 +224,28 @@ function renderMarkdown(
   totalSeconds: number,
 ): string {
   const flagSource = resolved.registryLatestFlags.length > 0 ? 'registry-latest' : 'ledger-adopted';
-  return `# 하스스톤(hearthstone) — 3열 벤치마크
+  return `# 하스스톤(hearthstone) — 3열 벤치마크 (v2)
 
 생성: ${new Date().toISOString()}
 N = ${n} 시드/열 · 좌석 페어드 미러링 · 게이트 없음(runHeadToHead)
+
+> **v2 표기**: registry v2(ismcts-s128-hr 승격, docs/FIX-BACKLOG.md P4, ismcts-wave-1)
+> 반영. 이 파일의 이전 버전(v1)은 이 승격 이전에 작성돼 어댑터의
+> strategySurface를 ismcts-s128-hr 플래그로 확장하지 않았다 — composeBot이
+> 이 플래그를 resolve할 수 없어 B열이 사실상 항상 순정 heuristic으로
+> 폴백됐을 것이다(v1 산출물은 디스크에 저장된 적이 없어 직접 비교 불가).
+> **B열이 실제 ismcts-s128-hr 후보를 반영하는 것은 이 v2가 처음**이다.
 
 ## 루프포지봇 구성
 
 - 합성 플래그: ${resolved.flags.length > 0 ? resolved.flags.map((f) => `\`${f}\``).join(', ') : '(없음)'}
 - 플래그 출처: **${flagSource}**
 - registry 최신 버전: ${resolved.registryLatestVersion ?? '(없음)'} (flags=${resolved.registryLatestFlags.length > 0 ? resolved.registryLatestFlags.join(', ') : '없음'})
-- 채택 전략 수: **${resolved.flags.length}/3** — faceRush·curveDump·heroPowerSpam 세 후보 모두 screen 탈락(ledger verdict=\`failed\`).
+- 채택 전략 수: **${resolved.flags.length}/1** — ismcts-wave-1에서 ismcts-s128-hr 채택(은닉 정보 게임 첫 채택).
 ${
   resolved.flags.length === 0
     ? '- ⚠ 채택 0개이므로 B열 봇은 순정 \`baselines.heuristic\`과 동일하다. B열 승률이 ~50%로 나오는 것은 정의상 당연하며 "아직 개선 없음"을 뜻한다(실패가 아님, BENCHMARK-EXPERIMENT.md §4).\n'
-    : ''
+    : '- ⚠ 합성 플래그에 IS-MCTS 후보(`ismcts-s128-hr`) 포함 — apply()가 base를 무시하므로 이 플래그가 봇의 전체 결정을 지배함. 판당 비용이 순정 heuristic보다 훨씬 큼(SO-ISMCTS 롤아웃, 시뮬레이션 128회).\n'
 }
 ## 결과
 
@@ -219,7 +255,7 @@ ${
 | B | 루프포지봇 vs 기본봇 | ${pct(colB.candidateWinRate)} | ${ci(colB)} | ${pct(colB.drawRate)} | ${colB.blocks} |
 | C | Opus봇 vs 루프포지봇 | ${pct(colC.candidateWinRate)} | ${ci(colC)} | ${pct(colC.drawRate)} | ${colC.blocks} |
 
-채택 전략 수: ${resolved.flags.length}/3 (아직 개선 없음)
+채택 전략 수: ${resolved.flags.length}/1 (ismcts-s128-hr)
 
 ## 해석 주의
 
@@ -227,7 +263,7 @@ ${
 - \`draw/split\`은 candidateWinFraction===0.5인 블록 비율 — 순수 무승부와 "한 좌석 승·한 좌석 패"(미러링 분할)를 모두 포함한다. 순수 무승부율이 아니다.
 - 좌석 미러링으로 선공 이점은 상쇄됨.
 - 게이트(SPRT/holdout)를 거치지 않은 순수 집계값(관찰 보고용).
-- B열이 ~50%인 것은 채택 전략 0개라 B열 봇이 기본봇과 동일하기 때문. 루프 포지가 아직 이 게임에서 유의미한 전략을 발굴하지 못했다는 신호이지 실패가 아니다.
+- 이 파일(v2)은 registry v2와 새 세션 세드를 반영해 \`benchmark-3col.json/md\`(v1, 저장된 적 없음)와 직접 비교 불가.
 
 총 소요: ${totalSeconds.toFixed(1)}s
 `;

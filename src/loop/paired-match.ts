@@ -35,14 +35,26 @@ function teamOf(
 export function runPairedBlock(
   adapter: AnyGameAdapter,
   candidate: AnyBotFactory,
-  opponent: AnyBotFactory,
+  /**
+   * A single factory fills every non-candidate seat (pre-M4 behavior,
+   * unchanged). An array (docs/GAP-ANALYSIS-10.md M4: field mix) supplies one
+   * factory per non-candidate seat individually — its length must equal
+   * `playerCount - 1`.
+   */
+  opponent: AnyBotFactory | readonly AnyBotFactory[],
   gameSeed: number,
   botSeedBase: number,
 ): PairedMatchResult {
   const playerCount = adapter.spec.playerCount;
+  const opponents = Array.isArray(opponent) ? opponent : null;
+  if (opponents && opponents.length !== playerCount - 1) {
+    throw new Error(
+      `runPairedBlock: opponent array length (${opponents.length}) must equal playerCount - 1 (${playerCount - 1})`,
+    );
+  }
   const botFactories: AnyBotFactory[] = [candidate];
   for (let i = 1; i < playerCount; i += 1) {
-    botFactories.push(opponent);
+    botFactories.push(opponents ? (opponents[i - 1] as AnyBotFactory) : (opponent as AnyBotFactory));
   }
   const botSeeds = botFactories.map((_, index) => botSeedBase + index);
 

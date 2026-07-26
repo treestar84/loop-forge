@@ -72,6 +72,18 @@ export interface GameSpec {
    * without a declaration would falsely promise convergence guarantees.
    */
   readonly utility?: 'zero-sum' | 'general';
+  /**
+   * Declare true for games where teams exist (winners always come out as a
+   * subset tied to a hidden faction) but faction membership itself is hidden
+   * during play, so it cannot be statically declared via `teams` (Avalon-like
+   * games; docs/GAP-ANALYSIS-3.md F4, docs/GAP-ANALYSIS-10.md M1). `teams`
+   * must stay unset in this case — it is reserved for fixed, public team
+   * partitions. When true, the C5 identity-fairness check (scoreC5) stops
+   * comparing measured self-play win rate against 1/playerCount (which has no
+   * relationship to hidden faction sizes) and instead treats the measured
+   * rate as its own reference point, while still running the seat-bias check.
+   */
+  readonly hiddenTeamStructure?: boolean;
 }
 
 export interface PendingDecision {

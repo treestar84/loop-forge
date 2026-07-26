@@ -29,6 +29,8 @@ export interface GameClassification {
   readonly utilityStructure: UtilityStructure;
   /** Whether spec.utility was explicitly declared (vs. defaulted to 'general'). */
   readonly utilityDeclared: boolean;
+  /** Mirrors spec.hiddenTeamStructure (docs/GAP-ANALYSIS-10.md M1); false when unset. */
+  readonly hiddenTeamStructure: boolean;
 }
 
 /** Content inventory length at or above which contentWeight is 'heavy'. */
@@ -75,5 +77,6 @@ export function classifyGame(
     scoreMarginDeclared: spec.scoreMargin !== undefined,
     utilityStructure: spec.utility === 'zero-sum' ? 'zero-sum' : 'general',
     utilityDeclared: spec.utility !== undefined,
+    hiddenTeamStructure: spec.hiddenTeamStructure === true,
   };
 }

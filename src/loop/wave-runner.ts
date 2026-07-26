@@ -66,6 +66,18 @@ export interface WaveConfig {
   readonly waveId: string;
   readonly candidates: ReadonlyArray<WaveCandidateConfig>;
   readonly opponent: 'heuristic' | 'random';
+  /**
+   * Field mix (docs/GAP-ANALYSIS-10.md M4): per-seat opponent composition for
+   * multi-player (3+) games, one entry per non-candidate seat slot — length
+   * must equal `adapter.spec.playerCount - 1`, checked at the start of
+   * `runWave` with a clear throw on mismatch. When set, this takes precedence
+   * over `opponent` for every non-candidate seat: slot `i` (0-indexed, the
+   * (i+1)-th match seat) is filled by `adapter.baselines[fieldMix[i]]`
+   * instead of the single `opponent` factory. Omitted (the default) preserves
+   * pre-M4 behavior exactly — every non-candidate seat filled by the single
+   * `opponent` factory.
+   */
+  readonly fieldMix?: ReadonlyArray<'heuristic' | 'random'>;
   readonly ledger: SeedLedger;
   /**
    * ISO timestamp stamped on seed-bank consumption. Caller-injected (app
@@ -178,19 +190,34 @@ function candidateLabel(flags: readonly string[]): string {
   return flags.length === 1 ? (flags[0] as string) : flags.join('+');
 }
 
-/** Trajectory (choiceKeys) for seat-0-bot=seatZeroFactory vs every other seat=restFactory. */
+/**
+ * Build the per-seat factory list for every non-candidate seat. A single
+ * `fillFactory` fills every slot unless `fieldMix` is set, in which case each
+ * slot gets its own `adapter.baselines[fieldMix[i]]` (docs/GAP-ANALYSIS-10.md
+ * M4). Omitted `fieldMix` produces an array where every entry equals
+ * `fillFactory` — identical in effect to the pre-M4 single-factory fill.
+ */
+function buildRestFactories(
+  adapter: AnyGameAdapter,
+  fieldMix: WaveConfig['fieldMix'],
+  fillFactory: AnyBotFactory,
+): readonly AnyBotFactory[] {
+  const restSlotCount = adapter.spec.playerCount - 1;
+  if (fieldMix === undefined) {
+    return Array.from({ length: restSlotCount }, () => fillFactory);
+  }
+  return fieldMix.map((name) => adapter.baselines[name]);
+}
+
+/** Trajectory (choiceKeys) for seat-0-bot=seatZeroFactory vs every other seat filled per restFactories[i-1]. */
 function runTrajectory(
   adapter: AnyGameAdapter,
   seatZeroFactory: AnyBotFactory,
-  restFactory: AnyBotFactory,
+  restFactories: readonly AnyBotFactory[],
   seed: number,
   botSeedBase: number,
 ): readonly string[] | { readonly defect: MatchDefect } {
-  const playerCount = adapter.spec.playerCount;
-  const botFactories: AnyBotFactory[] = [seatZeroFactory];
-  for (let i = 1; i < playerCount; i += 1) {
-    botFactories.push(restFactory);
-  }
+  const botFactories: AnyBotFactory[] = [seatZeroFactory, ...restFactories];
   const botSeeds = botFactories.map((_, index) => botSeedBase + index);
   const seating = adapter.spec.seatingPlan[0];
   if (!seating) {
@@ -212,14 +239,22 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
 
 /**
  * Behavioral-fingerprint screen: compare the candidate's trajectory against
- * the base bot's trajectory (both facing the same base-bot opponents) across
- * the probe seeds. Identical trajectories on every seed means the flag is a
- * no-op — it must be screened out before any games are spent on it.
+ * the base bot's trajectory (both facing the same non-candidate-seat
+ * opponents) across the probe seeds. Identical trajectories on every seed
+ * means the flag is a no-op — it must be screened out before any games are
+ * spent on it.
+ *
+ * `restFactories` fills every non-candidate seat identically for both
+ * trajectories — including under a field-mix wave, where it already reflects
+ * the wave's fieldMix composition (docs/GAP-ANALYSIS-10.md M4): this is a
+ * no-candidate probe, so the field-mix slots stay exactly as configured and
+ * only the candidate seat swaps between candidateFactory and baseFactory.
  */
 function screenCandidate(
   adapter: AnyGameAdapter,
   candidateFactory: AnyBotFactory,
   baseFactory: AnyBotFactory,
+  restFactories: readonly AnyBotFactory[],
   probe: WaveScreenProbeConfig,
 ): { readonly passed: boolean; readonly defect?: MatchDefect } {
   let behaviorallyDistinct = false;
@@ -227,14 +262,14 @@ function screenCandidate(
     const candidateTrajectory = runTrajectory(
       adapter,
       candidateFactory,
-      baseFactory,
+      restFactories,
       seed,
       probe.botSeedBase,
     );
     if ('defect' in candidateTrajectory) {
       return { passed: false, defect: candidateTrajectory.defect };
     }
-    const baseTrajectory = runTrajectory(adapter, baseFactory, baseFactory, seed, probe.botSeedBase);
+    const baseTrajectory = runTrajectory(adapter, baseFactory, restFactories, seed, probe.botSeedBase);
     if ('defect' in baseTrajectory) {
       return { passed: false, defect: baseTrajectory.defect };
     }
@@ -275,7 +310,7 @@ interface TierRunResult {
 function runSmokeTier(
   adapter: AnyGameAdapter,
   candidateFactory: AnyBotFactory,
-  baseFactory: AnyBotFactory,
+  restFactories: readonly AnyBotFactory[],
   seeds: readonly number[],
   config: WaveSmokeTierConfig,
 ): TierRunResult {
@@ -287,7 +322,7 @@ function runSmokeTier(
     if (blocksRun >= config.maxBlocks) {
       break;
     }
-    const result = runPairedBlock(adapter, candidateFactory, baseFactory, seed, seed);
+    const result = runPairedBlock(adapter, candidateFactory, restFactories, seed, seed);
     if ('defect' in result) {
       return { passed: false, stats: currentStats(outcomes), defect: result.defect };
     }
@@ -317,14 +352,14 @@ function runFixedTier(
   tier: 'prune' | 'holdout' | 'regression',
   adapter: AnyGameAdapter,
   candidateFactory: AnyBotFactory,
-  baseFactory: AnyBotFactory,
+  restFactories: readonly AnyBotFactory[],
   seeds: readonly number[],
   criteria: PromotionCriteria,
   bootstrapSeed: number,
 ): TierRunResult {
   const outcomes: PairedSeedOutcome[] = [];
   for (const seed of seeds) {
-    const result = runPairedBlock(adapter, candidateFactory, baseFactory, seed, seed);
+    const result = runPairedBlock(adapter, candidateFactory, restFactories, seed, seed);
     if ('defect' in result) {
       return { passed: false, stats: currentStats(outcomes), defect: result.defect };
     }
@@ -360,13 +395,26 @@ function evaluateCandidate(
   const candidateFactory = composeBot(adapter, [...(wave.baselineFlags ?? []), ...flags]);
   const signalCollapseThreshold = wave.signalCollapseThreshold ?? DEFAULT_SIGNAL_COLLAPSE_THRESHOLD;
 
+  // Field mix (docs/GAP-ANALYSIS-10.md M4): when wave.fieldMix is unset both
+  // arrays collapse to "every non-candidate seat filled by one factory" —
+  // baselineFactory for the screen/regression fill, opponentFactory for
+  // smoke/prune/holdout — reproducing pre-M4 behavior exactly.
+  const baselineRestFactories = buildRestFactories(adapter, wave.fieldMix, baselineFactory);
+  const opponentRestFactories = buildRestFactories(adapter, wave.fieldMix, opponentFactory);
+
   const tiersPassed: TierId[] = [];
   const stats: Partial<Record<TierId, WaveTierStats>> = {};
   const warnings = (): string[] => signalCollapseWarnings(stats, signalCollapseThreshold);
 
   // Screen compares against the baseline the candidate was built from (not
   // necessarily the match opponent) — this is what detects a no-op flag.
-  const screenResult = screenCandidate(adapter, candidateFactory, baselineFactory, wave.screenProbe);
+  const screenResult = screenCandidate(
+    adapter,
+    candidateFactory,
+    baselineFactory,
+    baselineRestFactories,
+    wave.screenProbe,
+  );
   if (screenResult.defect) {
     return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: screenResult.defect, warnings: warnings() };
   }
@@ -377,7 +425,7 @@ function evaluateCandidate(
   }
   tiersPassed.push('screen');
 
-  const smokeResult = runSmokeTier(adapter, candidateFactory, opponentFactory, smokeSeeds, wave.tiers.smoke);
+  const smokeResult = runSmokeTier(adapter, candidateFactory, opponentRestFactories, smokeSeeds, wave.tiers.smoke);
   stats.smoke = smokeResult.stats;
   if (smokeResult.defect) {
     return { flag, flags, verdict: 'failed', tiersPassed, stats, defect: smokeResult.defect, warnings: warnings() };
@@ -392,7 +440,7 @@ function evaluateCandidate(
     'prune',
     adapter,
     candidateFactory,
-    opponentFactory,
+    opponentRestFactories,
     pruneSeeds,
     wave.criteria,
     hashToInt(`${wave.waveId}:${flag}:prune`),
@@ -411,7 +459,7 @@ function evaluateCandidate(
     'holdout',
     adapter,
     candidateFactory,
-    opponentFactory,
+    opponentRestFactories,
     holdoutSeeds,
     wave.criteria,
     hashToInt(`${wave.waveId}:${flag}:holdout`),
@@ -425,17 +473,18 @@ function evaluateCandidate(
 
     // O10 (docs/GAP-ANALYSIS-7.md): only run when configured, so a wave
     // without a regression tier behaves exactly as before. Opponent here is
-    // deliberately baselineFactory (the current baseline composite bot), not
-    // opponentFactory (the raw heuristic every other tier faces) — that
-    // substitution is the entire point of this tier: it's the only gate that
-    // can catch an override-style candidate that beats the raw opponent but
-    // is weaker than what's already adopted.
+    // deliberately baselineRestFactories (the current baseline composite bot,
+    // field-mix-composed like every other tier), not opponentRestFactories
+    // (the raw heuristic every other tier faces) — that substitution is the
+    // entire point of this tier: it's the only gate that can catch an
+    // override-style candidate that beats the raw opponent but is weaker
+    // than what's already adopted.
     if (wave.tiers.regression !== undefined) {
       const regressionResult = runFixedTier(
         'regression',
         adapter,
         candidateFactory,
-        baselineFactory,
+        baselineRestFactories,
         regressionSeeds,
         wave.criteria,
         hashToInt(`${wave.waveId}:${flag}:regression`),
@@ -475,6 +524,16 @@ function evaluateCandidate(
 }
 
 export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
+  if (wave.fieldMix !== undefined) {
+    const expectedLength = adapter.spec.playerCount - 1;
+    if (wave.fieldMix.length !== expectedLength) {
+      throw new Error(
+        `runWave: wave.fieldMix.length (${wave.fieldMix.length}) must equal ` +
+          `adapter.spec.playerCount - 1 (${expectedLength})`,
+      );
+    }
+  }
+
   const consumedAt = wave.recordedAt;
   const seedConsumption: string[] = [];
 

@@ -395,3 +395,116 @@ describe('scoreAdapter — Z8 head-to-head significance uses identityCenter, not
     expect(c5?.notes.some((note) => note.includes('0.333'))).toBe(true);
   }, 20_000);
 });
+
+// ---------------------------------------------------------------------------
+// M1 (docs/GAP-ANALYSIS-10.md): spec.hiddenTeamStructure lets scoreC5 stop
+// comparing measured self-play win rate against 1/playerCount (which has no
+// relationship to hidden faction sizes in an Avalon-like game) while keeping
+// the seat-bias check active.
+// ---------------------------------------------------------------------------
+
+describe('scoreAdapter — M1 hiddenTeamStructure (Avalon-like hidden factions)', () => {
+  // 4-player fixture with two unequal-size hidden factions, A={0,1,2} and
+  // B={3}, never declared via spec.teams (hidden by construction). No bot
+  // decisions occur at all — the winning faction is fixed at
+  // createInitialState — so calibrateIdentity's win/lose signal comes
+  // entirely from which faction the candidate seat lands in, which
+  // SEATING_PLAN rotates through every player. calibrateIdentity has no
+  // notion of team ties (it isn't told spec.teams), so a 3-way tied A win
+  // scores each A member 0.5 while a solo B win scores player 3 a full 1 —
+  // with A winning 2/3 of seeds and B winning 1/3 (chosen so every seat's
+  // win rate converges to exactly 1/3, i.e. zero seat bias), the identity
+  // mean win rate converges to exactly 1/3, nowhere near the 1/playerCount
+  // fallback (0.25) — the self-contradiction M1 fixes.
+  interface HiddenTeamState {
+    readonly winningFaction: 'A' | 'B';
+  }
+  type HiddenTeamPlayer = 0 | 1 | 2 | 3;
+  const FACTION_A: readonly HiddenTeamPlayer[] = [0, 1, 2];
+  const FACTION_B: readonly HiddenTeamPlayer[] = [3];
+  const HIDDEN_TEAM_SEATING_PLAN = [
+    [0, 1, 2, 3],
+    [1, 2, 3, 0],
+    [2, 3, 0, 1],
+    [3, 0, 1, 2],
+  ] as const;
+
+  function hiddenTeamBaselines() {
+    return {
+      random: () => ({
+        id: 'm1-random',
+        decide: (_dp: string, _obs: unknown, legal: readonly never[]) => legal[0],
+      }),
+      heuristic: () => ({
+        id: 'm1-heuristic',
+        decide: (_dp: string, _obs: unknown, legal: readonly never[]) => legal[0],
+      }),
+    };
+  }
+
+  function makeHiddenTeamAdapter(
+    gameId: string,
+    winningFactionOf: (seed: number) => 'A' | 'B',
+    hiddenTeamStructure?: true,
+  ) {
+    return eraseAdapter({
+      spec: {
+        gameId,
+        playerCount: 4,
+        decisionPoints: [{ id: 'noop', description: 'unused; outcome is fixed at creation' }],
+        seatingPlan: HIDDEN_TEAM_SEATING_PLAN,
+        maxDecisionsPerGame: 1,
+        ...(hiddenTeamStructure === undefined ? {} : { hiddenTeamStructure }),
+      },
+      createInitialState: (seed: number): HiddenTeamState => ({ winningFaction: winningFactionOf(seed) }),
+      currentDecision: (_state: HiddenTeamState) => null,
+      getObservation: (_state: HiddenTeamState, _player: number) => ({}),
+      getLegalChoices: (_state: HiddenTeamState) => [] as const,
+      applyChoice: (state: HiddenTeamState, _choice: never): HiddenTeamState => state,
+      getOutcome: (state: HiddenTeamState) => {
+        const winners = state.winningFaction === 'A' ? FACTION_A : FACTION_B;
+        return {
+          scores: [0, 1, 2, 3].map((p) => (winners.includes(p as HiddenTeamPlayer) ? 1 : 0)),
+          winners,
+        };
+      },
+      encodeChoice: (choice: never) => String(choice),
+      baselines: hiddenTeamBaselines(),
+      strategySurface: [],
+    });
+  }
+
+  it('blocks C5_IDENTITY_NOT_FAIR when hiddenTeamStructure is not declared (regression pin)', () => {
+    const adapter = makeHiddenTeamAdapter('m1-fair-undeclared', (seed) => (seed % 3 === 0 ? 'B' : 'A'));
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 30, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(true);
+  }, 20_000);
+
+  it('does not block C5_IDENTITY_NOT_FAIR when hiddenTeamStructure is true, despite meanWinRate far from 1/playerCount', () => {
+    const adapter = makeHiddenTeamAdapter(
+      'm1-fair-declared',
+      (seed) => (seed % 3 === 0 ? 'B' : 'A'),
+      true,
+    );
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 30, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(false);
+    expect(c5?.notes.some((note) => note.includes('hiddenTeamStructure'))).toBe(true);
+  }, 20_000);
+
+  it('still raises the seat-bias note under hiddenTeamStructure when one faction wins every time', () => {
+    // Faction A wins every seed instead of 2/3 of them — players 0/1/2
+    // (faction A) end up with a much higher win rate than player 3 (faction
+    // B), which is exactly the seat-bias signal C5 must keep catching even
+    // when the identity-fairness comparison itself is neutralized by
+    // hiddenTeamStructure.
+    const adapter = makeHiddenTeamAdapter('m1-biased-declared', () => 'A', true);
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 20, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(false);
+    expect(
+      c5?.notes.some((note) => note.includes('seat bias') && note.includes('exceeds 0.3')),
+    ).toBe(true);
+  }, 20_000);
+});

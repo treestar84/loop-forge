@@ -3,12 +3,14 @@ import type { PromotionCriteria } from '../../kernel/gates';
 import { miniTrickAdapter } from '../../reference/mini-trick';
 import { eraseAdapter } from '../erase';
 import { runWave, type WaveConfig } from '../wave-runner';
+import { fieldMixAdapter } from './helpers/field-mix-game';
 import { firstMoverWinsAdapter } from './helpers/first-mover-wins-game';
 import { strengthDeclareAdapter } from './helpers/strength-declare-game';
 
 const adapter = eraseAdapter(miniTrickAdapter);
 const collapseAdapter = eraseAdapter(firstMoverWinsAdapter);
 const strengthAdapter = eraseAdapter(strengthDeclareAdapter);
+const fieldMixTestAdapter = eraseAdapter(fieldMixAdapter);
 
 // mini-trick scores range 0-6 (six tricks total), so kernel/gates'
 // DEFAULT_CRITERIA (minScoreDiff: 5, tuned for a larger-magnitude game) would
@@ -264,5 +266,107 @@ describe('runWave regression tier (O10)', () => {
     const noRegressionLedger = makeLedger();
     const noRegressionReport = runWave(adapter, baseWaveConfig(noRegressionLedger));
     expect(noRegressionReport.seedConsumption).not.toContain('strength-regression');
+  });
+});
+
+// M4 (docs/GAP-ANALYSIS-10.md): WaveConfig.fieldMix — per-seat opponent
+// composition for multi-player waves, taking precedence over the single
+// `opponent` field for every non-candidate seat.
+describe('runWave fieldMix (M4)', () => {
+  function fieldMixWaveConfig(ledger: SeedLedger, fieldMix?: WaveConfig['fieldMix']): WaveConfig {
+    return {
+      waveId: 'field-mix-wave-1',
+      candidates: [{ flag: 'noop' }],
+      opponent: 'heuristic',
+      ...(fieldMix === undefined ? {} : { fieldMix }),
+      recordedAt: '2026-01-01T00:00:00.000Z',
+      ledger,
+      tiers: {
+        smoke: {
+          bankId: 'smoke-test',
+          sprt: { p0: 0.5, p1: 0.58, alpha: 0.05, beta: 0.05 },
+          maxBlocks: 5,
+          minBlocks: 5,
+        },
+        prune: { bankId: 'prune-test', blocks: 5 },
+        holdout: { bankId: 'holdout-test', blocks: 5 },
+      },
+      criteria: { minWinRate: 0.53, minScoreDiff: 0.1 },
+      screenProbe: { seeds: [1], botSeedBase: 500 },
+    };
+  }
+
+  it('throws a clear error when fieldMix.length does not equal playerCount - 1', () => {
+    const ledger = makeLedger();
+    expect(() => runWave(fieldMixTestAdapter, fieldMixWaveConfig(ledger, ['heuristic']))).toThrow(
+      /fieldMix/,
+    );
+  });
+
+  it('places each fieldMix entry\'s baseline factory at its own non-candidate seat', () => {
+    // fieldMixAdapter's sole strategySurface flag ('noop') always returns
+    // `base` unchanged, so screen rejects it as a no-op and evaluateCandidate
+    // stops right after the screen tier (no smoke/prune/holdout games spent)
+    // — this keeps bot-factory construction calls to exactly the two screen
+    // trajectories (candidate vs base), both built from the same restFactories.
+    const heuristicSeeds: number[] = [];
+    const randomSeeds: number[] = [];
+    const spiedAdapter = eraseAdapter({
+      ...fieldMixAdapter,
+      baselines: {
+        heuristic: (seed: number) => {
+          heuristicSeeds.push(seed);
+          return fieldMixAdapter.baselines.heuristic(seed);
+        },
+        random: (seed: number) => {
+          randomSeeds.push(seed);
+          return fieldMixAdapter.baselines.random(seed);
+        },
+      },
+    });
+
+    const ledger = makeLedger();
+    const report = runWave(
+      spiedAdapter,
+      fieldMixWaveConfig(ledger, ['heuristic', 'random', 'heuristic']),
+    );
+    const result = report.results.find((r) => r.flag === 'noop');
+    expect(result?.tiersPassed).toEqual([]);
+
+    // Candidate seat (index 0) is always heuristic-based here (no
+    // baselineFlags), plus non-candidate seats 1 and 3 declared 'heuristic'
+    // in fieldMix, seat 2 declared 'random' — each trajectory call (screen
+    // runs candidate-vs-rest and base-vs-rest once, per probe seed) hits
+    // every seat once, so seed offsets 0/1/3 (relative to botSeedBase=500)
+    // must only ever reach the heuristic spy, and offset 2 only the random spy.
+    expect(new Set(heuristicSeeds)).toEqual(new Set([500, 501, 503]));
+    expect(new Set(randomSeeds)).toEqual(new Set([502]));
+  });
+
+  it('fieldMix unset preserves pre-M4 behavior: every non-candidate seat uses the single opponent factory', () => {
+    const heuristicSeeds: number[] = [];
+    const randomSeeds: number[] = [];
+    const spiedAdapter = eraseAdapter({
+      ...fieldMixAdapter,
+      baselines: {
+        heuristic: (seed: number) => {
+          heuristicSeeds.push(seed);
+          return fieldMixAdapter.baselines.heuristic(seed);
+        },
+        random: (seed: number) => {
+          randomSeeds.push(seed);
+          return fieldMixAdapter.baselines.random(seed);
+        },
+      },
+    });
+
+    const ledger = makeLedger();
+    runWave(spiedAdapter, fieldMixWaveConfig(ledger, undefined));
+
+    // Every seat (candidate + all 3 rest slots) is heuristic-based: candidate
+    // via composeBot's default heuristic baseline, rest slots via
+    // wave.opponent: 'heuristic'. random is never touched.
+    expect(new Set(heuristicSeeds)).toEqual(new Set([500, 501, 502, 503]));
+    expect(randomSeeds).toEqual([]);
   });
 });

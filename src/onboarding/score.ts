@@ -698,13 +698,29 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   // coincidence. For a symmetric solo-winner game the per-player expectation is
   // 1/playerCount (free-for-all) or 1/teamCount (team games). Tie handling can
   // shift this slightly for 3+ players, so the tolerance is a band, not a point.
-  const identityCenter = adapter.spec.teams
-    ? 1 / adapter.spec.teams.length
-    : 1 / adapter.spec.playerCount;
+  //
+  // hiddenTeamStructure games (Avalon-like: factions exist but membership is
+  // hidden, so spec.teams cannot be declared) break this formula entirely —
+  // the true expectation is driven by faction-size ratios the harness has no
+  // way to know statically, not by 1/playerCount (docs/GAP-ANALYSIS-10.md M1).
+  // For those games identityCenter is instead pinned to the just-measured
+  // meanWinRate itself, which makes the fairness comparison below trivially
+  // pass by construction (there is nothing else to compare it against without
+  // faction-size ground truth) while leaving the seat-bias check below —
+  // C5's actual defense against a repeat of the seat-bias incident
+  // (DESIGN.md §1) — fully active and unaffected.
+  const identityCenter = adapter.spec.hiddenTeamStructure
+    ? identity.meanWinRate
+    : adapter.spec.teams
+      ? 1 / adapter.spec.teams.length
+      : 1 / adapter.spec.playerCount;
+  const identityCenterLabel = adapter.spec.hiddenTeamStructure
+    ? 'measured meanWinRate (hiddenTeamStructure — no static 1/N expectation)'
+    : `1/${adapter.spec.teams ? 'teamCount' : 'playerCount'}`;
 
   notes.push(
     `identity calibration: meanWinRate=${identity.meanWinRate.toFixed(3)} ` +
-      `(expected center ${identityCenter.toFixed(3)} = 1/${adapter.spec.teams ? 'teamCount' : 'playerCount'}), ` +
+      `(expected center ${identityCenter.toFixed(3)} = ${identityCenterLabel}), ` +
       `seatWinRates=[${identity.seatWinRates.map((r) => r.toFixed(3)).join(', ')}], bias=${identity.bias.toFixed(3)}`,
   );
 
@@ -713,7 +729,7 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
       code: 'C5_IDENTITY_NOT_FAIR',
       message:
         `random self-play mean win rate ${identity.meanWinRate.toFixed(3)} is not within ` +
-        `${identityCenter.toFixed(3)}+/-0.05 (expected 1/${adapter.spec.teams ? 'teamCount' : 'playerCount'})`,
+        `${identityCenter.toFixed(3)}+/-0.05 (expected ${identityCenterLabel})`,
       remediation:
         'Check seatingPlan coverage and outcome/scoring symmetry for a fair game. ' +
         '보통 이건 좌석(선공/후공 등) 순서 구성이 한쪽에 유리하게 치우쳐 있거나, 점수/승패 판정 로직이 플레이어 간에 비대칭적으로 동작할 때 발생합니다.',

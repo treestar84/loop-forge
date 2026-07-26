@@ -14,13 +14,20 @@
 
 | ID | 카테고리(예시 게임) | 발견 | 심각도 |
 |---|---|---|---|
-| M1 | 숨은 진영·사회적 추리(아발론) | `scoreC5`의 `identityCenter=1/playerCount` 폴백이 F4 가이드("teams 미선언")를 따른 게임을 자기모순으로 거부(`C5_IDENTITY_NOT_FAIR` 강제 블로커). `classifyGame`도 숨은 팀을 'ffa'로 오분류 | **높음** — 실제 자기모순 확인 |
 | M2 | 협동(판데믹) | C5 축의 "무작위=50%±CI 공정 기준" 전제가 협동 게임에서 성립 안 함(팀 1개뿐, identityCenter=1.0). `WaveConfig.opponent` 명명이 적대 프레임 고정 | 중 |
 | M3 | 실시간·연속행동(레이싱·격투) | `search/mcts.ts`·`ismcts.ts`의 legal 배열 전수 순회 전제가 연속/초거대 이산 공간에서 깨짐, 결정지점 모델과 프레임 단위 실시간이 불일치, C4·표본산식 자릿수 붕괴 — 완전 신규 발견(F12는 선언만 하고 근거 없었음) | 낮음(우선 문서화) |
-| M4 | 대인원 FFA 킹메이킹(카탄) | `WaveConfig.opponent`가 문자열 1개라 혼합 상대 구성(필드 믹스) 타입 표현 불가, `decisionMagnitude` 임계가 인원수 무관 고정 | 중 |
 
-권장 순서: M1(자기모순 확인된 실결함, 최우선) → M2 → M4 → M3(문서화 우선,
-구현은 별도 로드맵). 상세 근거·코드 인용은 GAP-ANALYSIS-10.md 참고.
+M1·M4는 실제 게임(아발론·카탄) 온보딩으로 진행 중 — 아래 완료 표 참고.
+M2·M3는 아직 실제 게임 온보딩이 없어 미착수 유지. 상세 근거는 GAP-ANALYSIS-10.md.
+
+## 완료 — M1/M4 게임 중립 수정 (2026-07-27, 아발론·카탄 온보딩 선행 작업)
+
+| ID | 처치 내용 | 증거 |
+|---|---|---|
+| M1 | `GameSpec.hiddenTeamStructure?`(옵트인) 추가 → `scoreC5`가 true일 때 `identityCenter`를 실측 `identity.meanWinRate` 자기참조로 재정의(1/playerCount 폴백 무력화), 좌석 편향 검사(`identity.bias`)는 분기 밖이라 그대로 유지. `classifyGame`에 필드 배선만(matchStructure 로직은 범위 밖) | 회귀 핀(미선언 시 기존 블로커 동작 동일) + 4인 비대칭 은닉 진영 픽스처로 신규 분기 검증(블로커 미발생 + 좌석 편향은 여전히 잡힘) |
+| M4 | `WaveConfig.fieldMix?: ReadonlyArray<'heuristic'\|'random'>` 추가(길이=playerCount-1 검증) — `runPairedBlock` opponent 파라미터가 단일/배열 겸용으로 확장, wave-runner 전 함수가 restFactories 배열 기반으로 일반화 | 기존 reportDigest 고정 해시 무손상(미지정 시 완전 동일) + 4인 픽스처로 슬롯별 개별 factory 배치 검증(스파이로 호출 추적) + 길이 불일치 에러 |
+
+tsc 0에러, **40 suites / 519 tests 전부 통과**(직전 511 대비 신규 8건).
 
 ## 미착수
 

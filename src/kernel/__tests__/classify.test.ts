@@ -88,4 +88,17 @@ describe('classifyGame', () => {
     expect(classification.utilityStructure).toBe('general');
     expect(classification.utilityDeclared).toBe(true);
   });
+
+  // M1 (docs/GAP-ANALYSIS-10.md): classification.hiddenTeamStructure mirrors
+  // spec.hiddenTeamStructure verbatim, defaulting to false when unset.
+  it('defaults hiddenTeamStructure to false when spec.hiddenTeamStructure is omitted', () => {
+    const classification = classifyGame(miniTrickAdapter.spec);
+    expect(classification.hiddenTeamStructure).toBe(false);
+  });
+
+  it('classifies hiddenTeamStructure as true when spec declares it', () => {
+    const hiddenTeamSpec = { ...miniTrickAdapter.spec, hiddenTeamStructure: true as const };
+    const classification = classifyGame(hiddenTeamSpec);
+    expect(classification.hiddenTeamStructure).toBe(true);
+  });
 });

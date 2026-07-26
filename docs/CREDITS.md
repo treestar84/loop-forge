@@ -16,6 +16,7 @@
 | 도미니언 | [rspeer/dominiate](https://github.com/rspeer/dominiate) | CoffeeScript | 기본 세트 룰 중 12종 카드 부분집합(§5.7 증분 온보딩) | `src/reference/dominion.ts` |
 | 윙스팬(core) | [keithgw/wingspan](https://github.com/keithgw/wingspan) | Python | **주의**: 이 저장소는 실제 윙스팬 보드게임 룰이 아니라 RL 학습용으로 극단 단순화된 자원게임(서식지·트리거·알·목표카드 없음)이다. "소스가 최종 근거" 원칙대로 이 단순화된 버전을 그대로 온보딩했다 — `src/reference/wingspan.ts`의 어댑터는 실제 시판 윙스팬의 재현이 **아니다**. | `src/reference/wingspan.ts` |
 | 하스스톤(mirror) | [danielyule/hearthbreaker](https://github.com/danielyule/hearthbreaker) | Python | 중립 카드 12장, 미러 매치 전용(직업 카드·인터럽트 범위 밖) | `src/reference/hearthstone.ts` |
+| 아발론(The Resistance: Avalon, 5인 기본 역할) | [AlexLomm/avalon-engine](https://github.com/AlexLomm/avalon-engine) | JS/TS(MIT) | **구조 참고만** — headless 엔진의 페이즈 구성(제안→투표→미션 순환)만 참고, 코드는 복사하지 않고 공개 표준 룰에서 처음부터 재구현. **스코프 축소**: 5인 기본 역할(멀린·충직한 종자 2·모드레드의 하수인·암살자)만 구현, 퍼시발·모르가나·모드레드(역할)·오베론 등 확장 역할은 범위 밖. 발언/주장(claim)도 구조화 결정 지점으로 이산화하지 않고 이번 패스에서 생략(ONBOARDING-GUIDE.md §"F4" 참고). | `src/reference/avalon.ts` |
 
 ## 알고리즘 충실 이식 (코드 수준 파생)
 

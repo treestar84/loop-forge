@@ -29,6 +29,21 @@ M2·M3는 아직 실제 게임 온보딩이 없어 미착수 유지. 상세 근�
 
 tsc 0에러, **40 suites / 519 tests 전부 통과**(직전 511 대비 신규 8건).
 
+## 완료 — 아발론 온보딩 (M1 실전 검증, 2026-07-27)
+
+8번째 게임. 5인 기본 역할 세트(멀린·충복 2·모드레드의 하수인·암살자, 확장 역할
+제외). 참고: [AlexLomm/avalon-engine](https://github.com/AlexLomm/avalon-engine)
+(MIT, 구조만 참고·코드 미복사).
+
+| 항목 | 결과 |
+|---|---|
+| conformance | C0~C6 100(C6=67, 전략 플래그 하나가 probe 시드에서 암살 페이즈 도달 못 함 — non-blocking), **C5=100(M1 실증)**, C7=60(self-play 캡, 정상) |
+| **M1 실증** | `hiddenTeamStructure:true` 선언 시 C5가 `identityCenter`를 실측 `meanWinRate`(0.237) 자기참조로 삼아 **블로커 없이 통과**함을 로그로 직접 확인(정적 `1/playerCount=0.2` 기대였다면 걸렸을 상황) |
+| 부수 발견 | 최초 heuristic 봇(정보 미활용)이 `C5_HEURISTIC_NOT_DISTINCT`로 실제 거부됨 — 멀린/악 진영이 알고 있는 정보를 실제로 쓰도록 재설계 후 통과. "블로커가 항상 어댑터 버그는 아니다" 원칙의 반례(이번엔 진짜 버그) |
+| 웨이브 | 3플래그 전부 미채택(정상 — 목표는 파이프라인 완주였지 강한 전략 설계가 아님) |
+
+tsc 0에러, **41 suites / 540 tests 전부 통과**.
+
 ## 미착수
 
 | ID | 항목 | 출처 |

@@ -14,6 +14,7 @@
  */
 
 import type { AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
+import { composeBot } from '../../../loop/compose';
 import { ismctsBotFactory } from '../../../search/ismcts';
 import type { MctsConfig } from '../../../search/mcts';
 
@@ -59,5 +60,45 @@ export function dominionIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpe
     description:
       'SO-ISMCTS search candidate over sampled hand/deck determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, DOMINION_ISMCTS_S64_HR_CONFIG),
+  };
+}
+
+/**
+ * ismcts-wave-3 (docs/GAP-ANALYSIS-8.md §4.5's near-miss, DESIGN.md §6.1
+ * near-miss loop retry): "champion rollout" — same lever as
+ * `splendor-ismcts-flag.ts`'s `splendorIsmctsChampionRolloutFlagSpec` (that
+ * file's doc comment has the full rationale): rollouts driven by a
+ * composeBot-assembled composite of the CURRENT registry champion's own flags
+ * (`rushProvinces`, dominion's only adopted flag as of v2) instead of raw
+ * heuristic, via `search/mcts.ts`'s `rolloutFactory` option (already
+ * accepted by `ismcts.ts` with no code change there, since it reuses
+ * `MctsConfig`/`evaluate` verbatim). New flag name (`ismcts-s64-cr`, not a
+ * reuse of `ismcts-s64-hr`) per DESIGN.md §6.1's "이미 판정된 이름 재사용
+ * 금지" rule. `adapter` here must be the plain game adapter (its own
+ * strategySurface, not yet extended with any IS-MCTS flags) so composeBot can
+ * resolve `rushProvinces`.
+ */
+export const DOMINION_CHAMPION_ROLLOUT_FLAGS = ['rushProvinces'] as const;
+
+export const DOMINION_ISMCTS_S64_CR_FLAG = 'ismcts-s64-cr';
+
+/**
+ * Build the `ismcts-s64-cr` StrategyFlagSpec: simulations=64 (matching
+ * `ismcts-s64-hr`'s budget for a clean rollout-policy-only comparison),
+ * rolloutFactory = the current champion composite bot.
+ */
+export function dominionIsmctsChampionRolloutFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 64,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's64-cr',
+    rolloutFactory: composeBot(adapter, [...DOMINION_CHAMPION_ROLLOUT_FLAGS]),
+  };
+  return {
+    flag: DOMINION_ISMCTS_S64_CR_FLAG,
+    description:
+      'SO-ISMCTS search candidate whose rollouts are driven by the current champion composite bot instead of raw heuristic (DESIGN.md §6.1 near-miss retry); ignores the base bot entirely.',
+    apply: () => ismctsBotFactory(adapter, config),
   };
 }

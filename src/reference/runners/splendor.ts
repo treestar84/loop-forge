@@ -38,7 +38,12 @@ import { eraseAdapter } from '../../loop/erase';
 import { withStrategyFlags } from '../../loop/compose';
 import { computeSourceDigest } from '../../artifacts/source-digest';
 import { splendorAdapter } from '../splendor';
-import { SPLENDOR_ISMCTS_S128_HR_FLAG, splendorIsmctsFlagSpec } from './shared/splendor-ismcts-flag';
+import {
+  SPLENDOR_ISMCTS_S128_HR_FLAG,
+  splendorIsmctsFlagSpec,
+  SPLENDOR_ISMCTS_S128_CR_FLAG,
+  splendorIsmctsChampionRolloutFlagSpec,
+} from './shared/splendor-ismcts-flag';
 
 const GAME_ID = 'splendor';
 
@@ -749,6 +754,230 @@ function main(): void {
     latestWaveCriteria: ismcts2WaveConfig.criteria,
   });
   writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), wave2SummaryMarkdown, 'utf8');
+  console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
+
+  /**
+   * 18) ismcts-wave-3 (DESIGN.md §6.1 near-miss loop, docs/GAP-ANALYSIS-8.md
+   * §4.5's near-miss retry). `ismcts-s128-hr` passed prune/holdout on both
+   * ismcts-wave-1 and ismcts-wave-2 but lost ismcts-wave-2's regression tier
+   * to the current champion (v2, `buyHighestPoints`) at winRate=0.325 —
+   * exactly the "raw-heuristic-rollout search bot loses to a champion-tuned
+   * composite" pattern gomoku hit and fixed with "champion rollout"
+   * (search/mcts.ts's rolloutFactory + gomoku-mcts-flag.ts's
+   * GOMOKU_MCTS2_S256_CR_FLAG precedent). New candidate `ismcts-s128-cr`
+   * (shared/splendor-ismcts-flag.ts's `splendorIsmctsChampionRolloutFlagSpec`):
+   * same simulations=128 budget as ismcts-s128-hr, but rollouts are driven by
+   * the composeBot-assembled v2 champion (`buyHighestPoints`) instead of raw
+   * `adapter.baselines.heuristic`. New flag name per §6.1's "이미 판정된
+   * 이름 재사용 금지" rule — the rollout-policy logic changed.
+   *
+   * Throughput measurement (scratch script, not checked in; nice -n 10,
+   * single process, 3 games/matchup):
+   *   - ismcts-s128-cr vs heuristic (smoke/prune/holdout matchup):    ~1,441ms/game
+   *   - ismcts-s128-cr vs v2 champion (regression matchup):             ~826ms/game
+   * Tier sizes match ismcts-wave-2's (smoke<=30, prune=15, holdout=15,
+   * regression=20; 1 block = 2 games):
+   *   smoke    <=30 blocks = 60 games * ~1,441ms ≈ 86s
+   *   prune      15 blocks = 30 games * ~1,441ms ≈ 43s
+   *   holdout    15 blocks = 30 games * ~1,441ms ≈ 43s
+   *   regression 20 blocks = 40 games * ~826ms   ≈ 33s
+   *   total ≈ 205s (≈3.4 min) — well under the 30-minute wave ceiling.
+   *
+   * Reuses the same P6-derived `criteria.minScoreDiff` (2 x
+   * `noiseFloor.scoreDiffStdDev`, computed once in step 2) as ismcts-wave-2 —
+   * same calibration input, no re-measurement needed. New seed banks
+   * (splendor-ismcts3-*, ranges 50000-53019) do not overlap ismcts-wave-1's
+   * 30000-33019 or ismcts-wave-2's 40000-43019 ranges, or any
+   * splendor-runner-* range.
+   */
+  console.log('18) IS-MCTS 후보 웨이브 3 (ismcts-wave-3, 챔피언 롤아웃 근접실패 재도전)');
+  const ismcts3FlagSpec = splendorIsmctsChampionRolloutFlagSpec(adapter);
+  const ismcts3Adapter = withStrategyFlags(adapter, [ismcts3FlagSpec]);
+
+  const ismcts3Latest = registry.latest();
+  if (ismcts3Latest === undefined) {
+    throw new Error('splendor runner: registry has no latest baseline before ismcts-wave-3');
+  }
+
+  const ismcts3Ledger = new SeedLedger();
+  const ismcts3ReservedAt = now();
+  const ismcts3SmokeMax = 30;
+  const ismcts3PruneBlocks = 15;
+  const ismcts3HoldoutBlocks = 15;
+  const ismcts3RegressionBlocks = 20;
+  ismcts3Ledger.reserve({
+    bankId: 'splendor-ismcts3-smoke',
+    range: { start: 50000, end: 50000 + ismcts3SmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: ismcts3ReservedAt,
+  });
+  ismcts3Ledger.reserve({
+    bankId: 'splendor-ismcts3-prune',
+    range: { start: 51000, end: 51000 + ismcts3PruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: ismcts3ReservedAt,
+  });
+  ismcts3Ledger.reserve({
+    bankId: 'splendor-ismcts3-holdout',
+    range: { start: 52000, end: 52000 + ismcts3HoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: ismcts3ReservedAt,
+  });
+  ismcts3Ledger.reserve({
+    bankId: 'splendor-ismcts3-regression',
+    range: { start: 53000, end: 53000 + ismcts3RegressionBlocks - 1 },
+    purpose: 'regression',
+    reservedAt: ismcts3ReservedAt,
+  });
+
+  const ismcts3WaveConfig = assembleWaveConfig(
+    ismcts3Adapter,
+    {
+      waveId: 'ismcts-wave-3',
+      candidates: [{ flag: SPLENDOR_ISMCTS_S128_CR_FLAG }],
+      opponent: 'heuristic',
+      ledger: ismcts3Ledger,
+      recordedAt: now(),
+      baselineFlags: ismcts3Latest.flags,
+      baselineVersion: ismcts3Latest.version,
+      tiers: {
+        smoke: {
+          bankId: 'splendor-ismcts3-smoke',
+          sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+          maxBlocks: ismcts3SmokeMax,
+          minBlocks: 5,
+        },
+        prune: { bankId: 'splendor-ismcts3-prune', blocks: ismcts3PruneBlocks },
+        holdout: { bankId: 'splendor-ismcts3-holdout', blocks: ismcts3HoldoutBlocks },
+        regression: { bankId: 'splendor-ismcts3-regression', blocks: ismcts3RegressionBlocks },
+      },
+      screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
+    },
+    { blockStdDev: noiseFloor.blockStdDev, scoreDiffStdDev: noiseFloor.scoreDiffStdDev },
+  );
+  console.log(
+    `   criteria.minScoreDiff=${ismcts3WaveConfig.criteria.minScoreDiff.toFixed(4)} (블루프린트 파생, ismcts-wave-2와 동일 캘리브레이션)`,
+  );
+
+  const ismcts3Report = runWave(ismcts3Adapter, ismcts3WaveConfig);
+  for (const result of ismcts3Report.results) {
+    console.log(
+      `   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`,
+    );
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(
+          `     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} scoreDiff=${stats.pointScoreDiff.toFixed(3)} blocks=${stats.blocks}`,
+        );
+      }
+    }
+    if (result.warnings.length > 0) {
+      for (const warning of result.warnings) {
+        console.log(`     ⚠ ${warning}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: ismcts3Report.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: ismcts3Report.comparabilityKey,
+    payload: ismcts3Report,
+    markdown: `# Wave Report — ${ismcts3Report.waveId}\n\n${ismcts3Report.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('19) ismcts-wave-3 adoption ledger 기록');
+  const ismcts3Entries: AdoptionEntry[] = ismcts3Report.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const ismcts3AdoptionRecord = ledger.add({
+    waveId: ismcts3Report.waveId,
+    recordedAt: now(),
+    comparabilityKey: ismcts3Report.comparabilityKey,
+    baselineVersion: ismcts3Latest.version,
+    opponentId: ismcts3WaveConfig.opponent,
+    entries: ismcts3Entries,
+    nextLoopNotes: [],
+  });
+
+  console.log('19.5) ismcts-wave-3 near-miss 후보 추출');
+  const ismcts3NearMiss = extractNearMissCandidates(ismcts3AdoptionRecord, ismcts3WaveConfig.criteria);
+  if (ismcts3NearMiss.length === 0) {
+    console.log('   근접실패 후보 없음.');
+  } else {
+    for (const candidate of ismcts3NearMiss) {
+      console.log(
+        `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(
+    join(rootDir, 'runs', GAME_ID, 'ismcts-wave-3-near-miss.json'),
+    JSON.stringify(ismcts3NearMiss, null, 2),
+  );
+  console.log(`   저장: runs/${GAME_ID}/ismcts-wave-3-near-miss.json`);
+
+  console.log('19.6) ismcts-wave-3 채택 플래그 registry 승격');
+  const ismcts3AdoptedFlags = ismcts3Report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
+  if (ismcts3AdoptedFlags.length === 0) {
+    console.log('   이번 ismcts-wave-3에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('splendor runner: registry has no latest baseline before ismcts-wave-3 promotion step');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === ismcts3Report.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 ismcts-wave-3는 이미 승격됨 — 스킵');
+    } else {
+      const nextVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...ismcts3AdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: ismcts3Report.waveId,
+        notes: `ismcts-wave-3에서 채택된 플래그 승격 (챔피언 롤아웃): ${ismcts3AdoptedFlags.join(', ')}`,
+        sourceDigest,
+      });
+      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('20) persist registry/ledger (ismcts-wave-3 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('21) game-summary 재렌더 (ismcts-wave-3 반영)');
+  const wave3SummaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: ismcts3WaveConfig.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), wave3SummaryMarkdown, 'utf8');
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 }
 

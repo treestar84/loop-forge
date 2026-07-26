@@ -13,6 +13,7 @@
  */
 
 import type { AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
+import { composeBot } from '../../../loop/compose';
 import { ismctsBotFactory } from '../../../search/ismcts';
 import type { MctsConfig } from '../../../search/mcts';
 
@@ -55,5 +56,50 @@ export function splendorIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpe
     description:
       'SO-ISMCTS search candidate over sampled deck-order determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, SPLENDOR_ISMCTS_S128_HR_CONFIG),
+  };
+}
+
+/**
+ * ismcts-wave-3 (docs/GAP-ANALYSIS-8.md §4.5's near-miss, DESIGN.md §6.1
+ * near-miss loop retry): "champion rollout" — instead of
+ * `adapter.baselines.heuristic` driving rollouts (the 'heuristic'
+ * rolloutPolicy that `ismcts-s128-hr` used and which lost to the current
+ * champion 0.325 in ismcts-wave-2's regression tier), a composeBot-assembled
+ * composite of the CURRENT registry champion's own flags (`buyHighestPoints`,
+ * splendor's only adopted flag as of v2) drives rollouts via
+ * `search/mcts.ts`'s `rolloutFactory` option — the same lever
+ * `gomoku-mcts-flag.ts`'s `GOMOKU_MCTS2_S256_CR_FLAG` used, now applied to
+ * IS-MCTS since `ismcts.ts` reuses `MctsConfig`/`evaluate` verbatim (see
+ * `search/ismcts.ts`'s doc comment) and therefore already accepts
+ * `rolloutFactory` with no code change there. A new flag name (`ismcts-s128-cr`,
+ * not a reuse of `ismcts-s128-hr`) because the rollout-policy logic is
+ * genuinely different (DESIGN.md §6.1's "이미 판정된 이름 재사용 금지" rule).
+ * `adapter` here must be the plain game adapter (its own strategySurface, not
+ * yet extended with any IS-MCTS flags) so composeBot can resolve
+ * `buyHighestPoints` — the same `adapter` splendor.ts already threads into
+ * `splendorIsmctsFlagSpec` above.
+ */
+export const SPLENDOR_CHAMPION_ROLLOUT_FLAGS = ['buyHighestPoints'] as const;
+
+export const SPLENDOR_ISMCTS_S128_CR_FLAG = 'ismcts-s128-cr';
+
+/**
+ * Build the `ismcts-s128-cr` StrategyFlagSpec: simulations=128 (matching
+ * `ismcts-s128-hr`'s budget for a clean rollout-policy-only comparison),
+ * rolloutFactory = the current champion composite bot.
+ */
+export function splendorIsmctsChampionRolloutFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 128,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's128-cr',
+    rolloutFactory: composeBot(adapter, [...SPLENDOR_CHAMPION_ROLLOUT_FLAGS]),
+  };
+  return {
+    flag: SPLENDOR_ISMCTS_S128_CR_FLAG,
+    description:
+      'SO-ISMCTS search candidate whose rollouts are driven by the current champion composite bot instead of raw heuristic (DESIGN.md §6.1 near-miss retry); ignores the base bot entirely.',
+    apply: () => ismctsBotFactory(adapter, config),
   };
 }

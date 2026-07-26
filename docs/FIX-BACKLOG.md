@@ -12,7 +12,19 @@
 | P7 | 오목 C열(vs Opus봇) 역전 — 예산 상향·챔피언 롤아웃 둘 다 시도했으나 원인 분리 결과 "접근 자체의 한계"(N=1,300 실측으로 확정, GAP-ANALYSIS-8 §4.6). 다음 카드: 오프닝북/전술 확장(즉승·즉방어 최우선 순서를 트리 탐색 앞단에 명시적으로 배선) | GAP-ANALYSIS-8 §4.6 |
 
 registry 버전 표현 일반화(`kind: flags\|policy-table\|search-config`)는
-GAP-ANALYSIS-7 §2 이연 목록, near-miss 큰루프 1회전(스플랜더·도미니언)은 진행 중.
+GAP-ANALYSIS-7 §2 이연 목록.
+
+## 완료 — near-miss 큰루프 1회전 (2026-07-26, `docs/GAP-ANALYSIS-8.md` §4.7)
+
+| 처치 내용 | 증거 |
+|---|---|
+| DESIGN §6.1 프로토콜 실전 1회전: near-miss 구조화 레코드를 근거로 "챔피언 합성봇을 IS-MCTS 롤아웃 정책으로 주입"하는 새 후보(`ismcts-s128-cr`/`ismcts-s64-cr`, §6.1 새-이름 규칙) 설계·재발주 | 스플랜더: regression 0.325→**0.675**로 통과, **adopted→v3**. 도미니언: regression 0.275→**0.100**으로 오히려 악화, 재차 near-miss(억지 3차 재시도 없음 — 프로토콜은 성공 보장이 아님을 그대로 준수) |
+| `search/ismcts.ts`가 `mcts.ts`의 `MctsConfig`를 재사용해 `rolloutFactory`가 코드 변경 없이 IS-MCTS에도 적용됨을 확인·고정 | 회귀 테스트 4건(hidden-corridor 픽스처) |
+
+**최종 결합 검증** (2026-07-26, 4개 후속 작업 — 벤치마크 재측정·소스 digest·오목
+C열·near-miss 큰루프 — 전부 완료): tsc 0에러, **38 suites / 466 tests 전부
+통과**. 스플랜더 registry `['v1','v2','v3']`, 도미니언 `['v1','v2']`(near-miss
+정직 유지) — 채택 여부와 정확히 일치.
 
 ## 완료 — 오목 C열 역전 시도 (2026-07-25~26, `docs/GAP-ANALYSIS-8.md` §4.6)
 

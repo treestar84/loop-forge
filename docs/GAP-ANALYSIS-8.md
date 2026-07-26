@@ -98,6 +98,83 @@ Opus 즉흥봇 상대로는 3후보 전부 0/100 — **접근 자체의 한계**
 100%** — C열 역전 불발이 정량 확정됨. 다음 카드는 오프닝북/전술 확장 계열
 (진단에서 이미 식별, 이번 라운드 범위 밖으로 명시 이연).
 
+## 4.7 near-miss 큰루프 1회전 — 스플랜더/도미니언 챔피언 롤아웃 재도전 (2026-07-26)
+
+DESIGN.md §6.1의 4단계 프로토콜(웨이브 확보 → near-miss 구조화 → 어댑터 재설계 →
+재발주)을 사람이 아닌 에이전트가 실전으로 1회전 완주했다 — 결과의 성공/실패와
+무관하게 이 자체가 §6.1 검증 대상이다.
+
+**1단계 재확인**: `extractNearMissCandidates`가 §4.5의 두 near-miss를
+`{flags, failedAtTier: 'regression', pointWinRate, pointScoreDiff, winRateCI, gap}`
+형태로 이미 구조화해 두었고(스플랜더 `runs/splendor/ismcts-wave-2-near-miss.json`,
+도미니언 `runs/dominion/ismcts-wave-2-near-miss.json`), 이 레코드가 재설계의
+직접 근거였다.
+
+**2단계**: `search/ismcts.ts`는 `search/mcts.ts`의 `MctsConfig`/`evaluate`를
+그대로 재사용하므로(파일 상단 doc comment), `rolloutFactory`(오목 C열 재도전에서
+추가된 옵션)가 IS-MCTS에도 코드 변경 없이 이미 적용된다는 사실을 확인했다.
+`src/search/__tests__/ismcts.test.ts`에 hidden-corridor 픽스처 기반 회귀 테스트
+4개를 추가해 이 사실을 고정(rolloutFactory 미지정 시 기존 동작 동일 /
+지정 시 결정론·legal 반환 / rolloutPolicy보다 우선 / ismctsBotFactory 경로도 동일).
+
+**3단계 — 챔피언 롤아웃 후보 설계**: 오목 C열 재도전(§4.6)의 "챔피언 합성봇을
+롤아웃 정책으로 주입" 패턴을 그대로 IS-MCTS에 적용. 각 게임의 v2(유일한 채택
+전략) 자체를 롤아웃 챔피언으로 사용 — 스플랜더 `buyHighestPoints`, 도미니언
+`rushProvinces`. 새 플래그명(§6.1 "이미 판정된 이름 재사용 금지"):
+`ismcts-s128-cr`(`shared/splendor-ismcts-flag.ts`), `ismcts-s64-cr`
+(`shared/dominion-ismcts-flag.ts`) — 시뮬레이션 예산은 기존 hr 변형과 동일,
+rolloutFactory만 raw heuristic → 챔피언 합성봇으로 교체.
+
+판당 비용 실측(scratch 스크립트, 미체크인; nice -n 10, 단독 프로세스, 3판):
+
+| 후보 | vs heuristic | vs v2 챔피언(regression) |
+|---|---|---|
+| 스플랜더 ismcts-s128-cr | ~1,441ms | ~826ms |
+| 도미니언 ismcts-s64-cr | ~1,848ms | ~2,500ms |
+
+ismcts-wave-3 배선: 후보 단일, opponent='heuristic', baselineFlags=registry
+latest(v2), tiers는 ismcts-wave-2와 동일 크기(smoke≤30/prune15/holdout15/
+regression20), criteria는 ismcts-wave-2와 동일 P6 파생 캘리브레이션(두 게임 모두
+scoreDiffStdDev=0 항등 붕괴 → derivedMinScoreDiff=0) 재사용. 신규 시드뱅크
+`{game}-ismcts3-*`(50000-53019), 기존 웨이브 범위와 비겹침.
+
+**4단계 실행 결과 (regression 티어가 실제 관건)**:
+
+| 게임 | 후보 | smoke | prune | holdout | regression | verdict |
+|---|---|---|---|---|---|---|
+| 스플랜더 | ismcts-s128-cr | 0.906 (Δ3.125) | 0.800 (Δ1.233) | 0.900 (Δ2.667) | **0.675 (Δ-1.350)** | **adopted** |
+| 도미니언 | ismcts-s64-cr | 0.700 (Δ1.783) | 0.817 (Δ4.167) | 0.650 (Δ1.400) | **0.100 (Δ-40.125)** | near-miss (재차) |
+
+- **스플랜더: 채택 성공.** 챔피언 롤아웃이 raw heuristic 롤아웃(§4.5의
+  ismcts-s128-hr, regression winRate=0.325)을 regression winRate=0.675로
+  끌어올려 통과선(0.5)을 넘겼다. `registry v2→v3` 승격 확인:
+  `flags=[buyHighestPoints, ismcts-s128-cr]`, `sourceWaveId=ismcts-wave-3`.
+- **도미니언: 오히려 악화, 재차 near-miss.** 챔피언 롤아웃 적용 후 regression
+  winRate이 0.275(§4.5의 ismcts-s64-hr) → **0.100**으로 더 나빠졌다
+  (scoreDiff도 -26.85 → -40.125로 악화). smoke/prune/holdout은 여전히 통과.
+  승격 없음, registry는 v2 그대로.
+
+**도미니언 실패 원인 추정(정황 증거, 확정 아님)**: `rushProvinces`는 그 이름대로
+"주(Province) 카드를 최우선으로 밀어붙이는" 단일 축의 그리디 전략으로 보이며,
+IS-MCTS 롤아웃 안에서 이 전략을 흉내 내는 매 시뮬레이션이 도미니언의 훨씬 큰
+분기 계수(구매 단계에서 킹덤 10종+기본 카드 전부가 합법 선택지, 게임 길이도
+최대 800 결정 대 스플랜더의 600)와 결합되면서 (a) 롤아웃 자체가 비싸져
+같은 예산(simulations=64)에서 실효 탐색 깊이가 줄었거나, (b) 그리디 단일
+전략을 흉내 내는 롤아웃이 실제 원본 `rushProvinces` 봇의 타이밍/조건 분기를
+정확히 재현하지 못해 오히려 "약한 rushProvinces 흉내"가 매 결정마다
+현 챔피언(=진짜 rushProvinces)에게 정보만 누설하는 꼴이 되었을 가능성이 있다.
+스플랜더의 `buyHighestPoints`(포인트 최댓값 카드 구매, 훨씬 단순한 단일 조건
+휴리스틱)에서는 이 패턴이 문제없이 통했다는 대비가 이 가설을 뒷받침한다 —
+**단, 이 근거는 관찰적 대비일 뿐 원인을 직접 격리한 진단 실험은 수행하지
+않았다**(§4.6 오목 사례처럼 head-to-head 진단으로 예산 vs 롤아웃 정책을
+분리하는 절차는 이번 라운드 범위 밖).
+
+**§6.1 완주 확인**: 두 게임 모두에서 1단계(near-miss 확보)→2단계(구조화 재확인)
+→3단계(어댑터 재설계, 신규 플래그)→4단계(재발주·실행)가 실제로 끝까지
+수행됐고, 결과는 게임마다 갈렸다(스플랜더 성공/도미니언 실패) — §6.1이 명시하는
+"재설계이지 성공 보장이 아니다"가 실측으로 확인된 사례. 도미니언에 대한 억지
+3차 재시도는 하지 않았다.
+
 ## 5. 남은 것
 
 - P6(점수차 임계 캘리브레이션 파생 + near-miss 보강) — 스윕이 만든 최우선 후속.

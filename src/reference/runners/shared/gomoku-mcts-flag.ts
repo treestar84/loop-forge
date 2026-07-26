@@ -161,3 +161,29 @@ export function gomokuMcts2S512CrFlagSpec(adapter: AnyGameAdapter): StrategyFlag
   };
   return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS2_S512_CR_FLAG);
 }
+
+/**
+ * mcts-wave-5 (docs/GAP-ANALYSIS-8.md §4.6 gomoku C-column retry, P7 tactical
+ * precheck): same simulations/uctC/rolloutCount/rolloutFactory as
+ * mcts2-s256-cr — the only difference is `tacticalDepth: 2`, the game-neutral
+ * "immediate win / immediate must-block" safety net (search/mcts.ts's
+ * MctsConfig doc comment). `tacticalBranchCap` left unset (no cap): gomoku's
+ * branching factor is large early-game (~220 legal moves on an empty board),
+ * but the depth-2 opponent-reply check only calls `applyChoice`+`getOutcome`
+ * per candidate (no rollout, no simulation) — cheap enough per candidate that
+ * a throughput measurement (see reference/runners/gomoku.ts's mcts-wave-5
+ * comment) decided a cap was unnecessary.
+ */
+export const GOMOKU_MCTS2_S256_TACTICAL_FLAG = 'mcts2-s256-tactical';
+
+export function gomokuMcts2S256TacticalFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 256,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's256-tactical',
+    rolloutFactory: composeBot(adapter, [...GOMOKU_CHAMPION_ROLLOUT_FLAGS]),
+    tacticalDepth: 2,
+  };
+  return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS2_S256_TACTICAL_FLAG);
+}

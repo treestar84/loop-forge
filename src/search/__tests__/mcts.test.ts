@@ -454,6 +454,197 @@ describe('mctsSearch final-selection tie-break (docs/FIX-BACKLOG.md P5)', () => 
   });
 });
 
+// ---------------------------------------------------------------------------
+// Fixture: docs/GAP-ANALYSIS-8.md §4.6 tactical precheck (game-neutral
+// "immediate win / immediate must-block"). A 5-slot claiming game: players
+// alternately claim one of 5 slots; a player wins the instant they own both
+// slots of either winning pair ([0,1] or [2,3]) — slot 4 belongs to no pair
+// and can never win anything, pure filler. `initialOwners` seeds who (if
+// anyone) already owns which slot before the search root, letting each test
+// construct a specific tactical shape without playing the game out move by
+// move.
+// ---------------------------------------------------------------------------
+
+type PrecheckOwner = PlayerId | null;
+type PrecheckChoice = number; // slot index 0..4
+
+interface PrecheckState {
+  readonly owners: readonly PrecheckOwner[];
+}
+
+const PRECHECK_PAIRS: readonly (readonly [number, number])[] = [
+  [0, 1],
+  [2, 3],
+];
+
+const PRECHECK_SPEC: GameSpec = {
+  gameId: 'mcts-tactical-precheck-fixture',
+  playerCount: 2,
+  decisionPoints: [{ id: 'pick', description: 'claim a slot' }],
+  seatingPlan: [
+    [0, 1],
+    [1, 0],
+  ],
+  perfectInformation: true,
+  maxDecisionsPerGame: 5,
+};
+
+function precheckWinner(owners: readonly PrecheckOwner[]): PlayerId | null {
+  for (const [a, b] of PRECHECK_PAIRS) {
+    const ownerA = owners[a] as PrecheckOwner;
+    if (ownerA !== null && ownerA === owners[b]) return ownerA;
+  }
+  return null;
+}
+
+function precheckTerminal(owners: readonly PrecheckOwner[]): boolean {
+  return precheckWinner(owners) !== null || owners.every((o) => o !== null);
+}
+
+function makePrecheckAdapter(
+  initialOwners: readonly PrecheckOwner[],
+): GameAdapter<PrecheckState, PrecheckState, PrecheckChoice> {
+  const base: GameAdapter<PrecheckState, PrecheckState, PrecheckChoice> = {
+    spec: PRECHECK_SPEC,
+    createInitialState: () => ({ owners: initialOwners }),
+    currentDecision: (state) => {
+      if (precheckTerminal(state.owners)) return null;
+      const claimed = state.owners.filter((o) => o !== null).length;
+      return { player: (claimed % 2) as PlayerId, decisionPoint: 'pick' };
+    },
+    getObservation: (state) => state,
+    getLegalChoices: (state) =>
+      state.owners.flatMap((o, i) => (o === null ? [i] : [])),
+    applyChoice: (state, choice) => {
+      const claimed = state.owners.filter((o) => o !== null).length;
+      const mover = (claimed % 2) as PlayerId;
+      const owners = state.owners.slice();
+      owners[choice] = mover;
+      return { owners };
+    },
+    getOutcome: (state) => {
+      if (!precheckTerminal(state.owners)) return null;
+      const winner = precheckWinner(state.owners);
+      const scores = [0, 0];
+      const winners: PlayerId[] = winner === null ? [] : [winner];
+      if (winner !== null) scores[winner] = 1;
+      return { scores, winners };
+    },
+    encodeChoice: (choice) => String(choice),
+    baselines: {
+      random: (_seed) => ({ id: 'precheck-random', decide: (_dp, _o, legal) => legal[0] as PrecheckChoice }),
+      heuristic: (_seed) => ({ id: 'precheck-heuristic', decide: (_dp, _o, legal) => legal[0] as PrecheckChoice }),
+    },
+    strategySurface: [],
+  };
+  return { ...base, reconstructState: (observation) => observation };
+}
+
+const PRECHECK_BASE_CONFIG = { simulations: 50, uctC: 1.4, rolloutCount: 2, label: 'precheck' };
+
+describe('mctsSearch tacticalDepth (docs/GAP-ANALYSIS-8.md §4.6)', () => {
+  it('tacticalDepth omitted reproduces the exact same decision as an explicit 0 (regression pin)', () => {
+    // slot1 already owned by player 1 (a live trap on pair [0,1]), slot4 by
+    // player 0 (filler) — a position where tacticalDepth would matter if it
+    // were active, so this proves the omitted/0 path truly ignores it.
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 0, null, null, 1]));
+    const rootState = adapter.createInitialState(1);
+
+    const omitted = mctsSearch(adapter, rootState, PRECHECK_BASE_CONFIG, createRng(11));
+    const explicitZero = mctsSearch(adapter, rootState, { ...PRECHECK_BASE_CONFIG, tacticalDepth: 0 }, createRng(11));
+    expect(omitted).toBe(explicitZero);
+  });
+
+  it('depth=1 returns an immediate winning move without running any simulation', () => {
+    // slot0 already owned by player 0; slot1 (its pair partner) is open —
+    // taking it wins on the spot. slot4 owned by player 1 is filler to make
+    // the claimed count even (player 0's turn).
+    const adapter = eraseAdapter(makePrecheckAdapter([0, null, null, null, 1]));
+    const rootState = adapter.createInitialState(1);
+    // simulations: 0 means the ordinary MCTS loop would throw
+    // ("root produced no children after search") since no child is ever
+    // expanded — reaching a real return value here proves the win was
+    // returned before the simulation loop ran at all.
+    const config = { simulations: 0, uctC: 1.4, rolloutCount: 1, label: 'precheck-win', tacticalDepth: 1 as const };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(3));
+    expect(choice).toBe(1);
+  });
+
+  it('without tacticalDepth, simulations=0 throws (contrast for the depth=1 test above)', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([0, null, null, null, 1]));
+    const rootState = adapter.createInitialState(1);
+    const config = { simulations: 0, uctC: 1.4, rolloutCount: 1, label: 'precheck-no-tactic' };
+
+    expect(() => mctsSearch(adapter, rootState, config, createRng(3))).toThrow(/no children/);
+  });
+
+  it('depth=2 excludes every root choice that hands the opponent an immediate win', () => {
+    // slot1 owned by player 1 (a live trap on pair [0,1]: whoever completes
+    // it next wins), slot4 owned by player 0 (filler). Legal = [0,2,3].
+    // Only slot0 defuses the trap (takes the pair's other half); slot2 and
+    // slot3 both leave slot0 open for player 1 to complete the pair next —
+    // provably unsafe regardless of everything else in the position.
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, null, 0]));
+    const rootState = adapter.createInitialState(1);
+    const config = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const };
+
+    for (const seed of [1, 2, 3, 4, 5, 6, 7]) {
+      const choice = mctsSearch(adapter, rootState, config, createRng(seed));
+      expect(choice).toBe(0);
+    }
+  });
+
+  it('is deterministic: same seed and config reproduce the same depth=2 decision', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, null, 0]));
+    const rootState = adapter.createInitialState(1);
+    const config = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const };
+
+    const first = mctsSearch(adapter, rootState, config, createRng(9));
+    const second = mctsSearch(adapter, rootState, config, createRng(9));
+    expect(first).toBe(second);
+  });
+
+  it('falls back to the full legal set when every choice is unsafe (no forced-loss narrowing)', () => {
+    // slot1 owned by player 1 AND slot3 owned by player 1 — both pairs are
+    // one move away from a player-1 win, and player 0 only has one move
+    // (slot4 is the only unclaimed slot besides 0 and 2, both of which are
+    // each individually unsafe) so no matter what player 0 picks, player 1
+    // wins next turn either way. depth=2 must not crash or produce an empty
+    // candidate set — it must fall back to the ordinary (unfiltered) search.
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, 1, null]));
+    const rootState = adapter.createInitialState(1);
+    const config = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const };
+
+    const legal = adapter.getLegalChoices(rootState);
+    const choice = mctsSearch(adapter, rootState, config, createRng(4));
+    expect(legal).toContain(choice);
+  });
+
+  it('tacticalBranchCap large enough to cover every legal choice matches the uncapped depth=2 result', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, null, 0]));
+    const rootState = adapter.createInitialState(1);
+    const uncapped = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const };
+    const capped = { ...uncapped, tacticalBranchCap: 100 };
+
+    const uncappedChoice = mctsSearch(adapter, rootState, uncapped, createRng(2));
+    const cappedChoice = mctsSearch(adapter, rootState, capped, createRng(2));
+    expect(cappedChoice).toBe(uncappedChoice);
+  });
+
+  it('tacticalBranchCap narrower than the legal set still returns a legal, deterministic choice', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, null, 0]));
+    const rootState = adapter.createInitialState(1);
+    const legal = adapter.getLegalChoices(rootState);
+    const config = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const, tacticalBranchCap: 1 };
+
+    const first = mctsSearch(adapter, rootState, config, createRng(6));
+    const second = mctsSearch(adapter, rootState, config, createRng(6));
+    expect(first).toBe(second);
+    expect(legal).toContain(first);
+  });
+});
+
 describe('mctsSearch expansion order (docs/FIX-BACKLOG.md P5)', () => {
   it('is deterministic for a fixed rng seed', () => {
     const adapter = eraseAdapter(makeTieAdapter());

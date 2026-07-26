@@ -79,6 +79,40 @@ export interface MctsConfig {
    * behavior is byte-for-byte unchanged — this field is additive only.
    */
   readonly rolloutFactory?: AnyBotFactory;
+  /**
+   * Game-neutral tactical safety net (docs/GAP-ANALYSIS-8.md §4.6 gomoku
+   * C-column retry — the "immediate win / immediate must-block" priority
+   * that decided the C-column matchup turns out to need no game knowledge at
+   * all: `applyChoice` + `getOutcome` alone can answer "does this move win
+   * right now" and "does this move hand the opponent a win next turn" for
+   * any adapter). Left `undefined` (equivalent to 0, the default), every
+   * existing flag's behavior is byte-for-byte unchanged — `getLegalChoices`
+   * is called exactly once at the root either way, so this field is
+   * additive only.
+   *   - 1: before running any simulation, check every root-legal choice for
+   *     an immediate win (applying it yields a terminal Outcome whose
+   *     winners include the deciding player). If found, that choice is
+   *     returned immediately — no simulation, fully deterministic.
+   *   - 2: when no immediate win exists, check every root-legal choice (or
+   *     the `tacticalBranchCap`-limited sample of them, see below) for
+   *     safety: does it leave the opponent an immediate win on their very
+   *     next decision? Choices that do are dropped. If at least one safe
+   *     choice remains, the root's candidate set is narrowed to just the
+   *     safe ones — a safety net, not a forced pick, so ordinary MCTS still
+   *     chooses among whichever safe choices remain. If every checked
+   *     choice is unsafe (every move loses), the narrowing is skipped and
+   *     the full legal set is used, exactly as if tacticalDepth were 0.
+   */
+  readonly tacticalDepth?: 0 | 1 | 2;
+  /**
+   * Caps how many root-legal choices the depth-2 opponent-reply check
+   * examines (2-ply tactical prechecking is O(legal^2) in the worst case, so
+   * a game with a large branching factor may need this to stay cheap). The
+   * sampled subset is drawn deterministically via `rng` (a forked stream, so
+   * it does not disturb any other rng consumption). Left `undefined`, every
+   * root-legal choice is checked (no cap). Ignored when `tacticalDepth < 2`.
+   */
+  readonly tacticalBranchCap?: number;
 }
 
 interface ChildEdge {
@@ -215,6 +249,68 @@ export function evaluate(
   return totals.map((total) => total / rolloutCount);
 }
 
+/**
+ * Return the first choice in `legal` that wins immediately for `mover` when
+ * applied to `state` (a terminal Outcome whose winners include `mover`), or
+ * null when none does. Game-neutral (MctsConfig.tacticalDepth's doc comment):
+ * relies only on `applyChoice`/`getOutcome`, never on game-specific knowledge.
+ */
+function findImmediateWin(
+  adapter: AnyGameAdapter,
+  state: unknown,
+  legal: readonly unknown[],
+  mover: PlayerId,
+): unknown | null {
+  for (const choice of legal) {
+    const outcome = adapter.getOutcome(adapter.applyChoice(state, choice));
+    if (outcome !== null && outcome.winners.includes(mover)) {
+      return choice;
+    }
+  }
+  return null;
+}
+
+/**
+ * Depth-2 half of the tactical precheck (MctsConfig.tacticalDepth's doc
+ * comment): from `legal` (optionally sampled down to `branchCap` choices via
+ * a forked `rng` stream, so the sampling itself stays deterministic and
+ * independent of the caller's own rng consumption), return the subset that
+ * does NOT hand `mover`'s opponent an immediate win on their very next
+ * decision. A choice that ends the game outright (terminal Outcome, e.g. a
+ * draw) is trivially safe — there is no opponent decision left to check.
+ */
+function tacticalSafeChoices(
+  adapter: AnyGameAdapter,
+  state: unknown,
+  legal: readonly unknown[],
+  branchCap: number | undefined,
+  rng: Rng,
+): readonly unknown[] {
+  const pool =
+    branchCap !== undefined && branchCap < legal.length
+      ? shuffled(legal, rng.fork('mcts-tactical-branch-cap')).slice(0, branchCap)
+      : legal;
+  const safe: unknown[] = [];
+  for (const choice of pool) {
+    const next = adapter.applyChoice(state, choice);
+    const outcome = adapter.getOutcome(next);
+    if (outcome !== null) {
+      safe.push(choice); // game over after this move — no opponent reply to check
+      continue;
+    }
+    const opponentDecision = adapter.currentDecision(next) as { player: PlayerId } | null;
+    if (opponentDecision === null) {
+      safe.push(choice); // defensive: outcome contract says this can't happen, but don't discard a safe-looking choice on a contract violation
+      continue;
+    }
+    const opponentLegal = adapter.getLegalChoices(next);
+    if (findImmediateWin(adapter, next, opponentLegal, opponentDecision.player) === null) {
+      safe.push(choice);
+    }
+  }
+  return safe;
+}
+
 /** UCT selection among `node`'s (already-expanded) children — never called while untried moves remain. */
 function selectChild(node: SearchNode, uctC: number): ChildEdge {
   const logParent = Math.log(node.exploreCount);
@@ -259,13 +355,39 @@ export function mctsSearch(
   if (rootDecision === null) {
     throw new Error('mctsSearch: rootState has no pending decision (already terminal)');
   }
+
+  // Tactical precheck (MctsConfig.tacticalDepth's doc comment): left
+  // undefined/0, `rootLegal` below is exactly `adapter.getLegalChoices(rootState)`
+  // and no rng is consumed here, so this reproduces the pre-existing
+  // behavior byte-for-byte.
+  let rootLegal = adapter.getLegalChoices(rootState);
+  const tacticalDepth = config.tacticalDepth ?? 0;
+  if (tacticalDepth >= 1) {
+    const immediateWin = findImmediateWin(adapter, rootState, rootLegal, rootDecision.player);
+    if (immediateWin !== null) {
+      return immediateWin;
+    }
+  }
+  if (tacticalDepth >= 2) {
+    const safe = tacticalSafeChoices(
+      adapter,
+      rootState,
+      rootLegal,
+      config.tacticalBranchCap,
+      rng,
+    );
+    if (safe.length > 0) {
+      rootLegal = safe;
+    }
+  }
+
   // Untried children are shuffled with the injected rng (not left in
   // getLegalChoices order) before any expansion happens — same rng seed
   // still yields the same shuffle, so this stays fully deterministic, but it
   // removes the positional bias that a FIFO `.shift()` over an
   // adapter-ordered legal-choices array would otherwise impose (P5; observed
   // in gomoku as expansion sticking to the board's first few scanned rows).
-  const root = new SearchNode(null, shuffled(adapter.getLegalChoices(rootState), rng));
+  const root = new SearchNode(null, shuffled(rootLegal, rng));
 
   for (let sim = 0; sim < config.simulations; sim += 1) {
     let state = rootState;

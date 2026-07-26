@@ -1,5 +1,5 @@
 import { miniTrickAdapter } from '../../reference/mini-trick';
-import { calibrateIdentity, measureNoiseFloor } from '../calibrate';
+import { calibrateIdentity, measureAverageLegalChoiceCount, measureNoiseFloor } from '../calibrate';
 import { eraseAdapter } from '../erase';
 import { firstMoverWinsAdapter } from './helpers/first-mover-wins-game';
 import { longAccumulateAdapter } from './helpers/long-accumulate-game';
@@ -122,5 +122,39 @@ describe('measureNoiseFloor', () => {
     });
     expect(first.scoreDiffStdDev).toBeGreaterThanOrEqual(0);
     expect(second.scoreDiffStdDev).toBe(first.scoreDiffStdDev);
+  });
+
+  // G2 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-9.md §2): averageLegalChoiceCount
+  // is the branching-factor signal kernel/search-blueprint.ts's
+  // deriveSearchBlueprint consumes for its tacticalPrecheckDepth recommendation.
+  it('reports averageLegalChoiceCount matching the fixture game every decision it makes (2 legal choices/decision)', () => {
+    const seeds = Array.from({ length: 10 }, (_, i) => 30_000 + i);
+    const result = measureNoiseFloor(collapseAdapter, collapseAdapter.baselines.random, seeds, 400, {
+      iterations: 200,
+      confidenceLevel: 0.95,
+      seed: 999,
+    });
+    expect(result.averageLegalChoiceCount).toBe(2);
+  });
+});
+
+describe('measureAverageLegalChoiceCount', () => {
+  it('returns the exact known average for a fixture with a fixed legal-choice count (firstMoverWins: 2)', () => {
+    const seeds = Array.from({ length: 20 }, (_, i) => 1_000 + i);
+    const result = measureAverageLegalChoiceCount(collapseAdapter, collapseAdapter.baselines.random, seeds, 500);
+    expect(result).toBe(2);
+  });
+
+  it('returns the exact known average for a fixture with a fixed legal-choice count (longAccumulate: 10)', () => {
+    const seeds = Array.from({ length: 5 }, (_, i) => 2_000 + i);
+    const result = measureAverageLegalChoiceCount(longAdapter, longAdapter.baselines.random, seeds, 500);
+    expect(result).toBe(10);
+  });
+
+  it('is deterministic for the same seeds', () => {
+    const seeds = [1, 2, 3, 4, 5];
+    const first = measureAverageLegalChoiceCount(adapter, adapter.baselines.heuristic, seeds, 700);
+    const second = measureAverageLegalChoiceCount(adapter, adapter.baselines.heuristic, seeds, 700);
+    expect(second).toBe(first);
   });
 });

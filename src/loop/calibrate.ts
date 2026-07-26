@@ -125,6 +125,78 @@ export function calibrateIdentity(
   return { meanWinRate, seatWinRates, bias, signalCollapseRate };
 }
 
+/**
+ * Lightweight self-play pass (docs/FIX-BACKLOG.md G2, docs/GAP-ANALYSIS-9.md
+ * §2): walks one game per seed, tallying `getLegalChoices(state).length` at
+ * every decision, and returns the mean — the branching-factor signal
+ * `kernel/search-blueprint.ts`'s `deriveSearchBlueprint` uses to decide
+ * whether a depth-2 tactical precheck (O(legal^2) per decision) stays cheap
+ * enough to recommend.
+ *
+ * Implemented as a separate, independent walk rather than folded into
+ * `runMatch`/`runPairedBlock` (which `measureNoiseFloor` below already
+ * drives): both of those are shared by every other loop/artifacts consumer,
+ * and widening their return shape to carry a legal-choice tally would be a
+ * much larger surface to keep in sync than one small extra self-play pass
+ * here. The cost is exactly what it looks like — one additional full
+ * self-play walk per seed, on top of whatever else the caller already runs
+ * over the same seeds.
+ */
+export function measureAverageLegalChoiceCount(
+  adapter: AnyGameAdapter,
+  botFactory: AnyBotFactory,
+  seeds: readonly number[],
+  botSeedBase: number,
+): number {
+  const seating = adapter.spec.seatingPlan[0];
+  if (seating === undefined) {
+    throw new Error('measureAverageLegalChoiceCount: spec.seatingPlan is empty');
+  }
+  const seatToBotIndex = new Map<number, number>();
+  seating.forEach((seat, botIndex) => seatToBotIndex.set(seat, botIndex));
+
+  const rootRng = createRng(botSeedBase);
+  let totalChoices = 0;
+  let totalDecisions = 0;
+
+  for (const seed of seeds) {
+    const seedRng = rootRng.fork(String(seed));
+    const bots = seating.map(() => botFactory(seedRng.nextInt(BOT_SEED_SPACE)));
+
+    let state = adapter.createInitialState(seed);
+    let decisions = 0;
+    for (;;) {
+      const decision = adapter.currentDecision(state);
+      if (decision === null) {
+        break;
+      }
+      decisions += 1;
+      if (decisions > adapter.spec.maxDecisionsPerGame) {
+        throw new Error(
+          `measureAverageLegalChoiceCount: exceeded maxDecisionsPerGame (${adapter.spec.maxDecisionsPerGame}) at seed ${seed}`,
+        );
+      }
+      const legal = adapter.getLegalChoices(state);
+      totalChoices += legal.length;
+      totalDecisions += 1;
+
+      const botIndex = seatToBotIndex.get(decision.player);
+      if (botIndex === undefined) {
+        throw new Error(`measureAverageLegalChoiceCount: seating does not cover player ${decision.player}`);
+      }
+      const bot = bots[botIndex];
+      if (!bot) {
+        throw new Error(`measureAverageLegalChoiceCount: no bot at index ${botIndex}`);
+      }
+      const observation = adapter.getObservation(state, decision.player);
+      const choice = bot.decide(decision.decisionPoint, observation, legal);
+      state = adapter.applyChoice(state, choice);
+    }
+  }
+
+  return totalDecisions > 0 ? totalChoices / totalDecisions : 0;
+}
+
 export interface NoiseFloorResult extends BootstrapResult {
   /**
    * Sample standard deviation (n-1) of candidateWinFraction across the paired
@@ -152,6 +224,13 @@ export interface NoiseFloorResult extends BootstrapResult {
    * `recommendedMinScoreDiff` for how this value is turned into a threshold.
    */
   readonly scoreDiffStdDev: number;
+  /**
+   * Mean `getLegalChoices(state).length` across the same self-play seeds
+   * (docs/FIX-BACKLOG.md G2), via `measureAverageLegalChoiceCount` above —
+   * the branching-factor input `kernel/search-blueprint.ts`'s
+   * `deriveSearchBlueprint` uses for its `tacticalPrecheckDepth` recommendation.
+   */
+  readonly averageLegalChoiceCount: number;
 }
 
 function sampleStdDev(values: readonly number[]): number {
@@ -194,5 +273,6 @@ export function measureNoiseFloor(
   const bootstrap = bootstrapPairedSeedBlocks(outcomes, options);
   const blockStdDev = sampleStdDev(outcomes.map((outcome) => outcome.candidateWinFraction));
   const scoreDiffStdDev = sampleStdDev(outcomes.map((outcome) => outcome.candidateScoreDelta));
-  return { ...bootstrap, blockStdDev, scoreDiffStdDev };
+  const averageLegalChoiceCount = measureAverageLegalChoiceCount(adapter, botFactory, seeds, botSeedBase);
+  return { ...bootstrap, blockStdDev, scoreDiffStdDev, averageLegalChoiceCount };
 }

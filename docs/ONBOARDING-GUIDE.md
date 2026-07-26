@@ -272,3 +272,55 @@ Loop Forge v1이 다루는 것: **턴제 · 경쟁(2인 이상) · 게임 간 �
   범게임 상수는 INTERPRETATION 제1규칙 위반이다. 항등 노이즈가 0으로 붕괴하는
   게임(스플랜더·윙스팬 실측)은 임계 0 + 경고가 정상이며, 노이즈 차단은 승률
   게이트·CI·regression 티어가 계속 담당한다.
+
+## 10. 탐색 후보 자동 추천 (5차 갭 분석 — G1~G5 반영, 2026-07-26)
+
+§8의 `classifyGame`/`deriveBlueprint`가 채점 임계·표본 크기를 게임 특성에서
+자동으로 파생하듯, **탐색/학습 후보(MCTS·IS-MCTS·MCCFR)의 알고리즘 계열·시뮬레이션
+예산·롤아웃 등급·전술 프리체크 깊이도 이제 매 게임마다 손으로 재판단할 필요가
+없다.** 지금까지(오목·장기·스플랜더·도미니언·하스스톤·윙스팬·mini-trick 7게임)는
+에이전트가 3판 남짓 실측 후 손으로 시뮬레이션 수·롤아웃 정책을 골랐지만
+(`shared/{gomoku,janggi}-mcts-flag.ts`, `shared/{splendor,dominion,hearthstone,
+wingspan}-ismcts-flag.ts`의 반복된 보일러플레이트가 그 증거), 이 라운드부터는
+아래 절차가 표준이다.
+
+1. **캘리브레이션에 합법수 신호 추가**: `loop/calibrate.ts`의
+   `measureNoiseFloor(...)`가 반환하는 `NoiseFloorResult.averageLegalChoiceCount`
+   (기존 자기대국 seeds 위에서 별도 경량 순회로 집계, 성능 비용 있음 — 필요 없으면
+   `measureAverageLegalChoiceCount(adapter, botFactory, seeds, botSeedBase)`를
+   직접 호출해 아껴도 된다)로 게임의 평균 분기 계수를 확보한다.
+2. **탐색 청사진 파생**: `src/kernel/search-blueprint.ts`의
+   `deriveSearchBlueprint(classification, capabilities, throughputSamples,
+   waveTimeBudgetMs, { averageLegalChoiceCount })`을 호출한다.
+   - `classification`은 §8의 `classifyGame(spec)` 그대로.
+   - `capabilities`는 어댑터가 `reconstructState`/`sampleStateFromObservation`/
+     `informationStateKey`를 선언했는지, `spec.utility`가 무엇으로 선언됐는지,
+     `spec.playerCount`만 담는 평면 데이터(어댑터 인스턴스 자체를 kernel에 넘기지
+     않는다 — 계층 규칙).
+   - `throughputSamples`는 웨이브 시작 전 소규모 실측(예: simulations 64/128/256
+     각각 몇 판 돌려 ms/게임 측정)으로 앱 경계(러너)가 직접 채운다 — 이 함수는
+     실측을 대신해주지 않는다, 예산을 실측값에서 골라줄 뿐이다.
+   - 반환값은 계열(`tree-search`/`information-set-tree-search`/
+     `counterfactual-regret`/`none`)별 순수 데이터 추천 목록이며, `reconstructState`도
+     `sampleStateFromObservation`도 없는 게임은 빈 배열(향후 결정화 훅을 구현하면
+     자동으로 채워지는 확장 지점) — `counterfactual-regret`은 2인·zero-sum·
+     `informationStateKey` 선언 시 트리서치/IS-MCTS 추천과 **병행**으로 추가된다
+     (mini-trick처럼 결정화 훅이 전혀 없어도 CFR만 단독 추천될 수 있다).
+3. **플래그화**: `reference/runners/shared/search-candidate.ts`의
+   `searchCandidateFlagSpec(adapter, recommendation)`으로 추천 하나를 실제
+   `StrategyFlagSpec`으로 번역한다 — 내부적으로 `reconstructState` 유무를 보고
+   `mctsBotFactory`/`ismctsBotFactory`를 자동 선택한다. `counterfactual-regret`
+   추천은 이 헬퍼 범위 밖(학습이 선행돼야 하므로 `learn/mccfr.ts`로 별도 훈련한
+   `PolicyTable`을 손으로 배선) — 실수로 넘기면 즉시 에러를 던진다.
+4. **웨이브 투입**: `withStrategyFlags(adapter, [spec])`로 확장한 어댑터를 웨이브에
+   넘기는 것은 기존 절차와 동일.
+
+**주의 — 기존 7게임의 채택된 플래그는 그대로 둔다**: 이미 손으로 검증되어
+registry에 채택된 `mcts2-s256-hr`/`ismcts-s128-hr` 등은 이 함수의 재출력으로
+교체하지 않는다(GAP-ANALYSIS-9 §3). 이 절차는 **다음에 온보딩할 새 게임**이 같은
+시행착오("어떤 알고리즘? 시뮬레이션 몇 개? 롤아웃은 random인가 heuristic인가?")를
+반복하지 않게 하는 것이 목적이며, 검증은 실전 웨이브 재실행이 아니라 7게임의
+실제 분류·능력·실측치를 데이터로 넣어 방향(계열·롤아웃 등급)이 그때 사람이 고른
+결과와 일치하는지 확인하는 회귀 픽스처(`kernel/__tests__/search-blueprint.test.ts`)로
+했다 — 비용 없이 설계를 검증했을 뿐, 실측 시뮬레이션 수까지 재현을 보장하지는
+않는다.

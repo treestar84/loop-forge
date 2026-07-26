@@ -13,6 +13,24 @@ registry 버전 표현 일반화(`kind: flags\|policy-table\|search-config`)는
 GAP-ANALYSIS-7 §2 이연 목록. 도미니언 챔피언 롤아웃 재도전(3차 이상)은 억지
 반복 금지 원칙에 따라 미착수로 남겨둠(§6.1 프로토콜은 성공 보장이 아님).
 
+## 완료 — 확장성 라운드 (2026-07-26, `docs/GAP-ANALYSIS-9.md`, 사용자 지시 최우선)
+
+> 목적: 온보딩 채점/게이트(C0~C7·티어 블록수·점수차 임계)는 이미 classification+
+> calibration → 파생형이었으나, 탐색/학습 후보 생성(알고리즘·예산·롤아웃 선택)은
+> 매 게임마다 에이전트가 손으로 판단해 6개 중복 파일에 하드코딩돼 있었다. "다음에
+> 올 낯선 게임"이 같은 시행착오를 반복하지 않도록 이를 파생 함수로 승격했다.
+
+| ID | 처치 내용 | 증거 |
+|---|---|---|
+| G1 | `kernel/search-blueprint.ts` — `deriveSearchBlueprint(classification, capabilities, throughputSamples, waveTimeBudgetMs, options?)`. 순수 데이터 추천(family·simulations·rolloutTier·tacticalPrecheckDepth·flagLabel·rationale), search/learn 미참조 | 단위테스트로 family·예산·CFR 병행·tacticalDepth 분기 전부 검증 |
+| G2 | `loop/calibrate.ts`에 `measureAverageLegalChoiceCount` 신설(별도 경량 자기대국 순회 — runMatch/runPairedBlock 시그니처 불변, 다른 소비자 무영향), `NoiseFloorResult.averageLegalChoiceCount`에 배선 | 소형 픽스처로 평균 합법수 계산 검증 |
+| G3 | `reference/runners/shared/search-candidate.ts` — `searchCandidateFlagSpec(adapter, recommendation)`. family별 mctsBotFactory/ismctsBotFactory 자동 분기, CFR/none은 명확한 에러. 기존 6개 게임별 shared 파일은 무손상 유지(신규 게임부터 이 헬퍼 사용) | 스모크 테스트(유효 StrategyFlagSpec·composeBot 합성·1판 정상 종료) |
+| G4 | 회귀 픽스처 — 7게임(오목·장기·스플랜더·도미니언·하스스톤·윙스팬·mini-trick) 실제 classification+capabilities+실측 throughput으로 방향성 검증 | **7/7 전부 일치**(family·rolloutTier가 실제 채택된 알고리즘 계열과 방향 동일) — 비용 0(웨이브 재실행 없음) |
+| G5 | `docs/ONBOARDING-GUIDE.md` §10 신설 — "탐색 후보 자동 추천" 4단계 표준 절차(캘리브레이션→deriveSearchBlueprint→searchCandidateFlagSpec→withStrategyFlags) | 기존 §8/§9 스타일 준수, 기존 7게임 flag 미교체 원칙 재확인 |
+
+기존 7게임의 이미 채택된 flag는 이 라운드로 교체되지 않았다(설계 의도, GAP-9 §3).
+tsc 0에러, **40 suites / 511 tests 전부 통과**(직전 38/474 대비 순증).
+
 ## 완료 — P7 오목 C열 역전 (전 카드 소진, 2026-07-26, `docs/GAP-ANALYSIS-8.md` §4.8)
 
 | 처치 내용 | 증거 |

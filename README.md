@@ -8,11 +8,11 @@
 
 | | |
 |---|---|
-| 🎮 지원 게임 | **7종** — 보드게임·전략카드·덱빌더 등 서로 다른 장르 |
+| 🎮 지원 게임 | **9종** — 보드게임·전략카드·덱빌더·숨은진영·대인원FFA 등 서로 다른 장르 |
 | 📈 가장 극적인 반전 | 윙스팬에서 상대 AI 승률 **76.9% → 24.3%** (10판 중 8판 지던 게임 → 10판 중 8판 이기는 게임) |
 | 🔁 검증 규모 | 게임당 최대 **2,000판**을 실제로 대국시켜 통계로 확인 |
 | 🧬 계보 | DeepMind **OpenSpiel** 계열 탐색·학습 알고리즘(MCTS·IS-MCTS·MCCFR) 이식 |
-| 🧪 품질 보증 | 자동 테스트 **511개** 전부 통과, 타입 오류 **0건** |
+| 🧪 품질 보증 | 자동 테스트 **560개** 전부 통과, 타입 오류 **0건** |
 | 🙅 억지 성공 없음 | 오히려 나빠진 시도·아직 못 이긴 상대는 숨기지 않고 그대로 기록 |
 
 ## 왜 "그냥 AI에게 맡기는 것"과 다른가
@@ -58,7 +58,7 @@ src/onboarding/  ② 적합성 게이트 (C0~C7 채점 배터리 + 수정 지침
 src/artifacts/   산출물 계층 (게임별 실행 기록run-store · 기준선/채택 이력의 재로드
                     가능한 영속화game-state · 게임당 통합 요약game-summary · 벤치마크
                     앵커 사다리benchmark)
-src/reference/   레퍼런스+실전 게임 어댑터 7종(아래 표) + 게임별 실행 진입점
+src/reference/   레퍼런스+실전 게임 어댑터 9종(아래 표) + 게임별 실행 진입점
                     (reference/runners/<gameId>.ts)
 ```
 
@@ -68,17 +68,26 @@ src/reference/   레퍼런스+실전 게임 어댑터 7종(아래 표) + 게임�
 
 ## 온보딩된 게임
 
-| 게임 | 원본 소스 | conformance | 웨이브 채택 |
-|---|---|---|---|
-| mini-trick (레퍼런스) | 자체 설계 | C0~C6 100 | `npm run demo`로 실행 |
-| 스플랜더 | [caeleel/splendor](https://github.com/caeleel/splendor) | C0~C6 100 | 1/3 채택 |
-| 오목 | [imjacobclark/BoardGameEngine](https://github.com/imjacobclark/BoardGameEngine) | C0~C6 100 | 3/3 채택 |
-| 장기 | [davisethan/janggi](https://github.com/davisethan/janggi) | C0~C6 100 | 0/3 채택 |
-| 도미니언 | [rspeer/dominiate](https://github.com/rspeer/dominiate) | C0~C6 100 | 1/3 채택 |
-| 윙스팬(core) | [keithgw/wingspan](https://github.com/keithgw/wingspan) | C0~C6 100 | 0/3 채택 |
-| 하스스톤(mirror) | [danielyule/hearthbreaker](https://github.com/danielyule/hearthbreaker) | C0~C6 100 | 0/3 채택 |
+| 게임 | 장르 | 원본 소스 | conformance | 웨이브 채택 |
+|---|---|---|---|---|
+| mini-trick (레퍼런스) | 트릭테이킹 | 자체 설계 | C0~C6 100 | `npm run demo`로 실행 |
+| 스플랜더 | 엔진빌딩 | [caeleel/splendor](https://github.com/caeleel/splendor) | C0~C6 100 | 1/3 채택 |
+| 오목 | 완전정보 추상전략 | [imjacobclark/BoardGameEngine](https://github.com/imjacobclark/BoardGameEngine) | C0~C6 100 | 3/3 채택 |
+| 장기 | 완전정보 추상전략 | [davisethan/janggi](https://github.com/davisethan/janggi) | C0~C6 100 | 0/3 채택 |
+| 도미니언 | 덱빌더 | [rspeer/dominiate](https://github.com/rspeer/dominiate) | C0~C6 100 | 1/3 채택 |
+| 윙스팬(core) | 엔진빌딩 | [keithgw/wingspan](https://github.com/keithgw/wingspan) | C0~C6 100 | 0/3 채택 |
+| 하스스톤(mirror) | CCG 대전 | [danielyule/hearthbreaker](https://github.com/danielyule/hearthbreaker) | C0~C6 100 | 0/3 채택 |
+| **아발론** | **숨은 진영·사회적 추리** | [AlexLomm/avalon-engine](https://github.com/AlexLomm/avalon-engine) | C0~C6 100 | 0/3 채택 |
+| **카탄(core)** | **대인원 FFA·킹메이킹** | [rpjohnst/catan](https://github.com/rpjohnst/catan) | C0~C6 100 | 0/3 채택 |
 
-원본 저장소 상세·라이선스는 [docs/CREDITS.md](./docs/CREDITS.md). 7개 게임 전부
+마지막 2종(아발론·카탄)은 기존 6개와 다른 장르를 의도적으로 골라 시스템의
+일반화 능력을 검증한 것이다 — 아발론은 "진영이 숨겨진 게임"이 온보딩 채점
+시스템 자신의 기본 가정과 충돌하던 실제 모순을 찾아 고친 뒤(`hiddenTeamStructure`
+옵트인) 온보딩했고, 카탄은 "여러 명 중 일부만 다르게 구성해 대결시키는" 능력
+(`fieldMix`)이 실제로 동작하는지 검증했다. 자세한 내용은
+[docs/GAP-ANALYSIS-10.md](./docs/GAP-ANALYSIS-10.md).
+
+원본 저장소 상세·라이선스는 [docs/CREDITS.md](./docs/CREDITS.md). 9개 게임 전부
 **C0~C6(게임 로직·통계적 신뢰성)은 만점**이지만, **C7(원본과의 정합성)은 아직
 증명되지 않았다** — 지금은 어댑터 self-play로 만든 재현성 fixture만 있고 원본
 게임에서 뽑은 진짜 리플레이가 없어 60점으로 캡되어 있다(`ReplayFixture.provenance`,

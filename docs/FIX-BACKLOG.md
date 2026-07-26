@@ -7,8 +7,18 @@
 
 ## 미착수
 
-_(없음 — P6까지 전부 완료, 2026-07-25. 다음 라운드 후보는 GAP-ANALYSIS-8 §5 참고:
-벤치마크 일괄 재실행, 소스 클로저 digest, 오목 C열 역전, registry 버전 표현 일반화.)_
+| ID | 항목 | 출처 |
+|---|---|---|
+| P7 | 오목 C열(vs Opus봇) 역전 — 예산 상향·챔피언 롤아웃 둘 다 시도했으나 원인 분리 결과 "접근 자체의 한계"(N=1,300 실측으로 확정, GAP-ANALYSIS-8 §4.6). 다음 카드: 오프닝북/전술 확장(즉승·즉방어 최우선 순서를 트리 탐색 앞단에 명시적으로 배선) | GAP-ANALYSIS-8 §4.6 |
+
+registry 버전 표현 일반화(`kind: flags\|policy-table\|search-config`)는
+GAP-ANALYSIS-7 §2 이연 목록, near-miss 큰루프 1회전(스플랜더·도미니언)은 진행 중.
+
+## 완료 — 오목 C열 역전 시도 (2026-07-25~26, `docs/GAP-ANALYSIS-8.md` §4.6)
+
+| 처치 내용 | 증거 |
+|---|---|
+| `MctsConfig.rolloutFactory?` 추가(임의 BotFactory 주입, 기존 경로 불변) + 챔피언 롤아웃 후보 2종 → mcts-wave-4에서 둘 다 adopted(regression vs v4 95.0%/96.3%) → **registry v5** | 진단 head-to-head로 예산 상향은 무가치·롤아웃 개선은 내부 기준선엔 유효·Opus엔 무효임을 사전 분리, 벤치마크 v5(N=1,300) A/B/C 전부 100%로 역전 불발 확정 |
 
 ## 완료 — P6 (2026-07-24~25, `docs/GAP-ANALYSIS-8.md` §4.5)
 

@@ -19,6 +19,7 @@
  */
 
 import type { AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
+import { composeBot } from '../../../loop/compose';
 import { mctsBotFactory, type MctsConfig } from '../../../search/mcts';
 
 /**
@@ -107,4 +108,56 @@ export function gomokuMctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<un
 /** Build the mcts-s64-hr StrategyFlagSpec for `adapter` (docs/FIX-BACKLOG.md P1). */
 export function gomokuMctsHrFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
   return gomokuMctsFlagSpecFor(adapter, GOMOKU_MCTS_HR_CONFIG, GOMOKU_MCTS_HR_FLAG);
+}
+
+/**
+ * mcts-wave-4 (docs/GAP-ANALYSIS-8.md gomoku C-column retry): "champion
+ * rollout" — instead of `adapter.baselines.heuristic` driving rollouts (the
+ * 'heuristic' rolloutPolicy), a composeBot-assembled composite of gomoku's
+ * own strategySurface flags (blockImmediateThreat + centerProximity +
+ * extendLongestLine, the same 3 flags composing the current v2+ baseline)
+ * drives them via `search/mcts.ts`'s `rolloutFactory` option (game-neutral —
+ * the search layer never sees these flag names, it only calls the resulting
+ * bot factory through the same GameBot interface every other bot uses).
+ * `adapter` here must be the plain game adapter (its own strategySurface,
+ * not yet extended with any MCTS flags) so composeBot can resolve the 3
+ * champion flags — the same `adapter` gomoku.ts already threads into every
+ * `gomokuMctsFlagSpecFor` call above.
+ */
+export const GOMOKU_CHAMPION_ROLLOUT_FLAGS = ['blockImmediateThreat', 'centerProximity', 'extendLongestLine'] as const;
+
+export const GOMOKU_MCTS2_S256_CR_FLAG = 'mcts2-s256-cr';
+export const GOMOKU_MCTS2_S512_CR_FLAG = 'mcts2-s512-cr';
+
+/**
+ * Build the mcts2-s256-cr StrategyFlagSpec: simulations=256 (matching
+ * mcts2-s256/mcts2-s256-hr's budget for a clean rollout-policy-only
+ * comparison), rolloutFactory = the champion composite bot.
+ */
+export function gomokuMcts2S256CrFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 256,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's256-cr',
+    rolloutFactory: composeBot(adapter, [...GOMOKU_CHAMPION_ROLLOUT_FLAGS]),
+  };
+  return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS2_S256_CR_FLAG);
+}
+
+/**
+ * Build the mcts2-s512-cr StrategyFlagSpec: simulations=512 (budget doubled
+ * on top of the champion rollout, testing whether budget adds anything once
+ * rollout quality is already strong), rolloutFactory = the champion
+ * composite bot.
+ */
+export function gomokuMcts2S512CrFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 512,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's512-cr',
+    rolloutFactory: composeBot(adapter, [...GOMOKU_CHAMPION_ROLLOUT_FLAGS]),
+  };
+  return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS2_S512_CR_FLAG);
 }

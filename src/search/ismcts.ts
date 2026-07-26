@@ -177,7 +177,7 @@ export function ismctsSearch(
       node = selected.node;
     }
 
-    const rewards = evaluate(adapter, state, config.rolloutCount, rng, config.rolloutPolicy ?? 'random');
+    const rewards = evaluate(adapter, state, config.rolloutCount, rng, config);
     for (const edge of path) {
       edge.totalReward += rewards[edge.mover] as number;
     }

@@ -40,7 +40,7 @@
  *     there is nothing here that plays the OpenSpiel chance-node role.
  */
 
-import type { AnyBotFactory, AnyGameAdapter, Outcome, PlayerId, Rng } from '../contract/types';
+import type { AnyBotFactory, AnyGameAdapter, GameBot, Outcome, PlayerId, Rng } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
 
 export interface MctsConfig {
@@ -62,6 +62,23 @@ export interface MctsConfig {
    * `decide` through the same GameBot interface every other bot uses.
    */
   readonly rolloutPolicy?: 'random' | 'heuristic';
+  /**
+   * Rollout-policy override that takes precedence over `rolloutPolicy`
+   * (docs/GAP-ANALYSIS-8.md gomoku C-column retry): when supplied, every
+   * rollout decision is driven by a bot instantiated from this factory
+   * instead of `adapter.baselines.heuristic` (the 'heuristic' policy above)
+   * or a uniform-random draw (the 'random' policy). The evaluator-swap
+   * pattern is the same one `rolloutPolicy: 'heuristic'` already documents —
+   * this just widens the pool of eligible rollout policies to any
+   * `AnyBotFactory`, e.g. a composeBot-assembled composite of several
+   * strategySurface flags, so a stronger hand-authored bot can drive
+   * rollouts instead of the adapter's single raw-heuristic baseline. Seeded
+   * the same way the 'heuristic' path already is (`deriveHeuristicRolloutSeed`
+   * forked off the search's injected `rng`), so supplying it stays fully
+   * deterministic. Left `undefined` (the default), every existing flag's
+   * behavior is byte-for-byte unchanged — this field is additive only.
+   */
+  readonly rolloutFactory?: AnyBotFactory;
 }
 
 interface ChildEdge {
@@ -107,23 +124,48 @@ function deriveHeuristicRolloutSeed(rng: Rng, rolloutIndex: number): number {
 }
 
 /**
- * One rollout from `state` to a terminal state. `policy` 'random' draws
- * uniformly from legal choices via `rng` (mcts.py's RandomRolloutEvaluator).
- * `policy` 'heuristic' instead lets a single `adapter.baselines.heuristic`
- * bot instance (seeded via `deriveHeuristicRolloutSeed`) decide every step —
- * the OpenSpiel evaluator-replacement pattern referenced on MctsConfig.
+ * Resolve the rollout policy for one `evaluate()` call into either a bot
+ * instance to drive every rollout decision, or `null` for uniform-random
+ * draws. `config.rolloutFactory`, when present, takes precedence over
+ * `config.rolloutPolicy` (see MctsConfig's doc comment) — otherwise this
+ * mirrors the pre-existing 'heuristic'/'random' branching exactly, so
+ * omitting both new-and-old override fields reproduces the original
+ * behavior byte-for-byte.
+ */
+function resolveRolloutBot(
+  adapter: AnyGameAdapter,
+  config: MctsConfig,
+  rng: Rng,
+  rolloutIndex: number,
+): GameBot<unknown, unknown> | null {
+  if (config.rolloutFactory !== undefined) {
+    return config.rolloutFactory(deriveHeuristicRolloutSeed(rng, rolloutIndex));
+  }
+  if (config.rolloutPolicy === 'heuristic') {
+    return adapter.baselines.heuristic(deriveHeuristicRolloutSeed(rng, rolloutIndex));
+  }
+  return null;
+}
+
+/**
+ * One rollout from `state` to a terminal state. With no rollout bot resolved
+ * (`config.rolloutFactory` unset and `config.rolloutPolicy` not 'heuristic'),
+ * draws uniformly from legal choices via `rng` (mcts.py's
+ * RandomRolloutEvaluator). Otherwise the resolved bot instance decides every
+ * step — the OpenSpiel evaluator-replacement pattern referenced on
+ * MctsConfig, now open to either the adapter's own heuristic baseline or any
+ * caller-supplied `rolloutFactory`.
  */
 function rolloutOnce(
   adapter: AnyGameAdapter,
   state: unknown,
   rng: Rng,
-  policy: 'random' | 'heuristic',
+  config: MctsConfig,
   rolloutIndex: number,
 ): Outcome {
   let current = state;
   let decisions = 0;
-  const heuristicBot =
-    policy === 'heuristic' ? adapter.baselines.heuristic(deriveHeuristicRolloutSeed(rng, rolloutIndex)) : null;
+  const rolloutBot = resolveRolloutBot(adapter, config, rng, rolloutIndex);
   while (adapter.currentDecision(current) !== null) {
     if (decisions >= adapter.spec.maxDecisionsPerGame) {
       throw new Error(
@@ -133,8 +175,8 @@ function rolloutOnce(
     const decision = adapter.currentDecision(current) as { player: PlayerId; decisionPoint: string };
     const legal = adapter.getLegalChoices(current);
     const choice =
-      heuristicBot !== null
-        ? heuristicBot.decide(decision.decisionPoint, adapter.getObservation(current, decision.player), legal)
+      rolloutBot !== null
+        ? rolloutBot.decide(decision.decisionPoint, adapter.getObservation(current, decision.player), legal)
         : legal[rng.nextInt(legal.length)];
     current = adapter.applyChoice(current, choice);
     decisions += 1;
@@ -147,23 +189,25 @@ function rolloutOnce(
 }
 
 /**
- * RandomRolloutEvaluator (mcts.py), or its heuristic-evaluator swap: average
- * per-player reward across `rolloutCount` independent rollouts. Exported
- * (docs/FIX-BACKLOG.md P4) so `src/search/ismcts.ts` can reuse the exact same
- * rollout evaluator instead of re-implementing it — this is purely an added
- * export, the function body and every existing call site are unchanged.
+ * RandomRolloutEvaluator (mcts.py), or its heuristic-/rolloutFactory-evaluator
+ * swap: average per-player reward across `rolloutCount` independent
+ * rollouts. Exported (docs/FIX-BACKLOG.md P4) so `src/search/ismcts.ts` can
+ * reuse the exact same rollout evaluator instead of re-implementing it.
+ * Takes the whole `config` (rather than a bare policy string) so
+ * `rolloutFactory` reaches `rolloutOnce` — existing call sites that only ever
+ * set `rolloutPolicy` (or neither) are unaffected.
  */
 export function evaluate(
   adapter: AnyGameAdapter,
   state: unknown,
   rolloutCount: number,
   rng: Rng,
-  policy: 'random' | 'heuristic',
+  config: MctsConfig,
 ): readonly number[] {
   const playerCount = adapter.spec.playerCount;
   const totals = new Array<number>(playerCount).fill(0);
   for (let i = 0; i < rolloutCount; i += 1) {
-    const outcome = rolloutOnce(adapter, state, rng, policy, i);
+    const outcome = rolloutOnce(adapter, state, rng, config, i);
     for (let player = 0; player < playerCount; player += 1) {
       totals[player] = (totals[player] as number) + rewardOf(outcome, player);
     }
@@ -260,7 +304,7 @@ export function mctsSearch(
       path.push(node);
     }
 
-    const rewards = evaluate(adapter, state, config.rolloutCount, rng, config.rolloutPolicy ?? 'random');
+    const rewards = evaluate(adapter, state, config.rolloutCount, rng, config);
     for (const visited of path) {
       visited.exploreCount += 1;
       if (visited.mover !== null) {

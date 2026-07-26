@@ -46,7 +46,11 @@ import {
   GOMOKU_MCTS2_S256_FLAG,
   GOMOKU_MCTS2_S256_HR_CONFIG,
   GOMOKU_MCTS2_S256_HR_FLAG,
+  GOMOKU_MCTS2_S256_CR_FLAG,
+  GOMOKU_MCTS2_S512_CR_FLAG,
   gomokuMctsFlagSpecFor,
+  gomokuMcts2S256CrFlagSpec,
+  gomokuMcts2S512CrFlagSpec,
 } from './shared/gomoku-mcts-flag';
 import { computeSourceDigest } from '../../artifacts/source-digest';
 
@@ -388,7 +392,20 @@ function main(): void {
     GOMOKU_MCTS2_S256_HR_CONFIG,
     GOMOKU_MCTS2_S256_HR_FLAG,
   );
-  const allMctsFlagSpecs = [mctsFlagSpec, mctsHrFlagSpecEarly, mcts2S256FlagSpecEarly, mcts2S256HrFlagSpecEarly];
+  // mcts-wave-4 (docs/GAP-ANALYSIS-8.md gomoku C-column retry): "champion
+  // rollout" candidates — rolloutFactory driven by the composeBot-assembled
+  // 3-flag champion bot instead of the raw heuristic (see
+  // gomoku-mcts-flag.ts's doc comment on GOMOKU_CHAMPION_ROLLOUT_FLAGS).
+  const mcts2S256CrFlagSpecEarly = gomokuMcts2S256CrFlagSpec(adapter);
+  const mcts2S512CrFlagSpecEarly = gomokuMcts2S512CrFlagSpec(adapter);
+  const allMctsFlagSpecs = [
+    mctsFlagSpec,
+    mctsHrFlagSpecEarly,
+    mcts2S256FlagSpecEarly,
+    mcts2S256HrFlagSpecEarly,
+    mcts2S256CrFlagSpecEarly,
+    mcts2S512CrFlagSpecEarly,
+  ];
   const mctsAdapter = withStrategyFlags(adapter, allMctsFlagSpecs);
 
   const mctsLatest = registry.latest();
@@ -991,6 +1008,221 @@ function main(): void {
     latestWaveCriteria: mctsWave3Config.criteria,
   });
   writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), finalSummaryMarkdown3);
+  console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
+
+  /**
+   * 20) mcts-wave-4 (docs/GAP-ANALYSIS-8.md gomoku C-column retry) —
+   * "champion rollout" candidates `mcts2-s256-cr`/`mcts2-s512-cr`
+   * (gomoku-mcts-flag.ts's GOMOKU_CHAMPION_ROLLOUT_FLAGS doc comment):
+   * rollouts driven by the composeBot-assembled 3-flag champion bot
+   * (blockImmediateThreat + centerProximity + extendLongestLine) instead of
+   * the raw heuristic that mcts2-s256-hr's rollouts use. A prior diagnostic
+   * head-to-head (not part of this wave's own ledger) found both CR
+   * candidates beat the internal baseline composite (registry latest, which
+   * already carries mcts2-s256-hr from mcts-wave-3) 100% — this wave is the
+   * formal smoke/prune/holdout/regression run that turns that diagnostic
+   * result into an adoption decision. The regression tier's opponent is
+   * composed from `mctsWave4Latest.flags`, i.e. registry v4
+   * (blockImmediateThreat + centerProximity + extendLongestLine + mcts-s64 +
+   * mcts2-s256-hr) — since every MCTS flag's apply() ignores `base` and
+   * composeBot resolves flags in order, the composed opponent bot resolves
+   * to the last MCTS flag in that list (mcts2-s256-hr), i.e. exactly the
+   * "v4 synthetic bot" gate described for this wave.
+   *
+   * Throughput (diagnostic head-to-head, single process): mcts2-s256-cr and
+   * mcts2-s512-cr both ran 88-189ms/game against the internal baseline —
+   * far cheaper than mcts-wave-3's regression matchups (~1.3-1.9s/game)
+   * because champion rollouts are shallow heuristic-composite playouts
+   * rather than another full MCTS search on either side. Tier sizes below
+   * therefore match mcts-wave-2/3's block counts (smoke<=30, prune=15,
+   * holdout=15, regression=40) with comfortable headroom under the
+   * 30-minute wave budget for both candidates combined.
+   *
+   * New seed banks (gomoku-mcts4-*, ranges 70000-73039) do not overlap any
+   * range used by gomoku-runner-*, gomoku-mcts-*, gomoku-mcts2-*, or
+   * gomoku-mcts3-* above.
+   */
+  console.log('20) MCTS 후보 웨이브 4 (mcts-wave-4, champion-rollout 후보)');
+  // Reuse the shared specs (see allMctsFlagSpecs's doc comment above).
+  const mctsWave4Adapter = withStrategyFlags(adapter, allMctsFlagSpecs);
+
+  const mctsWave4Latest = registry.latest();
+  if (mctsWave4Latest === undefined) {
+    throw new Error('gomoku runner: registry has no latest baseline before mcts-wave-4');
+  }
+
+  const mctsWave4Ledger = new SeedLedger();
+  const mctsWave4ReservedAt = now();
+  const mctsWave4SmokeMax = 30;
+  const mctsWave4PruneBlocks = 15;
+  const mctsWave4HoldoutBlocks = 15;
+  const mctsWave4RegressionBlocks = 40;
+  mctsWave4Ledger.reserve({
+    bankId: 'gomoku-mcts4-smoke',
+    range: { start: 70000, end: 70000 + mctsWave4SmokeMax - 1 },
+    purpose: 'smoke',
+    reservedAt: mctsWave4ReservedAt,
+  });
+  mctsWave4Ledger.reserve({
+    bankId: 'gomoku-mcts4-prune',
+    range: { start: 71000, end: 71000 + mctsWave4PruneBlocks - 1 },
+    purpose: 'prune',
+    reservedAt: mctsWave4ReservedAt,
+  });
+  mctsWave4Ledger.reserve({
+    bankId: 'gomoku-mcts4-holdout',
+    range: { start: 72000, end: 72000 + mctsWave4HoldoutBlocks - 1 },
+    purpose: 'holdout',
+    reservedAt: mctsWave4ReservedAt,
+  });
+  mctsWave4Ledger.reserve({
+    bankId: 'gomoku-mcts4-regression',
+    range: { start: 73000, end: 73000 + mctsWave4RegressionBlocks - 1 },
+    purpose: 'regression',
+    reservedAt: mctsWave4ReservedAt,
+  });
+
+  const mctsWave4Config = assembleWaveConfig(mctsWave4Adapter, {
+    waveId: 'mcts-wave-4',
+    candidates: [{ flag: GOMOKU_MCTS2_S256_CR_FLAG }, { flag: GOMOKU_MCTS2_S512_CR_FLAG }],
+    opponent: 'heuristic',
+    ledger: mctsWave4Ledger,
+    recordedAt: now(),
+    baselineFlags: mctsWave4Latest.flags,
+    baselineVersion: mctsWave4Latest.version,
+    tiers: {
+      smoke: {
+        bankId: 'gomoku-mcts4-smoke',
+        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+        maxBlocks: mctsWave4SmokeMax,
+        minBlocks: 5,
+      },
+      prune: { bankId: 'gomoku-mcts4-prune', blocks: mctsWave4PruneBlocks },
+      holdout: { bankId: 'gomoku-mcts4-holdout', blocks: mctsWave4HoldoutBlocks },
+      regression: { bankId: 'gomoku-mcts4-regression', blocks: mctsWave4RegressionBlocks },
+    },
+    screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
+  });
+
+  const mctsWave4Report = runWave(mctsWave4Adapter, mctsWave4Config);
+  for (const result of mctsWave4Report.results) {
+    console.log(
+      `   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`,
+    );
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        console.log(`     ${tier}: winRate=${stats.pointWinRate.toFixed(3)} blocks=${stats.blocks}`);
+      }
+    }
+    if (result.warnings.length > 0) {
+      for (const warning of result.warnings) {
+        console.log(`     ⚠ ${warning}`);
+      }
+    }
+  }
+
+  saveRunIfAbsent(runStore, {
+    gameId: GAME_ID,
+    runId: mctsWave4Report.waveId,
+    kind: 'wave',
+    recordedAt: now(),
+    comparabilityKey: mctsWave4Report.comparabilityKey,
+    payload: mctsWave4Report,
+    markdown: `# Wave Report — ${mctsWave4Report.waveId}\n\n${mctsWave4Report.results
+      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
+      .join('\n')}\n`,
+  });
+
+  console.log('21) mcts-wave-4 adoption ledger 기록');
+  const mctsWave4Entries: AdoptionEntry[] = mctsWave4Report.results.map((result) => {
+    const tierStats: AdoptionEntry['tierStats'] = {};
+    for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
+      const stats = result.stats[tier];
+      if (stats) {
+        tierStats[tier] = {
+          pointWinRate: stats.pointWinRate,
+          pointScoreDiff: stats.pointScoreDiff,
+          blocks: stats.blocks,
+          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
+          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
+        };
+      }
+    }
+    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
+    return {
+      flags: result.flags,
+      verdict: isNoOp ? 'screened-out' : result.verdict,
+      tierStats,
+      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
+    };
+  });
+  const mctsWave4AdoptionRecord = ledger.add({
+    waveId: mctsWave4Report.waveId,
+    recordedAt: now(),
+    comparabilityKey: mctsWave4Report.comparabilityKey,
+    baselineVersion: mctsWave4Latest.version,
+    opponentId: mctsWave4Config.opponent,
+    entries: mctsWave4Entries,
+    nextLoopNotes: [],
+  });
+
+  console.log('21.5) mcts-wave-4 near-miss 후보 추출');
+  const mctsWave4NearMiss = extractNearMissCandidates(mctsWave4AdoptionRecord, mctsWave4Config.criteria);
+  if (mctsWave4NearMiss.length === 0) {
+    console.log('   근접실패 후보 없음.');
+  } else {
+    for (const candidate of mctsWave4NearMiss) {
+      console.log(
+        `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
+      );
+    }
+  }
+  writeFileSync(
+    join(rootDir, 'runs', GAME_ID, 'mcts-wave-4-near-miss.json'),
+    JSON.stringify(mctsWave4NearMiss, null, 2),
+  );
+  console.log(`   저장: runs/${GAME_ID}/mcts-wave-4-near-miss.json`);
+
+  console.log('21.6) mcts-wave-4 채택 플래그 registry 승격');
+  const mctsWave4AdoptedFlags = mctsWave4Report.results
+    .filter((r) => r.verdict === 'adopted')
+    .flatMap((r) => r.flags);
+  if (mctsWave4AdoptedFlags.length === 0) {
+    console.log('   이번 mcts-wave-4에서 채택된 전략 없음 — 승격 대상 없음');
+  } else {
+    const currentLatest = registry.latest();
+    if (currentLatest === undefined) {
+      throw new Error('gomoku runner: registry has no latest baseline before mcts-wave-4 promotion step');
+    }
+    const lineage = registry.lineage(currentLatest.version);
+    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === mctsWave4Report.waveId);
+    if (alreadyPromoted) {
+      console.log('   이 mcts-wave-4는 이미 승격됨 — 스킵');
+    } else {
+      const nextVersion = registry.register({
+        version: `v${lineage.length + 1}`,
+        flags: [...currentLatest.flags, ...mctsWave4AdoptedFlags],
+        parent: currentLatest.version,
+        createdAt: now(),
+        sourceWaveId: mctsWave4Report.waveId,
+        notes: `mcts-wave-4에서 채택된 플래그 승격: ${mctsWave4AdoptedFlags.join(', ')}`,
+        sourceDigest,
+      });
+      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
+    }
+  }
+
+  console.log('22) persist registry/ledger (mcts-wave-4 반영)');
+  saveRegistry(rootDir, GAME_ID, registry);
+  saveLedger(rootDir, GAME_ID, ledger);
+  console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
+
+  console.log('23) game-summary 재렌더 (mcts-wave-4 반영)');
+  const finalSummaryMarkdown4 = renderGameSummaryMarkdown(rootDir, GAME_ID, {
+    latestWaveCriteria: mctsWave4Config.criteria,
+  });
+  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), finalSummaryMarkdown4);
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 }
 

@@ -5,7 +5,7 @@
  * game-specific rules.
  */
 
-import type { GameAdapter, GameSpec, PlayerId } from '../../contract/types';
+import type { AnyBotFactory, GameAdapter, GameSpec, PlayerId } from '../../contract/types';
 import { createRng } from '../../kernel/rng';
 import { eraseAdapter } from '../../loop/erase';
 import { mctsBotFactory, mctsSearch } from '../mcts';
@@ -256,6 +256,101 @@ describe('mctsSearch rolloutPolicy', () => {
     expect(randomChoice).toBe('r1');
     expect(heuristicChoice).toBe('r2');
     expect(randomChoice).not.toBe(heuristicChoice);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixture: docs/GAP-ANALYSIS-8.md gomoku C-column retry — `rolloutFactory`,
+// a rollout-policy override that lets a caller-supplied bot factory (not
+// just `adapter.baselines.heuristic`) drive every rollout decision. Reuses
+// the corridor fixture above so the same "budget too small to fully expand"
+// setup exercises whether a rolloutFactory bot can steer the root decision
+// the same way `rolloutPolicy: 'heuristic'` already does.
+// ---------------------------------------------------------------------------
+
+describe('mctsSearch rolloutFactory', () => {
+  it('leaves existing decisions unchanged when rolloutFactory is not supplied', () => {
+    // Same config/seed as the rolloutPolicy 'random' test above, just
+    // re-asserted here as a direct regression pin: an MctsConfig with
+    // rolloutFactory omitted must reproduce the pre-existing decision
+    // exactly (P1's random-rollout path), since resolveRolloutBot only
+    // consults rolloutFactory when it is explicitly set.
+    const adapter = eraseAdapter(makeCorridorAdapter((legal) => legal[legal.length - 1] as CorridorChoice));
+    const rootState = adapter.createInitialState(CORRIDOR_SEED);
+
+    const withoutFactory = mctsSearch(adapter, rootState, CORRIDOR_CONFIG_BASE, createRng(CORRIDOR_SEED));
+    const explicitRandomPolicy = mctsSearch(
+      adapter,
+      rootState,
+      { ...CORRIDOR_CONFIG_BASE, rolloutPolicy: 'random' },
+      createRng(CORRIDOR_SEED),
+    );
+    expect(withoutFactory).toBe(explicitRandomPolicy);
+    expect(withoutFactory).toBe('r1'); // pinned in the rolloutPolicy suite above
+  });
+
+  it('is deterministic and returns a legal choice when rolloutFactory is supplied', () => {
+    const adapter = eraseAdapter(makeCorridorAdapter((legal) => legal[legal.length - 1] as CorridorChoice));
+    const rootState = adapter.createInitialState(CORRIDOR_SEED);
+    const legalRootChoices = adapter.getLegalChoices(rootState);
+
+    // A rollout factory independent of adapter.baselines.heuristic — always
+    // takes the lowest-digit option (the opposite policy from the
+    // heuristic-rollout fixture's highest-digit pick), so this is provably
+    // driving rollouts via the factory rather than falling back to the
+    // adapter's own heuristic baseline.
+    const lowestDigitFactory: AnyBotFactory = (_seed) => ({
+      id: 'corridor-lowest-digit',
+      decide: (_dp, _observation, legal) => legal[0] as CorridorChoice,
+    });
+
+    const choiceA = mctsSearch(
+      adapter,
+      rootState,
+      { ...CORRIDOR_CONFIG_BASE, rolloutFactory: lowestDigitFactory },
+      createRng(CORRIDOR_SEED),
+    );
+    const choiceB = mctsSearch(
+      adapter,
+      rootState,
+      { ...CORRIDOR_CONFIG_BASE, rolloutFactory: lowestDigitFactory },
+      createRng(CORRIDOR_SEED),
+    );
+
+    expect(choiceA).toEqual(choiceB);
+    expect(legalRootChoices).toContain(choiceA);
+  });
+
+  it('takes precedence over rolloutPolicy when both are supplied', () => {
+    const adapter = eraseAdapter(makeCorridorAdapter((legal) => legal[legal.length - 1] as CorridorChoice));
+    const rootState = adapter.createInitialState(CORRIDOR_SEED);
+
+    // Two calls that differ only in whether rolloutPolicy: 'heuristic' is
+    // also present alongside rolloutFactory — if rolloutFactory truly takes
+    // precedence (rolloutPolicy ignored once rolloutFactory is set), both
+    // must resolve to the exact same rollout bot and so the exact same
+    // decision. If rolloutPolicy still had any effect, adding
+    // rolloutPolicy: 'heuristic' on top could change which bot drives
+    // rollouts and so change the result.
+    const lowestDigitFactory: AnyBotFactory = (_seed) => ({
+      id: 'corridor-lowest-digit',
+      decide: (_dp, _observation, legal) => legal[0] as CorridorChoice,
+    });
+
+    const factoryOnlyChoice = mctsSearch(
+      adapter,
+      rootState,
+      { ...CORRIDOR_CONFIG_BASE, rolloutFactory: lowestDigitFactory },
+      createRng(CORRIDOR_SEED),
+    );
+    const factoryPlusHeuristicPolicyChoice = mctsSearch(
+      adapter,
+      rootState,
+      { ...CORRIDOR_CONFIG_BASE, rolloutPolicy: 'heuristic', rolloutFactory: lowestDigitFactory },
+      createRng(CORRIDOR_SEED),
+    );
+
+    expect(factoryPlusHeuristicPolicyChoice).toBe(factoryOnlyChoice);
   });
 });
 

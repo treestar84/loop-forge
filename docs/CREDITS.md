@@ -17,6 +17,7 @@
 | 윙스팬(core) | [keithgw/wingspan](https://github.com/keithgw/wingspan) | Python | **주의**: 이 저장소는 실제 윙스팬 보드게임 룰이 아니라 RL 학습용으로 극단 단순화된 자원게임(서식지·트리거·알·목표카드 없음)이다. "소스가 최종 근거" 원칙대로 이 단순화된 버전을 그대로 온보딩했다 — `src/reference/wingspan.ts`의 어댑터는 실제 시판 윙스팬의 재현이 **아니다**. | `src/reference/wingspan.ts` |
 | 하스스톤(mirror) | [danielyule/hearthbreaker](https://github.com/danielyule/hearthbreaker) | Python | 중립 카드 12장, 미러 매치 전용(직업 카드·인터럽트 범위 밖) | `src/reference/hearthstone.ts` |
 | 아발론(The Resistance: Avalon, 5인 기본 역할) | [AlexLomm/avalon-engine](https://github.com/AlexLomm/avalon-engine) | JS/TS(MIT) | **구조 참고만** — headless 엔진의 페이즈 구성(제안→투표→미션 순환)만 참고, 코드는 복사하지 않고 공개 표준 룰에서 처음부터 재구현. **스코프 축소**: 5인 기본 역할(멀린·충직한 종자 2·모드레드의 하수인·암살자)만 구현, 퍼시발·모르가나·모드레드(역할)·오베론 등 확장 역할은 범위 밖. 발언/주장(claim)도 구조화 결정 지점으로 이산화하지 않고 이번 패스에서 생략(ONBOARDING-GUIDE.md §"F4" 참고). | `src/reference/avalon.ts` |
+| 카탄(Settlers of Catan, 4인 기본 룰) | [rpjohnst/catan](https://github.com/rpjohnst/catan) | 라이선스 미명시 — 저장소에서 직접 확인할 것 | **구조 참고만** — headless 엔진이 보드/턴 데이터를 다루는 일반적 모양만 참고, 코드는 복사하지 않고 공개적으로 표준화된 Settlers of Catan 기본 룰에서 처음부터 재구현. 보드 위상(19타일/54정점/72변)은 축좌표 삼각함수로 매 로드마다 직접 계산(고정 그래프, 자원·숫자 배치만 시드 셔플). **스코프 축소**: 플레이어 간 협상/자유 오퍼 전면 제외(은행과의 4:1 거래만 결정 지점화, ONBOARDING-GUIDE.md §7 "협상·거래 게임" 표준 패턴), 항구(포트) 규칙 제외(모든 거래 4:1), 개발 카드·최장도로·최대군세 보너스 제외(승점은 정착촌+도시만), 승리 점수 8점으로 하향(공식 10점 대신 — 개발카드·보너스 부재로 10점 도달까지 비현실적으로 오래 걸림). | `src/reference/catan.ts` |
 
 ## 알고리즘 충실 이식 (코드 수준 파생)
 

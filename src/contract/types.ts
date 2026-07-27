@@ -84,6 +84,23 @@ export interface GameSpec {
    * rate as its own reference point, while still running the seat-bias check.
    */
   readonly hiddenTeamStructure?: boolean;
+  /**
+   * Declare true for cooperative games where every player is on a single team
+   * playing against the game itself (Pandemic-like games; rule-driven
+   * difficulty, not an opposing player/faction; docs/GAP-ANALYSIS-10.md M2).
+   * `teams` must stay unset in this case too — the same reasoning as
+   * `hiddenTeamStructure` applies: `teams` is reserved for fixed, public
+   * partitions of *multiple* teams, and "everyone is one team" is not that.
+   * The "random self-play win rate ≈ 1/playerCount (or 1/teamCount)" fairness
+   * premise behind the C5 identity check does not hold here either — with a
+   * single team, identityCenter would compute to 1/1 = 1.0, but a
+   * rule-difficulty-driven cooperative game commonly has a random-policy team
+   * win rate designed to be low (e.g. 20%) by construction, unrelated to any
+   * 1/N expectation. When true, scoreC5 skips the C5_IDENTITY_NOT_FAIR
+   * comparison the same way it does for hiddenTeamStructure, while still
+   * running the seat-bias check.
+   */
+  readonly cooperativeStructure?: boolean;
 }
 
 export interface PendingDecision {

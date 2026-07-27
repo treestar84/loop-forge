@@ -703,20 +703,28 @@ function scoreC5(adapter: AnyGameAdapter, options: Required<ScoreOptions>): Axis
   // hidden, so spec.teams cannot be declared) break this formula entirely —
   // the true expectation is driven by faction-size ratios the harness has no
   // way to know statically, not by 1/playerCount (docs/GAP-ANALYSIS-10.md M1).
-  // For those games identityCenter is instead pinned to the just-measured
+  // cooperativeStructure games (Pandemic-like: everyone is one team playing
+  // against the game itself) break it too, but differently — with a single
+  // team the formula would compute 1/1 = 1.0, yet a random-policy team's win
+  // rate against rule-driven difficulty is commonly designed to be low by
+  // construction, unrelated to any 1/N expectation (docs/GAP-ANALYSIS-10.md
+  // M2). For both, identityCenter is instead pinned to the just-measured
   // meanWinRate itself, which makes the fairness comparison below trivially
   // pass by construction (there is nothing else to compare it against without
-  // faction-size ground truth) while leaving the seat-bias check below —
-  // C5's actual defense against a repeat of the seat-bias incident
-  // (DESIGN.md §1) — fully active and unaffected.
-  const identityCenter = adapter.spec.hiddenTeamStructure
+  // faction-size or difficulty-curve ground truth) while leaving the
+  // seat-bias check below — C5's actual defense against a repeat of the
+  // seat-bias incident (DESIGN.md §1) — fully active and unaffected.
+  const identityFairnessExempt = adapter.spec.hiddenTeamStructure || adapter.spec.cooperativeStructure;
+  const identityCenter = identityFairnessExempt
     ? identity.meanWinRate
     : adapter.spec.teams
       ? 1 / adapter.spec.teams.length
       : 1 / adapter.spec.playerCount;
   const identityCenterLabel = adapter.spec.hiddenTeamStructure
     ? 'measured meanWinRate (hiddenTeamStructure — no static 1/N expectation)'
-    : `1/${adapter.spec.teams ? 'teamCount' : 'playerCount'}`;
+    : adapter.spec.cooperativeStructure
+      ? 'measured meanWinRate (cooperativeStructure — no static 1/N expectation)'
+      : `1/${adapter.spec.teams ? 'teamCount' : 'playerCount'}`;
 
   notes.push(
     `identity calibration: meanWinRate=${identity.meanWinRate.toFixed(3)} ` +

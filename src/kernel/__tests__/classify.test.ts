@@ -101,4 +101,17 @@ describe('classifyGame', () => {
     const classification = classifyGame(hiddenTeamSpec);
     expect(classification.hiddenTeamStructure).toBe(true);
   });
+
+  // M2 (docs/GAP-ANALYSIS-10.md): classification.cooperativeStructure mirrors
+  // spec.cooperativeStructure verbatim, defaulting to false when unset.
+  it('defaults cooperativeStructure to false when spec.cooperativeStructure is omitted', () => {
+    const classification = classifyGame(miniTrickAdapter.spec);
+    expect(classification.cooperativeStructure).toBe(false);
+  });
+
+  it('classifies cooperativeStructure as true when spec declares it', () => {
+    const coopSpec = { ...miniTrickAdapter.spec, cooperativeStructure: true as const };
+    const classification = classifyGame(coopSpec);
+    expect(classification.cooperativeStructure).toBe(true);
+  });
 });

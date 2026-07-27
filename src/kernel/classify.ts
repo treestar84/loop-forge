@@ -31,6 +31,8 @@ export interface GameClassification {
   readonly utilityDeclared: boolean;
   /** Mirrors spec.hiddenTeamStructure (docs/GAP-ANALYSIS-10.md M1); false when unset. */
   readonly hiddenTeamStructure: boolean;
+  /** Mirrors spec.cooperativeStructure (docs/GAP-ANALYSIS-10.md M2); false when unset. */
+  readonly cooperativeStructure: boolean;
 }
 
 /** Content inventory length at or above which contentWeight is 'heavy'. */
@@ -78,5 +80,6 @@ export function classifyGame(
     utilityStructure: spec.utility === 'zero-sum' ? 'zero-sum' : 'general',
     utilityDeclared: spec.utility !== undefined,
     hiddenTeamStructure: spec.hiddenTeamStructure === true,
+    cooperativeStructure: spec.cooperativeStructure === true,
   };
 }

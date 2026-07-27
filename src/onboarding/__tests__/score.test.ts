@@ -508,3 +508,129 @@ describe('scoreAdapter — M1 hiddenTeamStructure (Avalon-like hidden factions)'
     ).toBe(true);
   }, 20_000);
 });
+
+// ---------------------------------------------------------------------------
+// M2 (docs/GAP-ANALYSIS-10.md): spec.cooperativeStructure lets scoreC5 stop
+// comparing measured self-play win rate against 1/playerCount (which has no
+// relationship to a rule-driven difficulty curve in a Pandemic-like game,
+// where every player is on one team playing against the game itself) while
+// keeping the seat-bias check active.
+// ---------------------------------------------------------------------------
+
+describe('scoreAdapter — M2 cooperativeStructure (Pandemic-like single-team-vs-game)', () => {
+  // 4-player fixture where the single team (all 4 players) wins together with
+  // a low, rule-driven probability (20%), never a coin flip. Outcome.winners
+  // is either every player (win) or empty (loss) — no bot decisions occur;
+  // the outcome is fixed at createInitialState, matching the "difficulty
+  // curve decides, not player choice" character of the identity axis here.
+  // calibrateIdentity has no notion of "everyone shares one fate" (it just
+  // checks winners.includes(candidatePlayer)), so a win credits every seat
+  // 0.5 (winners.length > 1) and a loss credits 0 — with a 20% win rate that
+  // converges the identity mean win rate to exactly 0.1, nowhere near the
+  // 1/playerCount fallback (0.25) — the self-contradiction M2 fixes, and
+  // structurally identical to why 1/1 = 1.0 would be equally wrong had
+  // `teams` been (incorrectly) declared as a single all-players team.
+  interface CoopState {
+    readonly won: boolean;
+  }
+  const COOP_SEATING_PLAN = [
+    [0, 1, 2, 3],
+    [1, 2, 3, 0],
+    [2, 3, 0, 1],
+    [3, 0, 1, 2],
+  ] as const;
+  const ALL_PLAYERS = [0, 1, 2, 3] as const;
+
+  function coopBaselines() {
+    return {
+      random: () => ({
+        id: 'm2-random',
+        decide: (_dp: string, _obs: unknown, legal: readonly never[]) => legal[0],
+      }),
+      heuristic: () => ({
+        id: 'm2-heuristic',
+        decide: (_dp: string, _obs: unknown, legal: readonly never[]) => legal[0],
+      }),
+    };
+  }
+
+  function makeCoopAdapter(
+    gameId: string,
+    wonOf: (seed: number) => boolean,
+    cooperativeStructure?: true,
+  ) {
+    return eraseAdapter({
+      spec: {
+        gameId,
+        playerCount: 4,
+        decisionPoints: [{ id: 'noop', description: 'unused; outcome is fixed at creation' }],
+        seatingPlan: COOP_SEATING_PLAN,
+        maxDecisionsPerGame: 1,
+        ...(cooperativeStructure === undefined ? {} : { cooperativeStructure }),
+      },
+      createInitialState: (seed: number): CoopState => ({ won: wonOf(seed) }),
+      currentDecision: (_state: CoopState) => null,
+      getObservation: (_state: CoopState, _player: number) => ({}),
+      getLegalChoices: (_state: CoopState) => [] as const,
+      applyChoice: (state: CoopState, _choice: never): CoopState => state,
+      getOutcome: (state: CoopState) => ({
+        scores: [0, 1, 2, 3].map((_p) => (state.won ? 1 : 0)),
+        winners: state.won ? ALL_PLAYERS : [],
+      }),
+      encodeChoice: (choice: never) => String(choice),
+      baselines: coopBaselines(),
+      strategySurface: [],
+    });
+  }
+
+  it('blocks C5_IDENTITY_NOT_FAIR when cooperativeStructure is not declared (regression pin)', () => {
+    const adapter = makeCoopAdapter('m2-fair-undeclared', (seed) => seed % 5 === 0);
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 30, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(true);
+  }, 20_000);
+
+  it('does not block C5_IDENTITY_NOT_FAIR when cooperativeStructure is true, despite a low measured win rate', () => {
+    const adapter = makeCoopAdapter('m2-fair-declared', (seed) => seed % 5 === 0, true);
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 30, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(false);
+    expect(c5?.notes.some((note) => note.includes('cooperativeStructure'))).toBe(true);
+  }, 20_000);
+
+  it('still raises the seat-bias note under cooperativeStructure when a scoring bug ties win-credit to fixed player ids', () => {
+    // Not a realistic coop outcome (a real coop game's winners are always
+    // all-or-nothing) — deliberately mirrors M1's fixed-subset trick just to
+    // prove C5's seat-bias defense (DESIGN.md §1) is a separate code path
+    // from the identity-fairness exemption and stays active regardless.
+    const BUGGY_WINNERS = [0, 1, 2] as const;
+    const adapter = eraseAdapter({
+      spec: {
+        gameId: 'm2-biased-declared',
+        playerCount: 4,
+        decisionPoints: [{ id: 'noop', description: 'unused; outcome is fixed at creation' }],
+        seatingPlan: COOP_SEATING_PLAN,
+        maxDecisionsPerGame: 1,
+        cooperativeStructure: true as const,
+      },
+      createInitialState: (_seed: number) => ({}),
+      currentDecision: (_state: object) => null,
+      getObservation: (_state: object, _player: number) => ({}),
+      getLegalChoices: (_state: object) => [] as const,
+      applyChoice: (state: object, _choice: never): object => state,
+      getOutcome: (_state: object) => ({
+        scores: [0, 1, 2, 3].map((p) => (BUGGY_WINNERS.includes(p as 0 | 1 | 2) ? 1 : 0)),
+        winners: BUGGY_WINNERS,
+      }),
+      encodeChoice: (choice: never) => String(choice),
+      baselines: coopBaselines(),
+      strategySurface: [],
+    });
+    const report = scoreAdapter(adapter, { threshold: 0, c5IdentitySeeds: 20, c5HeadToHeadSeeds: 3 });
+    const c5 = report.axes.find((a) => a.axis === 'C5-baselines');
+    expect(c5?.blockers.some((b) => b.code === 'C5_IDENTITY_NOT_FAIR')).toBe(false);
+    expect(
+      c5?.notes.some((note) => note.includes('seat bias') && note.includes('exceeds 0.3')),
+    ).toBe(true);
+  }, 20_000);
+});

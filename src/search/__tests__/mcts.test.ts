@@ -645,6 +645,98 @@ describe('mctsSearch tacticalDepth (docs/GAP-ANALYSIS-8.md §4.6)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Fixture: rootOverride (docs/GAP-ANALYSIS-8.md gomoku C-column retry —
+// "shallow MCTS dilutes a deterministic tactical signal"). Reuses the
+// tactical-precheck fixture above so the same slot-claiming geometry can
+// double as an override-injection target.
+// ---------------------------------------------------------------------------
+
+describe('mctsSearch rootOverride', () => {
+  it('a config with rootOverride omitted reproduces the exact same pinned decision as before this field existed (regression)', () => {
+    // Same fixture/seed/config as the tacticalDepth depth=2 test above, whose
+    // pinned expectation (choice 0) predates rootOverride's existence — this
+    // re-pins it after adding the new (unused-here) field to MctsConfig,
+    // proving the field is truly additive.
+    const adapter = eraseAdapter(makePrecheckAdapter([null, 1, null, null, 0]));
+    const rootState = adapter.createInitialState(1);
+    const config = { ...PRECHECK_BASE_CONFIG, tacticalDepth: 2 as const };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(1));
+    expect(choice).toBe(0);
+  });
+
+  it('a non-null rootOverride short-circuits the search entirely — works even with simulations=0', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, null, null, null, null]));
+    const rootState = adapter.createInitialState(1);
+    // simulations: 0 means the ordinary MCTS loop would throw ("root produced
+    // no children after search") since no child is ever expanded — reaching
+    // a real return value here proves rootOverride's choice was returned
+    // before the simulation loop ran at all (no simulation ever happens).
+    const config = {
+      simulations: 0,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'root-override-shortcircuit',
+      rootOverride: () => 2,
+    };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(3));
+    expect(choice).toBe(2);
+  });
+
+  it('a null-returning rootOverride falls through to ordinary MCTS, unaffected', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, null, null, null, null]));
+    const rootState = adapter.createInitialState(1);
+
+    const withNullOverride = mctsSearch(
+      adapter,
+      rootState,
+      { ...PRECHECK_BASE_CONFIG, rootOverride: () => null },
+      createRng(11),
+    );
+    const withoutOverride = mctsSearch(adapter, rootState, PRECHECK_BASE_CONFIG, createRng(11));
+    expect(withNullOverride).toBe(withoutOverride);
+  });
+
+  it("tacticalDepth's immediate-win check takes priority over rootOverride when both would fire", () => {
+    // slot0 already owned by player 0; slot1 (its pair partner) is open —
+    // taking it wins on the spot (same geometry as the tacticalDepth depth=1
+    // test above). rootOverride deliberately returns a *different* legal
+    // choice (slot2) to prove the immediate win wins the race, not the override.
+    const adapter = eraseAdapter(makePrecheckAdapter([0, null, null, null, 1]));
+    const rootState = adapter.createInitialState(1);
+    const config = {
+      simulations: 0,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'precheck-win-vs-override',
+      tacticalDepth: 1 as const,
+      rootOverride: () => 2,
+    };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(3));
+    expect(choice).toBe(1);
+  });
+
+  it('is deterministic: same seed and config reproduce the same rootOverride-driven decision', () => {
+    const adapter = eraseAdapter(makePrecheckAdapter([null, null, null, null, null]));
+    const rootState = adapter.createInitialState(1);
+    const config = {
+      simulations: 0,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'root-override-deterministic',
+      rootOverride: () => 3,
+    };
+
+    const first = mctsSearch(adapter, rootState, config, createRng(9));
+    const second = mctsSearch(adapter, rootState, config, createRng(9));
+    expect(first).toBe(second);
+    expect(first).toBe(3);
+  });
+});
+
 describe('mctsSearch expansion order (docs/FIX-BACKLOG.md P5)', () => {
   it('is deterministic for a fixed rng seed', () => {
     const adapter = eraseAdapter(makeTieAdapter());

@@ -113,6 +113,44 @@ export interface MctsConfig {
    * root-legal choice is checked (no cap). Ignored when `tacticalDepth < 2`.
    */
   readonly tacticalBranchCap?: number;
+  /**
+   * Game-neutral root-decision override hook (docs/GAP-ANALYSIS-8.md gomoku
+   * C-column retry — the "shallow MCTS dilutes a deterministic tactical
+   * signal" fix). Called once per `mctsSearch` invocation with the root
+   * state/legal-choices/mover; when it returns a non-null choice, that choice
+   * is returned immediately and no simulation is run at all (deterministic,
+   * exactly like `tacticalDepth`'s depth=1 immediate-win short-circuit).
+   * Returning `null` falls through to ordinary search, unaffected.
+   *
+   * The hook itself is game-neutral infrastructure — `search/mcts.ts` never
+   * inspects what the function does internally, it only calls it through this
+   * signature — but the function a caller supplies is free to be full of game
+   * knowledge (e.g. gomoku's fork-detection geometry). That split is the
+   * point: this field lets a game-specific priority judgment bypass the
+   * search's statistical averaging (the actual bug this targets — 256
+   * shallow simulations diluting a deterministic "this move is a fork"
+   * verdict into noise), while keeping that judgment's logic out of this
+   * file, in the adapter layer where game knowledge belongs.
+   *
+   * Precedence (see `mctsSearch`'s body for exactly where this is called):
+   *   1. `tacticalDepth >= 1`'s immediate-win check always wins first when it
+   *      fires — an actual winning move is strictly better than any
+   *      heuristic override, so it must never be shadowed by one.
+   *   2. `rootOverride`, checked next (whether or not `tacticalDepth` is set
+   *      at all — the two options are independent).
+   *   3. `tacticalDepth >= 2`'s opponent-immediate-win safety net, which only
+   *      narrows the legal set rather than deciding outright, so it runs
+   *      after any override has already had the chance to decide outright.
+   *   4. Ordinary UCT simulation.
+   * Left `undefined` (the default), every existing flag's behavior is
+   * byte-for-byte unchanged — this field is additive only.
+   */
+  readonly rootOverride?: (
+    adapter: AnyGameAdapter,
+    state: unknown,
+    legal: readonly unknown[],
+    player: PlayerId,
+  ) => unknown | null;
 }
 
 interface ChildEdge {
@@ -366,6 +404,18 @@ export function mctsSearch(
     const immediateWin = findImmediateWin(adapter, rootState, rootLegal, rootDecision.player);
     if (immediateWin !== null) {
       return immediateWin;
+    }
+  }
+  // rootOverride (MctsConfig's doc comment): checked after the immediate-win
+  // short-circuit above (an actual win always beats a heuristic override) but
+  // before the tacticalDepth>=2 safety net below (that net only narrows the
+  // legal set, it never decides outright, so an override that does decide
+  // outright should get the chance first). Independent of tacticalDepth —
+  // this runs whether or not tacticalDepth is set.
+  if (config.rootOverride !== undefined) {
+    const overridden = config.rootOverride(adapter, rootState, rootLegal, rootDecision.player);
+    if (overridden !== null) {
+      return overridden;
     }
   }
   if (tacticalDepth >= 2) {

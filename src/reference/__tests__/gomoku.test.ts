@@ -318,4 +318,116 @@ describe('gomoku strategySurface (C6)', () => {
     expect(variantChoice).not.toEqual(baseChoice);
     void observation;
   });
+
+  it('forkAwareness plays a move that creates two simultaneous open-three threats (a fork)', () => {
+    const adapter = gomokuAdapter;
+    const forkAwareness = findFlag('forkAwareness');
+    const baseFactory = adapter.baselines.heuristic;
+    const variantFactory = forkAwareness.apply(baseFactory);
+    const variantBot = variantFactory(1);
+
+    // Black has a horizontal pair (7,5)-(7,6) and a vertical pair
+    // (5,7)-(6,7); both pairs share (7,7) as their extension cell. Playing
+    // (7,7) turns both pairs into open threes at once (horizontal 5..7,
+    // vertical 5..7), a fork the opponent cannot block with one move. No
+    // other legal cell creates two simultaneous threats in this position.
+    const board = new Array(225).fill(0);
+    const idx = (r: number, c: number) => r * 15 + c;
+    board[idx(7, 5)] = 1;
+    board[idx(7, 6)] = 1;
+    board[idx(5, 7)] = 1;
+    board[idx(6, 7)] = 1;
+    board[idx(0, 0)] = 2; // a lone white stone far away, no bearing on the fork
+    const state: GomokuState = { board, moveCount: 4, winner: null, openingId: 'test' };
+    const decision = adapter.currentDecision(state);
+    expect(decision?.player).toBe(0);
+    const legal = adapter.getLegalChoices(state);
+    const observation = adapter.getObservation(state, 0);
+
+    const variantChoice = variantBot.decide('place', observation, legal);
+    expect(variantChoice).toEqual({ row: 7, col: 7 });
+  });
+
+  it('forkAwareness blocks the cell the opponent would use to create a fork next turn', () => {
+    const adapter = gomokuAdapter;
+    const forkAwareness = findFlag('forkAwareness');
+    const baseFactory = adapter.baselines.heuristic;
+    const variantFactory = forkAwareness.apply(baseFactory);
+    const baseBot = baseFactory(1);
+    const variantBot = variantFactory(1);
+
+    // Same shared-extension-cell geometry as the previous test, but the
+    // stones belong to White (player 1) instead of Black, and it is Black's
+    // turn. Black has a couple of unrelated stones far away so the base
+    // heuristic bot (density-scored) would ignore the fork cell entirely.
+    const board = new Array(225).fill(0);
+    const idx = (r: number, c: number) => r * 15 + c;
+    board[idx(7, 5)] = 2;
+    board[idx(7, 6)] = 2;
+    board[idx(5, 7)] = 2;
+    board[idx(6, 7)] = 2;
+    board[idx(0, 0)] = 1;
+    board[idx(0, 1)] = 1;
+    const state: GomokuState = { board, moveCount: 6, winner: null, openingId: 'test' };
+    const decision = adapter.currentDecision(state);
+    expect(decision?.player).toBe(0);
+    const legal = adapter.getLegalChoices(state);
+    const observation = adapter.getObservation(state, 0);
+
+    const baseChoice = baseBot.decide('place', observation, legal);
+    const variantChoice = variantBot.decide('place', observation, legal);
+
+    expect(baseChoice).not.toEqual({ row: 7, col: 7 });
+    expect(variantChoice).toEqual({ row: 7, col: 7 });
+  });
+
+  it('forkAwareness composes cleanly with the existing 3 flags without breaking their behavior', () => {
+    const adapter = gomokuAdapter;
+    const blockImmediateThreat = findFlag('blockImmediateThreat');
+    const centerProximity = findFlag('centerProximity');
+    const extendLongestLine = findFlag('extendLongestLine');
+    const forkAwareness = findFlag('forkAwareness');
+
+    // Chain all 4 flags the way composeBot would (loop/compose.ts), fork
+    // innermost: heuristic -> extendLongestLine -> centerProximity ->
+    // blockImmediateThreat -> forkAwareness.
+    let factory = adapter.baselines.heuristic;
+    factory = extendLongestLine.apply(factory);
+    factory = centerProximity.apply(factory);
+    factory = blockImmediateThreat.apply(factory);
+    factory = forkAwareness.apply(factory);
+    const composedBot = factory(1);
+
+    // Reuse the blockImmediateThreat fixture from above: white has an
+    // unblocked four-in-a-row, so the composed bot (via forkAwareness's own
+    // step 2, which runs before any base delegation) must still block it —
+    // proving the new flag doesn't shadow or break the existing win/block
+    // priority when layered on top.
+    const board = new Array(225).fill(0);
+    const idx = (r: number, c: number) => r * 15 + c;
+    board[idx(0, 10)] = 2;
+    board[idx(0, 11)] = 2;
+    board[idx(0, 12)] = 2;
+    board[idx(0, 13)] = 2;
+    board[idx(7, 7)] = 1;
+    board[idx(7, 8)] = 1;
+    const state: GomokuState = { board, moveCount: 6, winner: null, openingId: 'test' };
+    const legal = adapter.getLegalChoices(state);
+    const observation = adapter.getObservation(state, 0);
+
+    const composedChoice = composedBot.decide('place', observation, legal);
+    expect([{ row: 0, col: 9 }, { row: 0, col: 14 }]).toContainEqual(composedChoice);
+
+    // Also sanity-check every legal move remains a valid choice from the
+    // composed bot on a plain empty-ish board (no crash, always returns an
+    // element from `legal`).
+    const neutralBoard = new Array(225).fill(0);
+    neutralBoard[idx(3, 3)] = 1;
+    neutralBoard[idx(11, 11)] = 2;
+    const neutralState: GomokuState = { board: neutralBoard, moveCount: 2, winner: null, openingId: 'test' };
+    const neutralLegal = adapter.getLegalChoices(neutralState);
+    const neutralObservation = adapter.getObservation(neutralState, 0);
+    const neutralChoice = composedBot.decide('place', neutralObservation, neutralLegal);
+    expect(neutralLegal.map((m) => `${m.row}-${m.col}`)).toContain(`${neutralChoice.row}-${neutralChoice.col}`);
+  });
 });

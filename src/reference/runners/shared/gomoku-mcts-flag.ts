@@ -18,9 +18,10 @@
  * GOMOKU_MCTS_HR_CONFIG explicitly so both candidates resolve consistently.
  */
 
-import type { AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
+import type { AnyGameAdapter, PlayerId, StrategyFlagSpec } from '../../../contract/types';
 import { composeBot } from '../../../loop/compose';
 import { mctsBotFactory, type MctsConfig } from '../../../search/mcts';
+import { gomokuForkDecision, type GomokuState, type GomokuMove } from '../../gomoku';
 
 /**
  * Must match reference/runners/gomoku.ts's GOMOKU_MCTS_CONFIG exactly.
@@ -81,6 +82,25 @@ export const GOMOKU_MCTS2_S256_HR_CONFIG: MctsConfig = {
   rolloutPolicy: 'heuristic',
 };
 export const GOMOKU_MCTS2_S256_HR_FLAG = 'mcts2-s256-hr';
+
+/**
+ * Adapter wiring for search/mcts.ts's `rootOverride` option
+ * (docs/GAP-ANALYSIS-8.md gomoku C-column retry): connects
+ * `gomokuForkDecision` (reference/gomoku.ts's pure fork-priority judgment) to
+ * the `MctsConfig.rootOverride` signature — `unknown` state/legal/choice
+ * types widened from `mctsSearch`'s erased-adapter call site, narrowed back
+ * to gomoku's concrete types here since this file (reference/runners/) is a
+ * game-specific app boundary, unlike search/mcts.ts itself. Ignores the
+ * `adapter` parameter (gomokuForkDecision needs only state/legal/player).
+ */
+export function gomokuForkRootOverride(
+  _adapter: AnyGameAdapter,
+  state: unknown,
+  legal: readonly unknown[],
+  player: PlayerId,
+): unknown | null {
+  return gomokuForkDecision(state as GomokuState, legal as readonly GomokuMove[], player);
+}
 
 /**
  * Build an MCTS StrategyFlagSpec for `adapter` under `flag`/`config` —
@@ -186,4 +206,43 @@ export function gomokuMcts2S256TacticalFlagSpec(adapter: AnyGameAdapter): Strate
     tacticalDepth: 2,
   };
   return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS2_S256_TACTICAL_FLAG);
+}
+
+/**
+ * The same 4-flag rollout composite used by the prior diagnostic's
+ * `mcts2-s256-fork` (scratch-n4/gomoku-fork-diag2.ts, not checked in) —
+ * `GOMOKU_CHAMPION_ROLLOUT_FLAGS` plus `forkAwareness`. Kept as its own
+ * constant (not folded into `GOMOKU_CHAMPION_ROLLOUT_FLAGS`) so every prior
+ * champion-rollout candidate's rollout composite stays exactly what it was
+ * when adopted/measured.
+ */
+export const GOMOKU_FORK_CHAMPION_ROLLOUT_FLAGS = [...GOMOKU_CHAMPION_ROLLOUT_FLAGS, 'forkAwareness'] as const;
+
+/**
+ * mcts-wave-6 diagnostic candidate (docs/GAP-ANALYSIS-8.md gomoku C-column
+ * retry — MCTS rootOverride). Identical simulations/uctC/rolloutCount/
+ * rolloutFactory to the prior diagnostic's `mcts2-s256-fork` (256 sims, the
+ * 4-flag fork composite driving rollouts) — that candidate scored 0.0% vs
+ * Opus, down from the pure (unsearched) 4-flag composite's 9.0%, because 256
+ * shallow simulations dilute forkAwareness's deterministic fork verdict into
+ * statistical noise. The only addition here is
+ * `rootOverride: gomokuForkRootOverride`: the same fork-detection geometry
+ * (reference/gomoku.ts's `gomokuForkDecision`) now bypasses the simulation
+ * average entirely and decides the root move outright whenever it fires,
+ * instead of merely biasing rollouts. Everything else held fixed so the
+ * only variable versus the 0.0% baseline is whether the override recovers
+ * the signal the search was diluting.
+ */
+export const GOMOKU_MCTS3_S256_OVERRIDE_FLAG = 'mcts3-s256-override';
+
+export function gomokuMcts3S256OverrideFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  const config: MctsConfig = {
+    simulations: 256,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label: 's256-override',
+    rolloutFactory: composeBot(adapter, [...GOMOKU_FORK_CHAMPION_ROLLOUT_FLAGS]),
+    rootOverride: gomokuForkRootOverride,
+  };
+  return gomokuMctsFlagSpecFor(adapter, config, GOMOKU_MCTS3_S256_OVERRIDE_FLAG);
 }

@@ -581,6 +581,234 @@ const extendLongestLine: StrategyFlagSpec<GomokuObservation, GomokuChoice> = {
   },
 };
 
+/**
+ * Fork-awareness geometry (docs/GAP-ANALYSIS-8.md §4.8 follow-up): the
+ * literal immediate-win/immediate-block tactical precheck (search/mcts.ts's
+ * tacticalDepth) never beat the Opus improv bot because it can't see
+ * multi-direction threats — a move that creates two independent "must
+ * respond" lines at once (a fork) is a de-facto win even though neither line
+ * is a 5-in-a-row yet. This is the first attempt to encode that geometry
+ * directly as game knowledge in the adapter's strategySurface.
+ *
+ * `runInfoAt` walks one direction through a *hypothetical* placement without
+ * allocating a trial board (unlike `longestLineIfPlaced` above) — `moveIdx`
+ * substitutes `moveCell` for whatever is actually on the board at that one
+ * index, everywhere else reads through untouched. This matters because
+ * `countForkThreats` below calls it up to `4 directions * ~220 legal moves`
+ * times per decision — worth avoiding a 225-cell array copy per call, since a
+ * champion-rollout MCTS candidate could call this every simulated move.
+ */
+function runInfoAt(
+  board: readonly Cell[],
+  moveIdx: number,
+  moveCell: Cell,
+  row: number,
+  col: number,
+  cell: Cell,
+  dr: number,
+  dc: number,
+): { readonly length: number; readonly beforeOpen: boolean; readonly afterOpen: boolean } {
+  const at = (r: number, c: number): Cell => {
+    const i = indexOf(r, c);
+    return i === moveIdx ? moveCell : (board[i] as Cell);
+  };
+  let length = 1;
+  let r = row + dr;
+  let c = col + dc;
+  while (inBounds(r, c) && at(r, c) === cell) {
+    length += 1;
+    r += dr;
+    c += dc;
+  }
+  const afterOpen = inBounds(r, c) && at(r, c) === 0;
+  let r2 = row - dr;
+  let c2 = col - dc;
+  while (inBounds(r2, c2) && at(r2, c2) === cell) {
+    length += 1;
+    r2 -= dr;
+    c2 -= dc;
+  }
+  const beforeOpen = inBounds(r2, c2) && at(r2, c2) === 0;
+  return { length, beforeOpen, afterOpen };
+}
+
+/**
+ * Whether placing `cell` at (row,col) creates a "threat" in direction
+ * (dr,dc): either an open three (3-in-a-row, both immediate ends empty — the
+ * task's own definition, taken literally rather than requiring the extended
+ * open-four-reachability check a full Renju engine would add) or a four with
+ * at least one open end (a four with both ends blocked is dead — no
+ * follow-up win). A run of 5+ is an outright win, handled separately by
+ * `findImmediateWin` before fork scoring ever runs, so it is not counted here.
+ */
+function directionHasThreat(
+  board: readonly Cell[],
+  moveIdx: number,
+  row: number,
+  col: number,
+  cell: Cell,
+  dr: number,
+  dc: number,
+): boolean {
+  const info = runInfoAt(board, moveIdx, cell, row, col, cell, dr, dc);
+  if (info.length >= 5) return false;
+  const openEnds = (info.beforeOpen ? 1 : 0) + (info.afterOpen ? 1 : 0);
+  if (info.length === 4) return openEnds >= 1;
+  if (info.length === 3) return openEnds === 2;
+  return false;
+}
+
+/** Number of independent (different-direction) threats placing `cell` at `move` creates — 2+ is a fork. */
+function countForkThreats(board: readonly Cell[], move: GomokuMove, cell: Cell): number {
+  const moveIdx = indexOf(move.row, move.col);
+  let threats = 0;
+  for (const [dr, dc] of DIRECTIONS) {
+    if (directionHasThreat(board, moveIdx, move.row, move.col, cell, dr, dc)) {
+      threats += 1;
+    }
+  }
+  return threats;
+}
+
+interface GomokuForkCandidates {
+  readonly selfForkMoves: readonly GomokuMove[];
+  readonly opponentForkMoves: readonly GomokuMove[];
+  readonly selfSingleThreatMoves: readonly GomokuMove[];
+}
+
+/** Shared candidate-generation pass behind both `forkAwareness` and `gomokuForkDecision` below — kept as one function so the two never drift out of sync on what counts as a fork/single-threat move. */
+function forkCandidateMoves(
+  board: readonly Cell[],
+  legal: readonly GomokuMove[],
+  selfCell: Cell,
+  opponentCell: Cell,
+): GomokuForkCandidates {
+  const selfForkMoves: GomokuMove[] = [];
+  const selfSingleThreatMoves: GomokuMove[] = [];
+  const opponentForkMoves: GomokuMove[] = [];
+  for (const move of legal) {
+    const selfThreats = countForkThreats(board, move, selfCell);
+    if (selfThreats >= 2) {
+      selfForkMoves.push(move);
+    } else if (selfThreats === 1) {
+      selfSingleThreatMoves.push(move);
+    }
+    if (countForkThreats(board, move, opponentCell) >= 2) {
+      opponentForkMoves.push(move);
+    }
+  }
+  return { selfForkMoves, opponentForkMoves, selfSingleThreatMoves };
+}
+
+/**
+ * Pure fork-priority judgment (docs/GAP-ANALYSIS-8.md gomoku C-column retry
+ * — MCTS rootOverride follow-up), factored out of `forkAwareness` below so it
+ * can be reused outside the strategySurface flag machinery — specifically as
+ * an MCTS `rootOverride` (search/mcts.ts's MctsConfig option), which has no
+ * `base` bot to delegate to and needs a plain `(state, legal, player) =>
+ * choice | null` shape.
+ *
+ * Deliberately does NOT include the immediate-win/immediate-block checks
+ * `forkAwareness` itself layers on top: when wired as a rootOverride, those
+ * are already covered — at strictly higher priority — by search/mcts.ts's
+ * own `tacticalDepth` option (see that option's precedence doc comment), so
+ * duplicating them here would be redundant, not incorrect, but the point of
+ * this split is exactly to keep this function to the part that has no
+ * game-neutral equivalent: fork move, fork block, then single-threat move,
+ * in that priority order, else null.
+ *
+ * Ties within a tier are broken by legal-array order (the first candidate
+ * found) rather than `forkAwareness`'s own base-bot-consulting tie-break —
+ * there is no base bot available at an MCTS root, so this is the simplest
+ * deterministic choice. `forkAwareness` does NOT call this function (it needs
+ * its own tie-break), it calls the shared `forkCandidateMoves` helper above
+ * instead — see that flag's own doc comment.
+ */
+export function gomokuForkDecision(
+  state: Pick<GomokuState, 'board'>,
+  legal: readonly GomokuMove[],
+  player: PlayerId,
+): GomokuMove | null {
+  const selfCell = playerToCell(player);
+  const opponentCell = playerToCell(otherPlayer(player));
+  const { selfForkMoves, opponentForkMoves, selfSingleThreatMoves } = forkCandidateMoves(
+    state.board,
+    legal,
+    selfCell,
+    opponentCell,
+  );
+  if (selfForkMoves.length > 0) return selfForkMoves[0] as GomokuMove;
+  if (opponentForkMoves.length > 0) return opponentForkMoves[0] as GomokuMove;
+  if (selfSingleThreatMoves.length > 0) return selfSingleThreatMoves[0] as GomokuMove;
+  return null;
+}
+
+/**
+ * Strategy flag: effective, game-knowledge (docs/GAP-ANALYSIS-8.md §4.8
+ * follow-up — the 4th and most specific card against the Opus improv bot's
+ * C-column advantage). Priority-scored decision, delegating to `base` only
+ * once none of its own criteria match. Uses the shared `forkCandidateMoves`
+ * helper above (not `gomokuForkDecision`) because its tie-break within a
+ * priority tier consults `base.decide`, which `gomokuForkDecision` — reused
+ * outside strategySurface, where no base bot exists — deliberately does not:
+ *   1. Take an immediate win if one exists.
+ *   2. Block the opponent's immediate win if they have one.
+ *   3. Play a move that creates a fork (2+ independent threats at once) —
+ *      the opponent cannot block both, so this is a de-facto forced win.
+ *   4. Block a move the opponent could use to create a fork next turn.
+ *   5. Play a move that creates a single threat (open three / winning four).
+ *   6. Otherwise delegate to `base.decide`.
+ * Ties within a priority tier are broken by `base.decide`'s own pick among
+ * the tied candidates (same pattern as `extendLongestLine` above), falling
+ * back to the first candidate in `legal`'s (already state-shuffled) order
+ * when the base pick isn't among them.
+ */
+const forkAwareness: StrategyFlagSpec<GomokuObservation, GomokuChoice> = {
+  flag: 'forkAwareness',
+  description:
+    'Prioritizes immediate wins/blocks, then fork moves (2+ simultaneous threats) and fork blocks, then single-threat moves, else delegates to base.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'forkAwareness'),
+        decide(decisionPoint, observation, legal) {
+          const selfCell = playerToCell(observation.self);
+          const opponentCell = playerToCell(otherPlayer(observation.self));
+
+          const win = findImmediateWin(observation, legal, selfCell);
+          if (win) return win;
+          const block = findImmediateWin(observation, legal, opponentCell);
+          if (block) return block;
+
+          const pickWithTieBreak = (candidates: readonly GomokuMove[]): GomokuMove => {
+            if (candidates.length === 1) {
+              return candidates[0] as GomokuMove;
+            }
+            const baseChoice = bot.decide(decisionPoint, observation, legal);
+            const baseKey = encodeChoice(baseChoice);
+            const match = candidates.find((move) => encodeChoice(move) === baseKey);
+            return match ?? (candidates[0] as GomokuMove);
+          };
+
+          const { selfForkMoves, opponentForkMoves, selfSingleThreatMoves } = forkCandidateMoves(
+            observation.board,
+            legal,
+            selfCell,
+            opponentCell,
+          );
+
+          if (selfForkMoves.length > 0) return pickWithTieBreak(selfForkMoves);
+          if (opponentForkMoves.length > 0) return pickWithTieBreak(opponentForkMoves);
+          if (selfSingleThreatMoves.length > 0) return pickWithTieBreak(selfSingleThreatMoves);
+
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by actually running this adapter's own
 // random-vs-random self-play (see src/reference/__tests__/gomoku.test.ts for
@@ -681,7 +909,7 @@ export const gomokuAdapter: GameAdapter<GomokuState, GomokuObservation, GomokuCh
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [blockImmediateThreat, centerProximity, extendLongestLine],
+  strategySurface: [blockImmediateThreat, centerProximity, extendLongestLine, forkAwareness],
 };
 
 export { OPENING_BOOK, findWinnerFromLastMove };

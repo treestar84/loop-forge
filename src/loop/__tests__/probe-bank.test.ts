@@ -1,4 +1,5 @@
 import type { AnyBotFactory } from '../../contract/types';
+import { createRng } from '../../kernel/rng';
 import { eraseAdapter } from '../erase';
 import { runPairedBlock, type MatchTrajectoryRecord } from '../paired-match';
 import { mineLosses } from '../loss-mining';
@@ -67,5 +68,46 @@ describe('buildProbeBank + scoreAgainstProbes', () => {
     const score = scoreAgainstProbes(adapter, disagreeingBot, probes, 42);
     expect(score.agreementRate).toBeLessThan(1);
     expect(score.agreements).toBe(0);
+  });
+});
+
+/** Every decision in longAccumulateAdapter offers 10 equally-scored legal
+ * choices (helpers/long-accumulate-game.ts's LEGAL is unranked), so a bot
+ * that breaks ties via its own seeded RNG never has a single "obviously
+ * correct" choice — regression fixture for GAP-11 Phase 1-E's per-decision
+ * anchor derivation fix (loss-mining.ts/probe-bank.ts doc comments). */
+const seedTieBreakBot: AnyBotFactory = (seed) => {
+  const rng = createRng(seed);
+  return {
+    id: `tie-break-${seed}`,
+    decide(_decisionPoint, _observation, legal) {
+      return legal[rng.nextInt(legal.length)] as number;
+    },
+  };
+};
+
+describe('mineLosses -> buildProbeBank -> scoreAgainstProbes self-consistency (GAP-11 Phase 1-E)', () => {
+  const ANCHOR_SEED_BASE = 12_345;
+
+  it('reproduces agreementRate exactly 1.0 for a seed-dependent tie-break anchor scored against its own probe bank', () => {
+    const lossRecords = collectRecords(LOW_BOT, HIGH_BOT, 7);
+    const report = mineLosses(adapter, lossRecords, seedTieBreakBot, {
+      anchorSeedBase: ANCHOR_SEED_BASE,
+    });
+    // Sanity: this fixture must actually exercise tie-breaking (multiple
+    // divergences across a game with 10 always-tied choices), or the test
+    // would pass trivially even without the per-decision derivation fix.
+    expect(report.divergences.length).toBeGreaterThan(0);
+
+    const probes = buildProbeBank(report, lossRecords, 'seed-tie-break-anchor-v1');
+    expect(probes.length).toBe(report.divergences.length);
+
+    // Scoring the SAME anchor against its own probe bank, with the SAME
+    // seed base mineLosses used, must reproduce every anchorChoiceKey
+    // exactly — this is only true if mineLosses and scoreAgainstProbes
+    // derive the anchor's seed the same way per (gameSeed, decisionIndex).
+    const selfScore = scoreAgainstProbes(adapter, seedTieBreakBot, probes, ANCHOR_SEED_BASE);
+    expect(selfScore.skipped).toBe(0);
+    expect(selfScore.agreementRate).toBe(1);
   });
 });

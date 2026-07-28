@@ -114,6 +114,7 @@ describe('saveTrajectories — holdout anchor gate (GAP-11 D3)', () => {
 const PROBE_A: ProbePosition = {
   probeId: '5-0',
   gameSeed: 5,
+  decisionIndex: 0,
   choicePrefix: [],
   deciderSeat: 0,
   decisionPointId: 'pick',
@@ -124,6 +125,7 @@ const PROBE_A: ProbePosition = {
 const PROBE_B: ProbePosition = {
   probeId: '6-1',
   gameSeed: 6,
+  decisionIndex: 1,
   choicePrefix: ['9'],
   deciderSeat: 1,
   decisionPointId: 'pick',

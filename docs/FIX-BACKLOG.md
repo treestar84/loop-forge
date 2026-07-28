@@ -19,8 +19,8 @@
 
 | ID | 항목 | Phase | 상태 |
 |---|---|---|---|
-| D4 | `runHeadToHead` trajectory 기록 옵션 + `loop/loss-mining.ts`(LossReport: 패배 확정 깊이·분기점 대조·결정지점별 불일치율) + `loop/probe-bank.ts`(프로브 국면 봉인·후보 채점기 — 웨이브 전 초저비용 필터) | 1 | 미착수 |
-| D3 | `BenchmarkAnchor kind:'external'`+`role:'feedback'\|'holdout'` + `WaveConfig.challenge?` 계측 열(+ADR-0012, 채택 판정 불개입) + L1(Sonnet 설계)·L2(기존 Opus봇 봉인)·L3(신스타일 Opus 설계, 피드백 경로 코드 수준 차단) 앵커 등록 — 등록 전 실측 게이트(heuristic<L1<L2, L3는 L2와 행동 지문 거리 확인) | 1 | 미착수 |
+| D4 | `runHeadToHead` trajectory 기록 옵션 + `loop/loss-mining.ts`(LossReport: 패배 확정 깊이·분기점 대조·결정지점별 불일치율) + `loop/probe-bank.ts`(프로브 국면 봉인·후보 채점기 — 웨이브 전 초저비용 필터) | 1 | **완료**(2026-07-29, 커밋 84954e2 + 자기일치율 1.0 후속 수정 — 결정별 파생 시드, GAP-11 §5.5) |
+| D3 | `BenchmarkAnchor kind:'external'`+`role:'feedback'\|'holdout'` + `WaveConfig.challenge?` 계측 열(+ADR-0012, 채택 판정 불개입) + L1(Sonnet 설계)·L2(기존 Opus봇 봉인)·L3(신스타일 Opus 설계, 피드백 경로 코드 수준 차단) 앵커 등록 — 등록 전 실측 게이트(heuristic<L1<L2, L3는 L2와 행동 지문 거리 확인) | 1 | **완료**(2026-07-29, 커밋 3ff81af·7219fa5·e091076 — 3게임 래더 봉인, 판정 실험으로 v5<L1<L2 서열 실측, GAP-11 §5.5) |
 | D1 | `GameSpec.choiceEvaluator?` 계약 확장(+ADR-0011) — 지식의 세 번째 주입 통로 | 2 | 미착수 |
 | D2 | `search/mcts.ts` PUCT prior/progressive bias(`priorWeight`, 미지정 시 불변) + 오목 실증(성공 기준: L2 상대 9.0% 초과 또는 L1 승률 곡선 유의 개선) | 2 | 미착수 |
 | D5 | 포트폴리오 후보 생성(B1~B5 버킷, 수율 기반 재배분·하한 5%, 배치 크기는 처리량 실측 파생) + `artifacts/design-brief.ts` + `artifacts/portfolio.ts` + 프로토콜 v2 6단계(DESIGN §6.1 개정, +ADR-0013) | 3 | 미착수 |

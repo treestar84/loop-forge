@@ -8,16 +8,32 @@
  *
  * Game-neutral: only encodeChoice/applyChoice/getObservation/
  * getLegalChoices/currentDecision are used.
+ *
+ * Anchor derivation (GAP-11 Phase 1-E finding): scoreAgainstProbes rebuilds
+ * the anchor/candidate bot for a probe from a seed forked on
+ * `${probe.gameSeed}:${probe.decisionIndex}` — the exact same derivation
+ * loss-mining.ts's mineLosses uses per candidate decision (see that file's
+ * doc comment). Sharing the derivation is required for self-consistency:
+ * scoring the same anchor that produced a probe's anchorChoiceKey against
+ * its own probe bank (same seed base as mineLosses's anchorSeedBase) must
+ * reproduce agreementRate 1.0.
  */
 
 import type { AnyBotFactory, AnyGameAdapter } from '../contract/types';
+import { createRng } from '../kernel/rng';
 import type { MatchTrajectoryRecord } from './paired-match';
 import type { LossDivergence, LossReport } from './loss-mining';
+
+/** Same convention as loss-mining.ts's/loop/calibrate.ts's BOT_SEED_SPACE. */
+const BOT_SEED_SPACE = 2 ** 31;
 
 export interface ProbePosition {
   /** Stable key: `${gameSeed}-${decisionIndex}`. */
   readonly probeId: string;
   readonly gameSeed: number;
+  /** Same value as encoded in probeId; kept as its own field so callers
+   * (e.g. scoreAgainstProbes) never need to parse it back out of probeId. */
+  readonly decisionIndex: number;
   /** encodeChoice sequence to replay from createInitialState(gameSeed) to reach this position. */
   readonly choicePrefix: readonly string[];
   readonly deciderSeat: number;
@@ -82,6 +98,7 @@ export function buildProbeBank(
     probes.push({
       probeId,
       gameSeed: divergence.gameSeed,
+      decisionIndex: divergence.decisionIndex,
       choicePrefix: record.choices.slice(0, divergence.decisionIndex),
       deciderSeat: record.candidateSeat,
       decisionPointId: divergence.decisionPointId,
@@ -90,7 +107,7 @@ export function buildProbeBank(
     });
   }
 
-  probes.sort((a, b) => decisionIndexOfProbeId(a.probeId) - decisionIndexOfProbeId(b.probeId));
+  probes.sort((a, b) => a.decisionIndex - b.decisionIndex);
 
   const maxProbes = options?.maxProbes;
   if (maxProbes === undefined || probes.length <= maxProbes) {
@@ -101,11 +118,6 @@ export function buildProbeBank(
 
 function probeIdOf(divergence: LossDivergence): string {
   return `${divergence.gameSeed}-${divergence.decisionIndex}`;
-}
-
-function decisionIndexOfProbeId(probeId: string): number {
-  const parsed = Number(probeId.slice(probeId.lastIndexOf('-') + 1));
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export interface ProbeScore {
@@ -121,8 +133,12 @@ export interface ProbeScore {
  * would do, and compare against probe.anchorChoiceKey. A probe whose replay
  * hits an illegal/unencodable prefix choice, or that never reaches a
  * decision for probe.deciderSeat, is skipped (not counted as a mismatch).
- * The bot is rebuilt once per probe from `botSeedBase` so scoring never
- * depends on probe order.
+ * The bot is rebuilt once per probe from a seed forked on
+ * `${probe.gameSeed}:${probe.decisionIndex}` off of `botSeedBase` — the same
+ * derivation loss-mining.ts's mineLosses uses per candidate decision (file
+ * doc comment's "anchor derivation" note) — so scoring never depends on
+ * probe order, and scoring the same anchor+seed base that produced the
+ * probe bank reproduces its anchorChoiceKey exactly (agreementRate 1.0).
  */
 export function scoreAgainstProbes(
   adapter: AnyGameAdapter,
@@ -130,6 +146,7 @@ export function scoreAgainstProbes(
   probes: readonly ProbePosition[],
   botSeedBase: number,
 ): ProbeScore {
+  const rootRng = createRng(botSeedBase);
   let agreements = 0;
   let skipped = 0;
 
@@ -169,7 +186,8 @@ export function scoreAgainstProbes(
     }
 
     const observation = adapter.getObservation(state, decision.player);
-    const bot = botFactory(botSeedBase);
+    const probeSeed = rootRng.fork(`${probe.gameSeed}:${probe.decisionIndex}`).nextInt(BOT_SEED_SPACE);
+    const bot = botFactory(probeSeed);
     let choice: unknown;
     try {
       choice = bot.decide(decision.decisionPoint, observation, legal);

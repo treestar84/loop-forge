@@ -12,6 +12,23 @@
  * game to see how the *outcome* would have changed — is out of scope here
  * and left for a v2 (docs/GAP-ANALYSIS-11.md D4 §3 stage 2 only asks for
  * divergence detection, not outcome counterfactuals).
+ *
+ * Per-decision anchor derivation (GAP-11 Phase 1-E finding): the anchor bot
+ * queried at a given decisionIndex is rebuilt fresh from a seed forked on
+ * `${gameSeed}:${decisionIndex}` (loop/calibrate.ts's Z2 convention extended
+ * to decision granularity), rather than built once per game and reused
+ * across every decision. A single per-game anchor instance would carry
+ * internal RNG state (used for e.g. tie-breaking) forward across decisions,
+ * so its choice at decisionIndex i would depend on how many prior ties it
+ * had already resolved earlier in that same game — a probe bank built from
+ * such a report could then never be replayed in isolation (probe-bank.ts's
+ * scoreAgainstProbes only replays a *prefix* to reach one decision, it does
+ * not re-simulate the anchor's entire decision history up to that point).
+ * Deriving the anchor per (gameSeed, decisionIndex) instead makes each
+ * decision's anchor choice reproducible standalone: mining and probe
+ * scoring must share this exact derivation (same root seed, same fork key
+ * format) for scoreAgainstProbes to ever measure the anchor's own
+ * agreement rate at 1.0 (docs/GAP-ANALYSIS-11.md Phase 1-E).
  */
 
 import type { AnyBotFactory, AnyGameAdapter } from '../contract/types';
@@ -57,10 +74,11 @@ function isCandidateLoss(record: MatchTrajectoryRecord): boolean {
  * Mine divergences between the candidate's actual choices and what
  * `anchorFactory` would have chosen at the same decision points, over every
  * *lost* game in `records` (winning/drawing games are skipped entirely —
- * they carry no loss signal). Replay is deterministic: the anchor bot for a
- * given gameSeed is built from `options.anchorSeedBase` forked by the seed
- * (loop/calibrate.ts's Z2 fix pattern), so re-running with the same inputs
- * reproduces an identical LossReport.
+ * they carry no loss signal). Replay is deterministic: the anchor bot
+ * queried at each candidate decision is rebuilt from a seed derived from
+ * `options.anchorSeedBase` forked by `${gameSeed}:${decisionIndex}` (see the
+ * file doc comment's "per-decision anchor derivation" note), so re-running
+ * with the same inputs reproduces an identical LossReport.
  *
  * A game whose replay hits an illegal/unencodable recorded choice or an
  * unexpected early terminal state is skipped (counted in totalGames/
@@ -92,9 +110,6 @@ export function mineLosses(
     }
     candidateLosses += 1;
 
-    const anchorSeed = rootRng.fork(String(record.gameSeed)).nextInt(BOT_SEED_SPACE);
-    const anchor = anchorFactory(anchorSeed);
-
     let state = adapter.createInitialState(record.gameSeed);
     let recordDivergences = 0;
     let firstDivergenceDepth: number | null = null;
@@ -115,6 +130,10 @@ export function mineLosses(
       const decider = record.deciders[decisionIndex];
 
       if (decider === record.candidateSeat) {
+        const anchorSeed = rootRng
+          .fork(`${record.gameSeed}:${decisionIndex}`)
+          .nextInt(BOT_SEED_SPACE);
+        const anchor = anchorFactory(anchorSeed);
         const observation = adapter.getObservation(state, decision.player);
         let anchorChoice: unknown;
         try {

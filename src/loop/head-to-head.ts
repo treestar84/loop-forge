@@ -12,7 +12,7 @@ import {
   bootstrapPairedSeedBlocks,
   type PairedSeedOutcome,
 } from '../kernel/paired-stats';
-import { runPairedBlock } from './paired-match';
+import { runPairedBlock, type MatchTrajectoryRecord } from './paired-match';
 
 /**
  * Upper bound (exclusive) for per-seed bot seeds derived from a forked RNG
@@ -46,6 +46,11 @@ export function runHeadToHead(
   opponent: AnyBotFactory,
   seeds: readonly number[],
   botSeedBase: number,
+  /**
+   * docs/GAP-ANALYSIS-11.md D4. Omitted leaves signature/behavior/return
+   * value byte-for-byte unchanged.
+   */
+  options?: { readonly trajectoryCollector?: (record: MatchTrajectoryRecord) => void },
 ): HeadToHeadResult {
   if (seeds.length === 0) {
     throw new Error('runHeadToHead: seeds must be non-empty');
@@ -57,7 +62,14 @@ export function runHeadToHead(
 
   for (const seed of seeds) {
     const seedBotSeedBase = rootRng.fork(String(seed)).nextInt(BOT_SEED_SPACE);
-    const result = runPairedBlock(adapter, candidate, opponent, seed, seedBotSeedBase);
+    const result = runPairedBlock(
+      adapter,
+      candidate,
+      opponent,
+      seed,
+      seedBotSeedBase,
+      options?.trajectoryCollector,
+    );
     if ('defect' in result) {
       skipped += 1;
       continue;

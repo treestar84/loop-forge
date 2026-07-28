@@ -12,6 +12,33 @@ import { runMatch, type MatchDefect } from './match';
 
 export type PairedMatchResult = PairedSeedOutcome | { readonly defect: MatchDefect };
 
+/**
+ * Per-match trajectory snapshot (docs/GAP-ANALYSIS-11.md D4). Determinism
+ * means `(gameSeed, seats, choices)` alone is enough to byte-for-byte
+ * reproduce the whole match by replaying createInitialState/applyChoice —
+ * "아카이브는 가볍게, 분석은 재생으로". `deciders[i]` is the PlayerId who made
+ * `choices[i]`, needed to tell candidate decisions apart from opponent ones
+ * during loss-mining without re-deriving turn order from scratch.
+ */
+export interface MatchTrajectoryRecord {
+  readonly gameSeed: number;
+  /** Index into adapter.spec.seatingPlan for this permutation. */
+  readonly seatingIndex: number;
+  /** The physical PlayerId (seat) the candidate occupies in this permutation. */
+  readonly candidateSeat: number;
+  /** Per-seat bot label, e.g. 'candidate' | 'opponent'. */
+  readonly seats: readonly string[];
+  /** encodeChoice output for every decision, in play order. */
+  readonly choices: readonly string[];
+  /** PlayerId who made choices[i]; deciders.length === choices.length. */
+  readonly deciders: readonly PlayerId[];
+  readonly outcome: { readonly winner: number | null; readonly scores: readonly number[] };
+}
+
+function soleWinner(winners: readonly PlayerId[]): number | null {
+  return winners.length === 1 ? (winners[0] as number) : null;
+}
+
 function mean(values: readonly number[]): number {
   let sum = 0;
   for (const value of values) {
@@ -44,6 +71,14 @@ export function runPairedBlock(
   opponent: AnyBotFactory | readonly AnyBotFactory[],
   gameSeed: number,
   botSeedBase: number,
+  /**
+   * Optional trajectory sink (docs/GAP-ANALYSIS-11.md D4). Called once per
+   * seatingPlan permutation that completes without a defect; never called
+   * for defected permutations, since there is no trajectory to report.
+   * Omitted leaves every existing behavior/return value byte-for-byte
+   * unchanged.
+   */
+  trajectoryCollector?: (record: MatchTrajectoryRecord) => void,
 ): PairedMatchResult {
   const playerCount = adapter.spec.playerCount;
   const opponents = Array.isArray(opponent) ? opponent : null;
@@ -62,7 +97,7 @@ export function runPairedBlock(
   let winSum = 0;
   let scoreSum = 0;
 
-  for (const seating of seatingPlan) {
+  for (const [seatingIndex, seating] of seatingPlan.entries()) {
     const result = runMatch(adapter, botFactories, gameSeed, botSeeds, seating);
     if (result.kind === 'defect') {
       return { defect: result.defect };
@@ -120,6 +155,25 @@ export function runPairedBlock(
 
     winSum += winFraction;
     scoreSum += scoreDelta;
+
+    if (trajectoryCollector) {
+      // seats is indexed by PlayerId (seat), not by botIndex: seating[botIndex]
+      // is the PlayerId that bot occupies, so seats[seating[botIndex]] is the
+      // label for that seat.
+      const seats: string[] = new Array(seating.length);
+      seating.forEach((player, botIndex) => {
+        seats[player] = botIndex === 0 ? 'candidate' : 'opponent';
+      });
+      trajectoryCollector({
+        gameSeed,
+        seatingIndex,
+        candidateSeat: candidatePlayer as number,
+        seats,
+        choices: result.choiceKeys,
+        deciders: result.decisionPlayers,
+        outcome: { winner: soleWinner(result.outcome.winners), scores: result.outcome.scores },
+      });
+    }
   }
 
   const n = seatingPlan.length;

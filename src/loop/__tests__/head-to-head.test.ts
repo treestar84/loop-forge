@@ -2,6 +2,7 @@ import { miniTrickAdapter } from '../../reference/mini-trick';
 import { composeBot } from '../compose';
 import { eraseAdapter } from '../erase';
 import { runHeadToHead } from '../head-to-head';
+import type { MatchTrajectoryRecord } from '../paired-match';
 
 const adapter = eraseAdapter(miniTrickAdapter);
 const SEEDS = Array.from({ length: 80 }, (_, i) => 1000 + i);
@@ -35,5 +36,33 @@ describe('runHeadToHead', () => {
     const first = runHeadToHead(adapter, winCheapest, heuristic, SEEDS, 7);
     const second = runHeadToHead(adapter, winCheapest, heuristic, SEEDS, 7);
     expect(second).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4: options.trajectoryCollector (docs/GAP-ANALYSIS-11.md §3 D4)
+// ---------------------------------------------------------------------------
+
+describe('runHeadToHead — options.trajectoryCollector', () => {
+  const heuristic = adapter.baselines.heuristic;
+
+  it('leaves the return value byte-for-byte unchanged whether options is omitted, {}, or carries a collector', () => {
+    const baseline = runHeadToHead(adapter, heuristic, heuristic, SEEDS, 42);
+    const withEmptyOptions = runHeadToHead(adapter, heuristic, heuristic, SEEDS, 42, {});
+    const withCollector = runHeadToHead(adapter, heuristic, heuristic, SEEDS, 42, {
+      trajectoryCollector: () => {},
+    });
+    expect(withEmptyOptions).toEqual(baseline);
+    expect(withCollector).toEqual(baseline);
+  });
+
+  it('collects one record per seed per seatingPlan permutation', () => {
+    const records: MatchTrajectoryRecord[] = [];
+    runHeadToHead(adapter, heuristic, heuristic, SEEDS, 42, {
+      trajectoryCollector: (record) => records.push(record),
+    });
+    expect(records).toHaveLength(SEEDS.length * adapter.spec.seatingPlan.length);
+    const seenSeeds = new Set(records.map((record) => record.gameSeed));
+    expect(seenSeeds.size).toBe(SEEDS.length);
   });
 });

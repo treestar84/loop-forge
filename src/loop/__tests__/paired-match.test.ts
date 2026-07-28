@@ -1,6 +1,6 @@
 import { miniTrickAdapter } from '../../reference/mini-trick';
 import { eraseAdapter } from '../erase';
-import { runPairedBlock } from '../paired-match';
+import { runPairedBlock, type MatchTrajectoryRecord } from '../paired-match';
 import { calibrateIdentity } from '../calibrate';
 import { quadGameFreeForAll, quadGameTeamed } from './helpers/quad-game';
 
@@ -138,5 +138,67 @@ describe('runPairedBlock — quad-game teamed (spec.teams: [[0,2],[1,3]], B3)', 
       expect(result.candidateWinFraction).toBeCloseTo(0.5, 10);
       expect(result.candidateScoreDelta).toBeCloseTo(0, 10);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4: trajectoryCollector (docs/GAP-ANALYSIS-11.md §3 D4)
+// ---------------------------------------------------------------------------
+
+describe('runPairedBlock — trajectoryCollector', () => {
+  it('leaves the return value byte-for-byte unchanged whether or not a collector is passed', () => {
+    const withoutCollector = runPairedBlock(adapter, adapter.baselines.random, adapter.baselines.heuristic, 12, 50);
+    const withCollector = runPairedBlock(
+      adapter,
+      adapter.baselines.random,
+      adapter.baselines.heuristic,
+      12,
+      50,
+      () => {},
+    );
+    expect(withCollector).toEqual(withoutCollector);
+  });
+
+  it('calls the collector once per seatingPlan permutation, with choices/deciders matching the actual trajectory', () => {
+    const records: MatchTrajectoryRecord[] = [];
+    runPairedBlock(
+      adapter,
+      adapter.baselines.random,
+      adapter.baselines.heuristic,
+      12,
+      50,
+      (record) => records.push(record),
+    );
+
+    expect(records).toHaveLength(adapter.spec.seatingPlan.length);
+    records.forEach((record, seatingIndex) => {
+      expect(record.gameSeed).toBe(12);
+      expect(record.seatingIndex).toBe(seatingIndex);
+      expect(record.choices.length).toBeGreaterThan(0);
+      expect(record.deciders).toHaveLength(record.choices.length);
+      expect(record.seats[record.candidateSeat]).toBe('candidate');
+      // Every decider is a valid seat index into `seats`.
+      record.deciders.forEach((decider) => {
+        expect(record.seats[decider]).toBeDefined();
+      });
+    });
+  });
+
+  it('is not called when the block defects', () => {
+    const illegalBotFactory = () => ({
+      id: 'illegal-bot',
+      decide: () => ({ suit: 'A' as const, rank: 999 }),
+    });
+    const records: MatchTrajectoryRecord[] = [];
+    const result = runPairedBlock(
+      adapter,
+      illegalBotFactory,
+      adapter.baselines.random,
+      7,
+      100,
+      (record) => records.push(record),
+    );
+    expect('defect' in result).toBe(true);
+    expect(records).toHaveLength(0);
   });
 });

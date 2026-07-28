@@ -12,6 +12,7 @@ import type {
   AnyBotFactory,
   AnyGameAdapter,
   Outcome,
+  PlayerId,
   SeatingPermutation,
 } from '../contract/types';
 
@@ -38,6 +39,15 @@ export type MatchResult =
        * C2 content-coverage check, docs/GAP-ANALYSIS-2.md X2) run
        * adapter.exercisedContent(finalState) without re-simulating the game. */
       readonly finalState: unknown;
+      /**
+       * `decisionPlayers[i]` is the PlayerId who made `choiceKeys[i]`
+       * (docs/GAP-ANALYSIS-11.md D4: loss-mining needs to know which choices
+       * were the candidate's without replaying the whole match a second
+       * time). Purely additive to the existing `choiceKeys`/`decisions`
+       * fields — no prior consumer reads this, so it changes nothing for
+       * them.
+       */
+      readonly decisionPlayers: readonly PlayerId[];
     }
   | {
       readonly kind: 'defect';
@@ -110,6 +120,7 @@ export function runMatch(
   }
 
   const choiceKeys: string[] = [];
+  const decisionPlayers: PlayerId[] = [];
   let decisions = 0;
 
   for (;;) {
@@ -181,6 +192,7 @@ export function runMatch(
     }
 
     choiceKeys.push(encoded);
+    decisionPlayers.push(decision.player);
 
     try {
       state = adapter.applyChoice(state, choice);
@@ -220,5 +232,5 @@ export function runMatch(
     };
   }
 
-  return { kind: 'completed', outcome, choiceKeys, decisions, finalState: state };
+  return { kind: 'completed', outcome, choiceKeys, decisions, finalState: state, decisionPlayers };
 }

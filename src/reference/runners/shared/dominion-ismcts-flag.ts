@@ -102,3 +102,51 @@ export function dominionIsmctsChampionRolloutFlagSpec(adapter: AnyGameAdapter): 
     apply: () => ismctsBotFactory(adapter, config),
   };
 }
+
+/**
+ * ismcts-wave-4 (docs/GAP-ANALYSIS-8.md §4.5/§4.7's third retry, DESIGN.md
+ * §6.1 near-miss loop, untried axis): both prior retries kept the simulation
+ * budget fixed at 64 — ismcts-s64-hr (raw heuristic rollout, §4.5) and
+ * ismcts-s64-cr (champion-mimicking rollout, §4.7) — and both lost the
+ * regression tier against the champion (`rushProvinces`) at winRate 0.275
+ * and 0.100 respectively. This candidate instead keeps the rollout policy
+ * pure heuristic (no champion mimicry — §4.7's own postmortem theorized that
+ * mimicking `rushProvinces` inside the rollout may have been *leaking*
+ * information to the true rushProvinces opponent, so champion-rollout is not
+ * repeated here) and raises only the simulation budget: 64 -> 256.
+ *
+ * Diagnostic head-to-head (scratch script, not checked in; nice -n 10,
+ * single process, N=60, gate-free) run before this candidate was wired into
+ * a wave, per the task's explicit go/no-go gate ("must beat the prior 0.275
+ * to proceed"):
+ *   - ismcts-s128-hr vs champion: winRate=0.258 (CI [0.150,0.375]) — no
+ *     improvement over 0.275 (well within the same CI), so 128 was dropped.
+ *   - ismcts-s256-hr vs champion: winRate=0.417 (CI [0.300,0.533]) — a real
+ *     improvement over 0.275, with the CI's upper bound crossing 0.5 (still
+ *     not a proven win, but the first budget-increase attempt that moved the
+ *     needle at all across three total retries). This is why 256 (not 128)
+ *     is the candidate wired into the wave below.
+ *
+ * Throughput measurement (same scratch script, 3 games/matchup):
+ *   - ismcts-s256-hr vs heuristic (smoke/prune/holdout matchup):  ~9,965ms/game
+ *   - ismcts-s256-hr vs v2 champion (regression matchup):        ~10,267ms/game
+ * New flag name per §6.1's "이미 판정된 이름 재사용 금지" rule (distinct
+ * from both `ismcts-s64-hr` and `ismcts-s64-cr`).
+ */
+export const DOMINION_ISMCTS_S256_HR_CONFIG: MctsConfig = {
+  simulations: 256,
+  uctC: 1.4,
+  rolloutCount: 1,
+  label: 's256-hr',
+  rolloutPolicy: 'heuristic',
+};
+export const DOMINION_ISMCTS_S256_HR_FLAG = 'ismcts-s256-hr';
+
+export function dominionIsmctsS256FlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<unknown, unknown> {
+  return {
+    flag: DOMINION_ISMCTS_S256_HR_FLAG,
+    description:
+      'SO-ISMCTS search candidate with a 4x larger simulation budget (256 vs the 64 both prior retries used), raw heuristic rollout (no champion mimicry) — DESIGN.md §6.1 near-miss retry, third attempt, untried budget-increase axis; ignores the base bot entirely.',
+    apply: () => ismctsBotFactory(adapter, DOMINION_ISMCTS_S256_HR_CONFIG),
+  };
+}

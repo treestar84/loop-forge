@@ -17,6 +17,23 @@ import { dirname } from 'node:path';
 import { sha256Digest } from '../kernel/digest';
 import type { MatchTrajectoryRecord } from '../loop/paired-match';
 import type { ProbePosition } from '../loop/probe-bank';
+import type { BenchmarkAnchor } from './baseline-registry';
+
+/**
+ * Code-level gate (docs/GAP-ANALYSIS-11.md D3): holdout anchors are for
+ * transcendence judgment only; their trajectories/probes must never enter
+ * the design feedback path (GAP-11 D3). This is the shared guard both
+ * saveTrajectories/saveProbeBank use, and the one runners should call
+ * directly before building a LossReport from an anchor's games.
+ */
+export function assertFeedbackAnchor(anchor: BenchmarkAnchor): void {
+  if (anchor.role === 'holdout') {
+    throw new Error(
+      `assertFeedbackAnchor: anchor "${anchor.anchorId}" is a holdout anchor — holdout anchors are for ` +
+        'transcendence judgment only; their trajectories/probes must never enter the design feedback path (GAP-11 D3)',
+    );
+  }
+}
 
 /**
  * Write `records` as JSONL to `<dir>/trajectories.jsonl` (creating `dir` if
@@ -25,7 +42,17 @@ import type { ProbePosition } from '../loop/probe-bank';
 export function saveTrajectories(
   dir: string,
   records: readonly MatchTrajectoryRecord[],
+  /**
+   * The anchor these trajectories were recorded against (docs/GAP-ANALYSIS-11.md
+   * D3). Omitted leaves behavior/signature byte-for-byte unchanged. When
+   * present and its role is 'holdout', this throws before writing anything —
+   * the anchor-side analogue of the seed-ledger's holdout-bank-reuse rule.
+   */
+  sourceAnchor?: BenchmarkAnchor,
 ): string {
+  if (sourceAnchor !== undefined) {
+    assertFeedbackAnchor(sourceAnchor);
+  }
   const filePath = `${dir}/trajectories.jsonl`;
   mkdirSync(dir, { recursive: true });
   const lines = records.map((record) => JSON.stringify(record));
@@ -57,7 +84,15 @@ function probeBankSeal(probes: readonly ProbePosition[]): string {
  * `probes` (kernel/digest's canonical-JSON scheme) so a later load can
  * detect accidental hand-editing or truncation. Returns the file path.
  */
-export function saveProbeBank(file: string, probes: readonly ProbePosition[]): string {
+export function saveProbeBank(
+  file: string,
+  probes: readonly ProbePosition[],
+  /** See saveTrajectories's sourceAnchor doc comment — same rule, same guard. */
+  sourceAnchor?: BenchmarkAnchor,
+): string {
+  if (sourceAnchor !== undefined) {
+    assertFeedbackAnchor(sourceAnchor);
+  }
   mkdirSync(dirname(file), { recursive: true });
   const sealed: SealedProbeBank = { probes, seal: probeBankSeal(probes) };
   writeFileSync(file, JSON.stringify(sealed, null, 2), 'utf8');

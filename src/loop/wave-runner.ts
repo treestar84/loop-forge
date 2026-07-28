@@ -28,6 +28,7 @@ import { createSprt, type SprtConfig } from '../kernel/sprt';
 import type { SeedLedger } from '../kernel/seed-ledger';
 import { composeBot } from './compose';
 import { computeComparabilityKey } from '../kernel/comparability';
+import { runHeadToHead } from './head-to-head';
 import { runMatch, type MatchDefect } from './match';
 import { runPairedBlock } from './paired-match';
 
@@ -46,6 +47,43 @@ export interface WaveFixedTierConfig {
 export interface WaveScreenProbeConfig {
   readonly seeds: readonly number[];
   readonly botSeedBase: number;
+}
+
+/**
+ * One challenge opponent (docs/GAP-ANALYSIS-11.md D3). The loop layer cannot
+ * import artifacts/baseline-registry.ts (dependency-rules.test.ts forbids
+ * loop -> artifacts), so this carries only what loop needs directly: a
+ * label for reporting (`anchorId`, matching the registry's anchorId but
+ * loop never looks it up) and the bot factory itself, injected by the
+ * caller (typically resolved from the registry at the app boundary).
+ */
+export interface WaveChallengeEntry {
+  readonly anchorId: string;
+  readonly factory: AnyBotFactory;
+  readonly role: 'feedback' | 'holdout';
+}
+
+export interface WaveChallengeConfig {
+  readonly entries: readonly WaveChallengeEntry[];
+  /**
+   * Seeds the caller has reserved specifically for this challenge
+   * measurement. Reusing a holdout/graduation bank here would violate the
+   * seed-bank reuse rule (CLAUDE.md invariant) — enforcing that is the
+   * caller's responsibility (this module has no seed ledger visibility into
+   * banks it wasn't given).
+   */
+  readonly seeds: readonly number[];
+  readonly botSeedBase: number;
+}
+
+export interface WaveChallengeResult {
+  readonly anchorId: string;
+  /** 'baseline' | a candidate's flag label (WaveCandidateResult.flag). */
+  readonly subject: string;
+  readonly winRate: number;
+  readonly winRateCI: { readonly lower: number; readonly upper: number };
+  readonly scoreDelta: number;
+  readonly blocks: number;
 }
 
 /**
@@ -117,6 +155,14 @@ export interface WaveConfig {
    * cancel strategy signal along with position bias). Defaults to 0.8.
    */
   readonly signalCollapseThreshold?: number;
+  /**
+   * External-anchor challenge measurement (docs/GAP-ANALYSIS-11.md D3),
+   * run after every candidate's gate verdict is final. Never influences
+   * `verdict`/`tiersPassed` — it is observation only, recorded on
+   * `WaveReport.challengeResult`. Omitted leaves WaveReport (and
+   * reportDigest) byte-for-byte unchanged from pre-D3 behavior.
+   */
+  readonly challenge?: WaveChallengeConfig;
 }
 
 export interface WaveTierStats extends TierStats {
@@ -148,6 +194,8 @@ export interface WaveReport {
   readonly reportDigest: string;
   /** Aggregated signal-collapse warnings across every candidate, prefixed with the candidate's flag label. */
   readonly warnings: readonly string[];
+  /** Present iff wave.challenge was set. Never consulted for adoption. */
+  readonly challengeResult?: readonly WaveChallengeResult[];
 }
 
 const DEFAULT_SIGNAL_COLLAPSE_THRESHOLD = 0.8;
@@ -534,6 +582,17 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
     }
   }
 
+  // GAP-11 D3: holdout anchors are for transcendence judgment only, never
+  // for the wave feedback loop — the same rule trajectory-archive.ts's
+  // assertFeedbackAnchor enforces on the artifacts side, applied here at the
+  // point where a holdout anchor would otherwise feed challengeResult.
+  if (wave.challenge?.entries.some((entry) => entry.role === 'holdout')) {
+    throw new Error(
+      'runWave: wave.challenge.entries contains a holdout-role anchor — holdout anchors are for ' +
+        'transcendence judgment only; their trajectories/probes must never enter the design feedback path (GAP-11 D3)',
+    );
+  }
+
   const consumedAt = wave.recordedAt;
   const seedConsumption: string[] = [];
 
@@ -596,11 +655,70 @@ export function runWave(adapter: AnyGameAdapter, wave: WaveConfig): WaveReport {
     ],
   });
 
-  const reportDigest = sha256Digest({ waveId: wave.waveId, results, seedConsumption, comparabilityKey });
+  // GAP-11 D3: measured strictly after every candidate's gate verdict is
+  // final, and never fed back into `results` — this is observation-only.
+  const challengeResult = wave.challenge ? computeChallengeResult(adapter, wave, baselineFactory) : undefined;
+
+  const reportDigest = sha256Digest({
+    waveId: wave.waveId,
+    results,
+    seedConsumption,
+    comparabilityKey,
+    ...(challengeResult !== undefined ? { challengeResult } : {}),
+  });
 
   const warnings = results.flatMap((result) =>
     result.warnings.map((warning) => `[${result.flag}] ${warning}`),
   );
 
-  return { waveId: wave.waveId, results, seedConsumption, comparabilityKey, reportDigest, warnings };
+  return {
+    waveId: wave.waveId,
+    results,
+    seedConsumption,
+    comparabilityKey,
+    reportDigest,
+    warnings,
+    ...(challengeResult !== undefined ? { challengeResult } : {}),
+  };
+}
+
+/**
+ * Measure every subject (the plain baselineFlags composite, plus each
+ * candidate composed exactly as evaluateCandidate composed it) against every
+ * challenge entry. Subject/entry order is fixed (baseline first, then
+ * wave.candidates in input order; entries in wave.challenge.entries order) so
+ * reportDigest stays deterministic.
+ */
+function computeChallengeResult(
+  adapter: AnyGameAdapter,
+  wave: WaveConfig,
+  baselineFactory: AnyBotFactory,
+): readonly WaveChallengeResult[] {
+  const challenge = wave.challenge as WaveChallengeConfig;
+  const subjects: ReadonlyArray<{ readonly subject: string; readonly factory: AnyBotFactory }> = [
+    { subject: 'baseline', factory: baselineFactory },
+    ...wave.candidates.map((candidateConfig) => {
+      const flags = candidateFlags(candidateConfig);
+      return {
+        subject: candidateLabel(flags),
+        factory: composeBot(adapter, [...(wave.baselineFlags ?? []), ...flags]),
+      };
+    }),
+  ];
+
+  const computed: WaveChallengeResult[] = [];
+  for (const subject of subjects) {
+    for (const entry of challenge.entries) {
+      const result = runHeadToHead(adapter, subject.factory, entry.factory, challenge.seeds, challenge.botSeedBase);
+      computed.push({
+        anchorId: entry.anchorId,
+        subject: subject.subject,
+        winRate: result.candidateWinRate,
+        winRateCI: result.winRateCI,
+        scoreDelta: result.candidateScoreDelta,
+        blocks: result.blocks,
+      });
+    }
+  }
+  return computed;
 }

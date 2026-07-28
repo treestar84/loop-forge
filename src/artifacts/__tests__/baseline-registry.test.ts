@@ -163,3 +163,59 @@ describe('BaselineRegistry — anchors are frozen once registered', () => {
     expect(restored.listAnchors()).toEqual(registry.listAnchors());
   });
 });
+
+// GAP-11 D3: external anchors (the L1/L2/L3 anchor ladder).
+describe('BaselineRegistry — external anchors (GAP-11 D3)', () => {
+  it('registers an external anchor with an explicit role', () => {
+    const registry = new BaselineRegistry();
+    const stored = registry.registerAnchor({ anchorId: 'l2-opus', kind: 'external', role: 'feedback' });
+    expect(stored).toEqual({ anchorId: 'l2-opus', kind: 'external', role: 'feedback' });
+    expect(registry.getAnchor('l2-opus')).toEqual(stored);
+  });
+
+  it('registers a holdout external anchor', () => {
+    const registry = new BaselineRegistry();
+    const stored = registry.registerAnchor({ anchorId: 'l3-opus', kind: 'external', role: 'holdout' });
+    expect(stored.role).toBe('holdout');
+  });
+
+  it('normalizes an external anchor with no role to "feedback"', () => {
+    const registry = new BaselineRegistry();
+    const stored = registry.registerAnchor({ anchorId: 'l1-sonnet', kind: 'external' });
+    expect(stored.role).toBe('feedback');
+    expect(registry.getAnchor('l1-sonnet')?.role).toBe('feedback');
+  });
+
+  it('rejects re-registering an external anchor — anchors never move', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'l2-opus', kind: 'external', role: 'feedback' });
+    expect(() => registry.registerAnchor({ anchorId: 'l2-opus', kind: 'external', role: 'holdout' })).toThrow(
+      /already frozen/,
+    );
+  });
+
+  it('rejects a non-external anchor that declares a role', () => {
+    const registry = new BaselineRegistry();
+    expect(() => registry.registerAnchor({ anchorId: 'bad-role', kind: 'random', role: 'feedback' })).toThrow(
+      /must not declare a role/,
+    );
+    expect(() =>
+      registry.registerAnchor({ anchorId: 'bad-role-2', kind: 'heuristic', role: 'holdout' }),
+    ).toThrow(/must not declare a role/);
+  });
+
+  it('resolveAnchor throws for an external anchor — its factory must be supplied by the caller', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'l2-opus', kind: 'external', role: 'feedback' });
+    expect(() => registry.resolveAnchor(adapter, 'l2-opus')).toThrow(/cannot be resolved via resolveAnchor/);
+  });
+
+  it('round-trips external anchors (both roles) through toJSON/fromJSON', () => {
+    const registry = new BaselineRegistry();
+    registry.registerAnchor({ anchorId: 'l1-sonnet', kind: 'external', role: 'feedback' });
+    registry.registerAnchor({ anchorId: 'l3-opus', kind: 'external', role: 'holdout' });
+    const restored = BaselineRegistry.fromJSON(JSON.parse(JSON.stringify(registry.toJSON())));
+    expect(restored.getAnchor('l1-sonnet')).toEqual(registry.getAnchor('l1-sonnet'));
+    expect(restored.getAnchor('l3-opus')).toEqual(registry.getAnchor('l3-opus'));
+  });
+});

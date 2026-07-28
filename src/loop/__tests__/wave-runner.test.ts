@@ -370,3 +370,93 @@ describe('runWave fieldMix (M4)', () => {
     expect(randomSeeds).toEqual([]);
   });
 });
+
+// GAP-11 D3: external-anchor challenge measurement. Never influences
+// verdict/tiersPassed — it's an observation appended after gating finishes.
+describe('runWave challenge measurement (GAP-11 D3)', () => {
+  const CHALLENGE_SEEDS = [9001, 9002, 9003, 9004, 9005];
+
+  it('throws immediately when a challenge entry declares role "holdout"', () => {
+    const ledger = makeLedger();
+    const config: WaveConfig = {
+      ...baseWaveConfig(ledger),
+      challenge: {
+        entries: [{ anchorId: 'l3-opus', factory: adapter.baselines.random, role: 'holdout' }],
+        seeds: CHALLENGE_SEEDS,
+        botSeedBase: 7000,
+      },
+    };
+    expect(() => runWave(adapter, config)).toThrow(/holdout anchors are for/);
+  });
+
+  it('throws before consuming any seed bank when the challenge has a holdout entry', () => {
+    const ledger = makeLedger();
+    const config: WaveConfig = {
+      ...baseWaveConfig(ledger),
+      challenge: {
+        entries: [
+          { anchorId: 'l2-opus', factory: adapter.baselines.heuristic, role: 'feedback' },
+          { anchorId: 'l3-opus', factory: adapter.baselines.random, role: 'holdout' },
+        ],
+        seeds: CHALLENGE_SEEDS,
+        botSeedBase: 7000,
+      },
+    };
+    expect(() => runWave(adapter, config)).toThrow();
+    // The smoke bank must still be "reserved" (not consumed) — the throw
+    // happens before any ledger.consume call, so a caller can safely retry
+    // with a fixed config without hitting SeedLedger's "already consumed".
+    expect(ledger.get('smoke-test')?.status).toBe('reserved');
+  });
+
+  it('produces challengeResult for every subject (baseline + each candidate) x every feedback entry', () => {
+    const ledger = makeLedger();
+    const config: WaveConfig = {
+      ...baseWaveConfig(ledger),
+      challenge: {
+        entries: [{ anchorId: 'l2-opus', factory: adapter.baselines.random, role: 'feedback' }],
+        seeds: CHALLENGE_SEEDS,
+        botSeedBase: 7000,
+      },
+    };
+    const report = runWave(adapter, config);
+    expect(report.challengeResult).toBeDefined();
+    const subjects = report.challengeResult?.map((r) => r.subject).sort();
+    // baseline + the 3 candidates declared in baseWaveConfig.
+    expect(subjects).toEqual(['baseline', 'leadHighFirst', 'noopSort', 'winCheapest'].sort());
+    for (const entry of report.challengeResult ?? []) {
+      expect(entry.anchorId).toBe('l2-opus');
+      expect(entry.blocks).toBeGreaterThan(0);
+      expect(entry.winRateCI.lower).toBeLessThanOrEqual(entry.winRateCI.upper);
+    }
+  });
+
+  it('does not change any candidate verdict compared to an identical wave without a challenge', () => {
+    const ledgerA = makeLedger();
+    const reportWithoutChallenge = runWave(adapter, baseWaveConfig(ledgerA));
+
+    const ledgerB = makeLedger();
+    const configWithChallenge: WaveConfig = {
+      ...baseWaveConfig(ledgerB),
+      challenge: {
+        entries: [{ anchorId: 'l2-opus', factory: adapter.baselines.random, role: 'feedback' }],
+        seeds: CHALLENGE_SEEDS,
+        botSeedBase: 7000,
+      },
+    };
+    const reportWithChallenge = runWave(adapter, configWithChallenge);
+
+    expect(reportWithChallenge.results.map((r) => ({ flag: r.flag, verdict: r.verdict, tiersPassed: r.tiersPassed }))).toEqual(
+      reportWithoutChallenge.results.map((r) => ({ flag: r.flag, verdict: r.verdict, tiersPassed: r.tiersPassed })),
+    );
+  });
+
+  it('omitting challenge leaves reportDigest identical to the pinned pre-D3 value', () => {
+    const ledger = makeLedger();
+    const report = runWave(adapter, baseWaveConfig(ledger));
+    expect(report.challengeResult).toBeUndefined();
+    expect(report.reportDigest).toBe(
+      'sha256-afd3bca47e9bf25ca757287295f888313c6a33b5f4baf588ce78d1a060560c30',
+    );
+  });
+});

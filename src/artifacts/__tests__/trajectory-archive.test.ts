@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  assertFeedbackAnchor,
   loadProbeBank,
   loadTrajectories,
   saveProbeBank,
   saveTrajectories,
 } from '../trajectory-archive';
+import type { BenchmarkAnchor } from '../baseline-registry';
 import type { MatchTrajectoryRecord } from '../../loop/paired-match';
 import type { ProbePosition } from '../../loop/probe-bank';
 
@@ -64,6 +66,51 @@ describe('saveTrajectories / loadTrajectories', () => {
   });
 });
 
+// GAP-11 D3: holdout anchors must never feed the design loop, including
+// through the trajectory archive.
+const FEEDBACK_ANCHOR: BenchmarkAnchor = { anchorId: 'l2-opus', kind: 'external', role: 'feedback' };
+const HOLDOUT_ANCHOR: BenchmarkAnchor = { anchorId: 'l3-opus', kind: 'external', role: 'holdout' };
+
+describe('assertFeedbackAnchor', () => {
+  it('passes for a feedback anchor', () => {
+    expect(() => assertFeedbackAnchor(FEEDBACK_ANCHOR)).not.toThrow();
+  });
+
+  it('passes for a non-external anchor (no role)', () => {
+    expect(() => assertFeedbackAnchor({ anchorId: 'heuristic-anchor', kind: 'heuristic' })).not.toThrow();
+  });
+
+  it('throws for a holdout anchor', () => {
+    expect(() => assertFeedbackAnchor(HOLDOUT_ANCHOR)).toThrow(/holdout anchors are for/);
+  });
+});
+
+describe('saveTrajectories — holdout anchor gate (GAP-11 D3)', () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('throws when sourceAnchor is a holdout anchor, without writing anything', () => {
+    dir = makeTempRoot();
+    const target = join(dir, 'never-created');
+    expect(() => saveTrajectories(target, [RECORD_A], HOLDOUT_ANCHOR)).toThrow(/holdout anchors are for/);
+  });
+
+  it('succeeds when sourceAnchor is a feedback anchor', () => {
+    dir = makeTempRoot();
+    const filePath = saveTrajectories(dir, [RECORD_A], FEEDBACK_ANCHOR);
+    expect(loadTrajectories(filePath)).toEqual([RECORD_A]);
+  });
+
+  it('preserves existing behavior when sourceAnchor is omitted', () => {
+    dir = makeTempRoot();
+    const filePath = saveTrajectories(dir, [RECORD_A]);
+    expect(loadTrajectories(filePath)).toEqual([RECORD_A]);
+  });
+});
+
 const PROBE_A: ProbePosition = {
   probeId: '5-0',
   gameSeed: 5,
@@ -111,5 +158,33 @@ describe('saveProbeBank / loadProbeBank', () => {
     writeFileSync(filePath, JSON.stringify(tampered, null, 2), 'utf8');
 
     expect(() => loadProbeBank(filePath)).toThrow(/seal mismatch/);
+  });
+});
+
+describe('saveProbeBank — holdout anchor gate (GAP-11 D3)', () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('throws when sourceAnchor is a holdout anchor, without writing anything', () => {
+    dir = makeTempRoot();
+    const filePath = join(dir, 'never-created.json');
+    expect(() => saveProbeBank(filePath, [PROBE_A], HOLDOUT_ANCHOR)).toThrow(/holdout anchors are for/);
+  });
+
+  it('succeeds when sourceAnchor is a feedback anchor', () => {
+    dir = makeTempRoot();
+    const filePath = join(dir, 'probe-bank.json');
+    saveProbeBank(filePath, [PROBE_A], FEEDBACK_ANCHOR);
+    expect(loadProbeBank(filePath)).toEqual([PROBE_A]);
+  });
+
+  it('preserves existing behavior when sourceAnchor is omitted', () => {
+    dir = makeTempRoot();
+    const filePath = join(dir, 'probe-bank.json');
+    saveProbeBank(filePath, [PROBE_A]);
+    expect(loadProbeBank(filePath)).toEqual([PROBE_A]);
   });
 });

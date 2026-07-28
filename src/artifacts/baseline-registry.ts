@@ -37,13 +37,25 @@ export interface BaselineVersion {
   readonly sourceDigest?: string;
 }
 
-export type BenchmarkAnchorKind = 'random' | 'heuristic' | 'baseline';
+export type BenchmarkAnchorKind = 'random' | 'heuristic' | 'baseline' | 'external';
+
+/**
+ * Meaningful only when kind === 'external' (docs/GAP-ANALYSIS-11.md D3): the
+ * anchor ladder's L1/L2 rungs are 'feedback' (their trajectories/probes may
+ * feed the design loop), L3 is 'holdout' (transcendence judgment only — see
+ * trajectory-archive.ts's assertFeedbackAnchor, the code-level enforcement of
+ * this split). Non-external anchors (random/heuristic/baseline) must never
+ * declare a role — registerAnchor throws if they do.
+ */
+export type BenchmarkAnchorRole = 'feedback' | 'holdout';
 
 export interface BenchmarkAnchor {
   readonly anchorId: string;
   readonly kind: BenchmarkAnchorKind;
   /** Required (and only meaningful) when kind === 'baseline'. */
   readonly baselineVersion?: string;
+  /** External-only (see BenchmarkAnchorRole). Registered without one normalizes to 'feedback'. */
+  readonly role?: BenchmarkAnchorRole;
 }
 
 function cloneBaselineVersion(version: BaselineVersion): BaselineVersion {
@@ -59,9 +71,12 @@ function cloneBaselineVersion(version: BaselineVersion): BaselineVersion {
 }
 
 function cloneAnchor(anchor: BenchmarkAnchor): BenchmarkAnchor {
-  return anchor.baselineVersion !== undefined
-    ? { anchorId: anchor.anchorId, kind: anchor.kind, baselineVersion: anchor.baselineVersion }
-    : { anchorId: anchor.anchorId, kind: anchor.kind };
+  return {
+    anchorId: anchor.anchorId,
+    kind: anchor.kind,
+    ...(anchor.baselineVersion !== undefined ? { baselineVersion: anchor.baselineVersion } : {}),
+    ...(anchor.role !== undefined ? { role: anchor.role } : {}),
+  };
 }
 
 // Canonical implementation lives in the loop layer (layer rule: artifacts → loop
@@ -138,7 +153,14 @@ export class BaselineRegistry {
         );
       }
     }
-    const stored = cloneAnchor(anchor);
+    if (anchor.kind !== 'external' && anchor.role !== undefined) {
+      throw new Error(
+        `BaselineRegistry: anchor "${anchor.anchorId}" has kind "${anchor.kind}" and must not declare a role (role is external-only, docs/GAP-ANALYSIS-11.md D3)`,
+      );
+    }
+    const stored = cloneAnchor(
+      anchor.kind === 'external' && anchor.role === undefined ? { ...anchor, role: 'feedback' } : anchor,
+    );
     this.anchors.set(stored.anchorId, stored);
     this.anchorOrder.push(stored.anchorId);
     return stored;
@@ -164,6 +186,16 @@ export class BaselineRegistry {
     }
     if (anchor.kind === 'heuristic') {
       return adapter.baselines.heuristic;
+    }
+    if (anchor.kind === 'external') {
+      // External anchors (L1/L2/L3 ladder bots, docs/GAP-ANALYSIS-11.md D3)
+      // have no registry-composable form — their factory lives outside the
+      // registry (e.g. src/reference/experiments/<gameId>-opus-bot.ts) and is
+      // injected directly by the caller (WaveChallengeEntry.factory), never
+      // resolved through here.
+      throw new Error(
+        `BaselineRegistry: anchor "${anchorId}" has kind "external" and cannot be resolved via resolveAnchor — its bot factory must be supplied directly by the caller`,
+      );
     }
     const baselineVersion = this.versions.get(anchor.baselineVersion as string);
     if (!baselineVersion) {
@@ -283,12 +315,18 @@ function parseAnchor(value: unknown): BenchmarkAnchor {
   const anchorId = record['anchorId'];
   const kind = record['kind'];
   const baselineVersion = record['baselineVersion'];
+  const role = record['role'];
 
   if (typeof anchorId !== 'string' || anchorId.length === 0) {
     throw new Error('BaselineRegistry.fromJSON: anchorId must be a non-empty string');
   }
-  if (kind !== 'random' && kind !== 'heuristic' && kind !== 'baseline') {
-    throw new Error(`BaselineRegistry.fromJSON: anchor "${anchorId}" kind must be random|heuristic|baseline`);
+  if (kind !== 'random' && kind !== 'heuristic' && kind !== 'baseline' && kind !== 'external') {
+    throw new Error(
+      `BaselineRegistry.fromJSON: anchor "${anchorId}" kind must be random|heuristic|baseline|external`,
+    );
+  }
+  if (role !== undefined && role !== 'feedback' && role !== 'holdout') {
+    throw new Error(`BaselineRegistry.fromJSON: anchor "${anchorId}" role must be feedback|holdout when present`);
   }
   if (kind === 'baseline') {
     if (typeof baselineVersion !== 'string' || baselineVersion.length === 0) {
@@ -296,11 +334,24 @@ function parseAnchor(value: unknown): BenchmarkAnchor {
         `BaselineRegistry.fromJSON: anchor "${anchorId}" has kind "baseline" but no baselineVersion string`,
       );
     }
+    if (role !== undefined) {
+      throw new Error(
+        `BaselineRegistry.fromJSON: anchor "${anchorId}" has kind "baseline" and must not declare role`,
+      );
+    }
     return { anchorId, kind, baselineVersion };
   }
   if (baselineVersion !== undefined) {
     throw new Error(
       `BaselineRegistry.fromJSON: anchor "${anchorId}" has kind "${kind}" and must not declare baselineVersion`,
+    );
+  }
+  if (kind === 'external') {
+    return { anchorId, kind, role: (role as BenchmarkAnchorRole | undefined) ?? 'feedback' };
+  }
+  if (role !== undefined) {
+    throw new Error(
+      `BaselineRegistry.fromJSON: anchor "${anchorId}" has kind "${kind}" and must not declare role`,
     );
   }
   return { anchorId, kind };

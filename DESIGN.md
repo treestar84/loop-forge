@@ -1,5 +1,10 @@
 # Loop Forge — 설계도
 
+> **문서 지도**: 최신 상태는 [`docs/HANDOFF-2026-07-28.md`](docs/HANDOFF-2026-07-28.md),
+> 개별 결정의 맥락·대안·결과는 [`docs/adr/`](docs/adr/README.md), 운영 함정은
+> [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md). 이 문서는 "지금 구조가
+> 어떻게 생겼는가"의 정본이고, ADR은 "왜 이렇게 됐는가"의 정본이다.
+
 > 완성된 게임 프로젝트(보드게임·하스스톤류 전략 카드게임 등)를 받아서, 그 게임의 NPC 난이도를
 > **프롬프트 한 줄 없이** 자동으로 끌어올리는 플랫폼. 방법은 두 가지 축의 결합이다:
 > **게임 온보딩 파이프라인**(게임을 하네스 위에서 돌 수 있는 상태로 전환·채점·검증)과
@@ -196,10 +201,18 @@ pointWinRate, pointScoreDiff, winRateCI, gap}`을 기계가 읽을 수 있는 �
 
 **3단계 — 사람 또는 에이전트가 재설계**: 이 구조화된 목록을 읽고, 게임 어댑터의
 `strategySurface`(`src/reference/<game>.ts`)에서 해당 `StrategyFlagSpec.apply`
-클로저를 수정하거나 새 플래그를 추가한다. **v1에는 이것 말고 다른 개입 경로가 없다**
+클로저를 수정하거나 새 플래그를 추가한다. v1에는 이것 말고 다른 개입 경로가 없었다
 — config/데이터 기반으로 전략을 제안하는 방법은 없고, 항상 TypeScript 코드를 고쳐
-어댑터를 재빌드해야 한다(자동 후보 생성은 ROADMAP v2). 이 사실을 감추지 않고 명시하는
-이유: 사용자가 "개입 가능"을 코드 없는 조작으로 오해하지 않게 하기 위함이다.
+어댑터를 재빌드해야 했다.
+
+**2026-07-26 갱신**: `kernel/search-blueprint.ts`(`deriveSearchBlueprint`, §10,
+ADR-0005)가 3단계의 "탐색/학습 계열 후보를 뭘로 시도할지" 판단 부분을
+classification+capabilities+실측 기반 자동 추천으로 대체했다 — **단, 이건 "어떤
+알고리즘·예산을 1차 시도할지"까지만 자동화한 것이고, 여전히 코드 작업(전략 플래그
+자체를 손으로 작성/조정하는 것)이 남는다.** 예를 들어 오목의 `forkAwareness`(다방향
+위협 인식, ADR-0008)나 도미니언의 챔피언 롤아웃 재도전은 여전히 사람/에이전트가
+게임을 분석해 직접 설계한 것이다. 자동화된 것은 "1차 시도의 시작점"이지 "재설계
+전체"가 아니다 — 이 구분을 흐리지 않는다.
 - 이미 한 웨이브에서 판정된 `flag` 이름은 **재사용하지 않는다** — 같은 이름으로
   로직만 바꾸면 `AdoptionLedger`의 이력이 "같은 플래그가 예전엔 near-miss였는데
   이번엔 adopted"처럼 모호해진다. 로직을 바꿨으면 새 flag 이름을 쓴다
@@ -281,3 +294,48 @@ C7-parity 점수가 통과율과 무관하게 **60점으로 캡**된다(기본 t
 게임 로직 자체(C0~C6)는 전부 100점이지만 "원본 게임과 진짜로 일치한다"는 증거는
 아직 없다는 뜻이다. 각 러너는 이 사실을 감추지 않고 로그/리포트에 경고로 남기되,
 C7만 캡된 경우 웨이브 실행은 계속 진행한다(`src/onboarding/wave-readiness.ts`).
+
+## 10. 탐색·학습 후보 계층 (v1.5~1.13, 2026-07-23~26)
+
+②③④ 순수 계층 옆에 `search/`·`learn/` 계층을 추가했다(ADR-0002). 이들은
+OpenSpiel(DeepMind) 알고리즘의 충실 이식(ADR-0001)이며, 산출물은 전부
+`BotFactory`라 `loop`/`onboarding`은 이들의 존재를 모른다.
+
+| 모듈 | 내용 |
+|---|---|
+| `search/mcts.ts` | UCT MCTS. `rolloutPolicy`('random'\|'heuristic')·`rolloutFactory`(임의 BotFactory)·`tacticalDepth`(즉승/즉방어 프리체크)·`rootOverride`(게임별 우선순위 판정 훅, ADR-0008) 옵션 |
+| `search/ismcts.ts` | SO-ISMCTS(Cowling 2012). 은닉 정보 게임용, `sampleStateFromObservation`(결정화) 위에서 동작 |
+| `learn/mccfr.ts` | outcome-sampling MCCFR. 학습 산출물(정책 테이블)을 봇으로 재생 |
+| `kernel/search-blueprint.ts` | `deriveSearchBlueprint` — 위 모듈 중 무엇을, 어떤 예산·롤아웃으로 1차 시도할지 classification+capabilities+실측 기반 자동 추천(ADR-0005). 순수 데이터, search/learn 미참조 |
+| `reference/runners/shared/search-candidate.ts` | 추천 데이터 → 실제 `MctsConfig`/`IsmctsConfig`로 번역하는 앱 경계 헬퍼 |
+
+계약에는 이를 위한 옵션 필드 3개가 추가됐다(`contract/types.ts`, 전부 하위호환):
+`GameSpec.utility?`(zero-sum/general, MCCFR 적격성 판단), `informationStateKey?`
+(CFR 정보집합 키, 미선언 시 관찰 기반 폴백 — perfect recall 미보장),
+`reconstructState?`(완전정보 게임의 MCTS 시뮬레이션 루트 복원). 은닉 정보 게임은
+대신 `sampleStateFromObservation?`(결정화 — "아는 것은 보존, 모르는 것만 모순 없이
+재샘플링")을 선언한다.
+
+탐색/학습 봇도 다단 게이트(§5)에 특례 없이 통과해야 채택된다 — 이게 `loop`가
+후보의 출처를 몰라도 되게 설계한 §1의 계층 원칙이 그대로 지켜지는 지점이다.
+
+## 11. 확장성·일반화 라운드 (v1.14~1.22, 2026-07-27~28)
+
+기존 6개 게임(스플랜더·오목·장기·도미니언·윙스팬·하스스톤)은 전부 "턴제·적대적
+2~4인" 계열이었다. 시스템이 낯선 카테고리에도 자동으로 대응하는지 검증하기 위해
+2개 게임을 추가 온보딩했다:
+
+| 게임 | 원본 소스 | 특성 | 실증한 것 |
+|---|---|---|---|
+| 아발론 | AlexLomm/avalon-engine | 5인, 숨은 진영(멀린·하수인·암살자), 승/패 전용 | `hiddenTeamStructure`(ADR-0006) — C5 축의 identityCenter 자기모순 해소 |
+| 카탄(core) | rpjohnst/catan | 4인 FFA, 부분 은닉, 대인원 킹메이킹 | `fieldMix`(ADR-0007) — 혼합 상대 구성 웨이브 |
+
+두 온보딩 다 신규 카테고리를 코드 레벨로 사전 진단(`docs/GAP-ANALYSIS-10.md`,
+M1~M4)한 뒤 실제 게임으로 실증하는 순서를 따랐다 — 이 순서(사전 진단 → 게임
+중립 수정 → 실전 온보딩으로 실증) 자체가 다음 신규 카테고리(협동 게임 M2, 실시간
+게임 M3)에도 재사용 가능한 절차다.
+
+최종 9게임 registry 상태와 각 게임의 탐색 후보 실험 결과는
+[`docs/HANDOFF-2026-07-28.md`](docs/HANDOFF-2026-07-28.md) §2·§4 참고 — 특히
+오목의 C열(챗봇 AI 대비 맞대결) 5개 카드 전부 실패 사례는 이 프로젝트가 "성공만
+보여주지 않는다"는 원칙(ADR-0009)의 가장 상세한 실증이다.

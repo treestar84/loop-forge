@@ -176,7 +176,10 @@ npm run demo   # mini-trick 온보딩 채점 → 캘리브레이션 → 웨이�
 
 ## 문서
 
+- 최신 핸드오프(전체 맥락·현재 상태): [docs/HANDOFF-2026-07-28.md](./docs/HANDOFF-2026-07-28.md)
 - 설계 상세: [DESIGN.md](./DESIGN.md), 단계 계획: [ROADMAP.md](./ROADMAP.md)
+- 아키텍처 결정 기록(왜 이렇게 됐는가): [docs/adr/](./docs/adr/README.md)
+- 운영 함정·재발 방지: [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)
 - 온보딩 절차: [docs/ONBOARDING-GUIDE.md](./docs/ONBOARDING-GUIDE.md)
 - 지표 해석: [docs/INTERPRETATION.md](./docs/INTERPRETATION.md)
 - 갭 분석 이력·수정 백로그: [docs/FIX-BACKLOG.md](./docs/FIX-BACKLOG.md)

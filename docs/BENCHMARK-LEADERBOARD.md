@@ -123,6 +123,31 @@
   타일을 겨냥. 상세는 `src/reference/experiments/catan-opus-bot.ts` 파일 상단 주석
   참고.
 
+## 결과 7 (2026-07-28, 스플랜더 v3 재측정 — near-miss 큰루프 채택 반영)
+
+| 게임 | 기준선 | N | A: Opus봇 vs 기본봇 | B: 루프포지봇 vs 기본봇 | C: Opus봇 vs 루프포지봇 | 채택 전략 수 | 승자(C열) |
+|---|---|---|---|---|---|---|---|
+| 스플랜더 v3 | v3 (buyHighestPoints, ismcts-s128-cr) | 400 | 37.4% (33.5–41.3) | **87.1%** (84.8–89.4) | 11.3% (9.2–13.4) | 2/3 | **루프포지** (압도 유지) |
+
+- 원본: `runs/splendor/benchmark-3col-v3.{json,md}`. 코드: `src/reference/runners/splendor-benchmark-v3.ts`
+  (기존 `splendor-benchmark.ts`는 v1/v2 문맥 그대로 보존, 덮어쓰지 않음).
+- **버그 수정 겸함**: registry가 v3로 승격되며 B열 봇에 `ismcts-s128-cr`(웨이브
+  중에만 `withStrategyFlags`로 동적 추가된 챔피언 롤아웃 IS-MCTS 후보)이 포함됐는데,
+  기존 v2 벤치마크 러너는 원본(미확장) 어댑터에 `composeBot`을 호출해 이 플래그를
+  resolve하지 못했다(하스스톤 v2가 겪은 것과 동일한 버그 패턴). `withStrategyFlags`로
+  확장한 어댑터에 `composeBot`을 호출하도록 새 파일에서 수정 — **B열이 실제
+  ismcts-s128-cr 후보를 반영하는 것은 이 v3 측정이 처음**이다.
+- **v1(결과 1, A=36.6%/B=83.0%/C=6.9%, N=2,000)과 직접 비교 금지** — registry
+  기준선 버전(v2 vs v3)·합성 플래그·seed base/N·B열 봇의 성격(순정
+  `buyHighestPoints` 휴리스틱 vs IS-MCTS 탐색)이 전부 다르다.
+- N=400(30분 예산 내, IS-MCTS 128시뮬레이션 포함이라 v1의 N=2,000보다 낮춤 —
+  실측 총 소요 1661.5초). Opus봇은 기존 `splendor-opus-bot.ts` 그대로 재사용
+  (무수정 원칙 유지).
+- 관찰: v3(IS-MCTS 탐색봇)가 v1(순정 휴리스틱)보다 오히려 C열이 소폭 높다
+  (6.9%→11.3%, 둘 다 여전히 오퍼스를 압도) — 다른 문맥이라 "약해졌다"는 결론은
+  성립하지 않으며, 순수 탐색 기반 봇과 단순 휴리스틱 봇이 오퍼스의 특정 즉흥
+  설계에 대해 다른 강점 프로필을 가질 수 있다는 관찰로만 기록한다.
+
 ## 읽는 법
 
 - **채택 전략이 0개인 게임(장기·윙스팬·하스스톤)은 B열이 정의상 ~50%다** — 루프포지봇이

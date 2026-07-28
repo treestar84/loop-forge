@@ -30,6 +30,7 @@
   (산출물 신선도·3열 비교 실험 착수 전 점검) → `-7.md`(OpenSpiel 흡수: MCTS/IS-MCTS/
   MCCFR) → `-8.md`(고도화+전 게임 스윕, 오목 C열 카드 1~3) → `-9.md`(탐색 후보 자동
   추천 계층) → `-10.md`(4개 신규 카테고리 사전 진단: 숨은 진영·협동·실시간·대인원)
+  → `-11.md`(Opus봇 열세의 루프 설계 수준 근본 원인 R1~R5 + 초월 설계 D1~D6, Phase 1~4)
 - 벤치마크: 실험 설계 `docs/BENCHMARK-EXPERIMENT.md`, 실측 결과(1~7)
   `docs/BENCHMARK-LEADERBOARD.md`
 - 새 갭을 발견하면 새 GAP-ANALYSIS 문서에 기록하고 처치(구현/가이드/로드맵)를 명시한다.

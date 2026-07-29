@@ -1100,6 +1100,356 @@ const trashCoppersEagerly: StrategyFlagSpec<DominionObservation, DominionChoice>
   },
 };
 
+// --- GAP-11 Phase 3-C A8 domain redesign (design-brief-round1.md / main-loop
+// spec runs/dominion/design-brief-round1.md's own doc comment references) ---
+//
+// LossReport evidence (dominion-loss-mining.ts, this round): v2's
+// (rushProvinces) top mismatched decision point is chapelTrash (67.4%), far
+// above buy (18.1%) and action (6.8%) — v2 has a buy-priority axis but no
+// deck-density management at all. `chapelEconomy` below is the main loop's
+// own B3 design spec implemented verbatim (see the spec's own doc comment,
+// preserved in git history under runs/dominion/ as the round's design
+// input) — a from-scratch policy (does not layer on `base`, matching the
+// spec's explicit "합성 순서 함정 회피를 위해 단독 평가" instruction), plus
+// two mechanical parameter variants (B1) and one independent B2 design.
+//
+// Observation-range check (spec's own instruction, before implementing):
+// `DominionObservation.own.deckComposition` only covers the viewer's own
+// *draw pile* (this file's own doc comment on the field, above); hand/
+// discard/play are separate arrays. A viewer's full personal deck (the set
+// every "deck density" heuristic below needs) is therefore
+// hand + discard + play + deckComposition — all four are public to the
+// viewer themselves (no opponent information used, no approximation needed:
+// composition, not draw order, is all these heuristics require).
+
+/** Count of `name` across every zone of the *viewer's own* full deck
+ * (draw pile composition + hand + discard + play) — see the observation-
+ * range note above. */
+function ownCardCount(observation: DominionObservation, name: CardName): number {
+  return (
+    countOf(observation.own.hand, name) +
+    countOf(observation.own.discard, name) +
+    countOf(observation.own.play, name) +
+    (observation.own.deckComposition[name] ?? 0)
+  );
+}
+
+/** Total card count across the viewer's own full deck (all four zones). */
+function ownDeckSize(observation: DominionObservation): number {
+  return (
+    observation.own.hand.length +
+    observation.own.discard.length +
+    observation.own.play.length +
+    observation.own.deckCount
+  );
+}
+
+/** Real (not draw-order-dependent) money density: total coin value of owned
+ * treasures / total deck size. Matches the design spec's "실질 화폐 밀도". */
+function ownMoneyDensity(observation: DominionObservation): number {
+  const size = ownDeckSize(observation);
+  if (size === 0) return 0;
+  let money = 0;
+  for (const name of ['Copper', 'Silver', 'Gold'] as const) {
+    money += ownCardCount(observation, name) * CARD_DEFS[name].coins;
+  }
+  return money / size;
+}
+
+interface ChapelEconomyOptions {
+  /** Density threshold gating the 5-7 coin buy tier (spec default 1.0). */
+  readonly densityThreshold: number;
+  /** Remaining-Province count at/below which the "전환기" (transition)
+   * policy applies; above it is "성장기" (growth) (spec default 4). */
+  readonly transitionRemaining: number;
+}
+
+const CHAPEL_ECONOMY_DEFAULT: ChapelEconomyOptions = { densityThreshold: 1.0, transitionRemaining: 4 };
+
+function chapelEconomyIsGrowthPhase(observation: DominionObservation, options: ChapelEconomyOptions): boolean {
+  return (observation.supply.Province ?? 0) > options.transitionRemaining;
+}
+
+/**
+ * chapelTrash policy (spec §2, the round's primary target — chapelTrash is
+ * the 67.4% mismatch decision point): growth phase trashes Estate > Copper
+ * (only if the deck's total money value stays >= 3 after trashing it) >
+ * Curse, in that literal priority order (the spec's own order, not
+ * "most useless first" — implemented as written, not re-derived).
+ * Transition phase stops trashing entirely except Curse.
+ */
+function chapelEconomyTrashChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  growth: boolean,
+): DominionChoice | undefined {
+  const findTrash = (name: CardName): DominionChoice | undefined =>
+    legal.find((c) => c.kind === 'trashCard' && c.card === name);
+  const doneTrash = legal.find((c) => c.kind === 'doneTrash');
+
+  if (!growth) {
+    return findTrash('Curse') ?? doneTrash;
+  }
+
+  const estate = findTrash('Estate');
+  if (estate) return estate;
+
+  const copper = findTrash('Copper');
+  if (copper) {
+    const totalMoney =
+      ownCardCount(observation, 'Copper') * CARD_DEFS.Copper.coins +
+      ownCardCount(observation, 'Silver') * CARD_DEFS.Silver.coins +
+      ownCardCount(observation, 'Gold') * CARD_DEFS.Gold.coins;
+    if (totalMoney - CARD_DEFS.Copper.coins >= 3) return copper;
+  }
+
+  const curse = findTrash('Curse');
+  if (curse) return curse;
+
+  return doneTrash;
+}
+
+/**
+ * Buy policy (spec §3, density-derived): Province at 8+ always; at 5-7,
+ * Gold-then-Silver when density is below threshold, else Duchy but only in
+ * the transition phase; at 3-4, one-time Chapel (if not yet owned) else
+ * Silver in growth phase; transition-phase endgame (remaining Province <= 2)
+ * also takes Estate for VP mop-up. Returns undefined when no rule fires (the
+ * caller falls through to the standalone heuristic fallback).
+ */
+function chapelEconomyBuyChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  options: ChapelEconomyOptions,
+): DominionChoice | undefined {
+  const findBuy = (name: CardName): DominionChoice | undefined =>
+    legal.find((c) => c.kind === 'buy' && c.card === name);
+  const remainingProvince = observation.supply.Province ?? 0;
+  const growth = chapelEconomyIsGrowthPhase(observation, options);
+  const coins = observation.coins;
+
+  if (coins >= 8) {
+    const province = findBuy('Province');
+    if (province) return province;
+  }
+
+  if (!growth && remainingProvince <= 2) {
+    const estate = findBuy('Estate');
+    if (estate) return estate;
+  }
+
+  if (coins >= 5 && coins <= 7) {
+    const density = ownMoneyDensity(observation);
+    if (density < options.densityThreshold) {
+      const gold = findBuy('Gold');
+      if (gold) return gold;
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    } else if (!growth) {
+      const duchy = findBuy('Duchy');
+      if (duchy) return duchy;
+    }
+  }
+
+  if (coins >= 3 && coins <= 4) {
+    const ownsChapel = ownCardCount(observation, 'Chapel') > 0;
+    if (!ownsChapel) {
+      const chapel = findBuy('Chapel');
+      if (chapel) return chapel;
+    } else if (growth) {
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    }
+  }
+
+  return undefined;
+}
+
+/** action policy (spec §4): Chapel only in the growth phase, everything else
+ * via the standalone fallback's existing order (draw/coin cards first). */
+function chapelEconomyActionLegal(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  options: ChapelEconomyOptions,
+): readonly DominionChoice[] {
+  if (chapelEconomyIsGrowthPhase(observation, options)) return legal;
+  const filtered = legal.filter((c) => !(c.kind === 'playAction' && c.card === 'Chapel'));
+  return filtered.length > 0 ? filtered : legal;
+}
+
+/**
+ * Builds a `chapelEconomy*` StrategyFlagSpec. Standalone (ignores `base`
+ * entirely, per the spec's "단독 평가" instruction) — ungoverned decision
+ * points (workshopGain, militiaDiscard, and any buy/action/chapelTrash case
+ * none of the rules above fire on) fall through to a fresh
+ * `heuristicBaseline` instance, never to `base`.
+ */
+function chapelEconomyFlagSpec(
+  flag: string,
+  options: ChapelEconomyOptions,
+  description: string,
+): StrategyFlagSpec<DominionObservation, DominionChoice> {
+  return {
+    flag,
+    description,
+    apply() {
+      return (seed) => {
+        const fallback = heuristicBaseline(seed);
+        return {
+          id: `dominion-heuristic+${flag}`,
+          decide(decisionPoint, observation, legal) {
+            if (decisionPoint === 'chapelTrash') {
+              const growth = chapelEconomyIsGrowthPhase(observation, options);
+              return chapelEconomyTrashChoice(observation, legal, growth) ?? fallback.decide(decisionPoint, observation, legal);
+            }
+            if (decisionPoint === 'buy') {
+              return chapelEconomyBuyChoice(observation, legal, options) ?? fallback.decide(decisionPoint, observation, legal);
+            }
+            if (decisionPoint === 'action') {
+              return fallback.decide(decisionPoint, observation, chapelEconomyActionLegal(observation, legal, options));
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          },
+        };
+      };
+    },
+  };
+}
+
+/** B3-deep (main loop design, this round's primary A8 candidate). */
+const chapelEconomy = chapelEconomyFlagSpec(
+  'chapelEconomy',
+  CHAPEL_ECONOMY_DEFAULT,
+  'B3 deep design (GAP-11 Phase 3-C A8, main-loop spec): deck-money-density-aware Chapel trash policy + density-derived buy policy, standalone. Targets the LossReport\'s #1 mismatched decision point (chapelTrash, 67.4%). See runs/dominion/design-brief-round1.md.',
+);
+
+/** B1-exploit mechanical variant: lower density trigger (more eager Gold/Silver). */
+const chapelEconomyD08 = chapelEconomyFlagSpec(
+  'chapelEconomy-d08',
+  { densityThreshold: 0.8, transitionRemaining: 4 },
+  'B1 mechanical variant of chapelEconomy: density threshold 1.0 -> 0.8 (earlier Gold/Silver reinforcement trigger).',
+);
+
+/** B1-exploit mechanical variant: later transition trigger (longer growth phase). */
+const chapelEconomyLate3 = chapelEconomyFlagSpec(
+  'chapelEconomy-late3',
+  { densityThreshold: 1.0, transitionRemaining: 3 },
+  'B1 mechanical variant of chapelEconomy: transition trigger remaining-Province 4 -> 3 (growth phase runs one Province longer).',
+);
+
+/**
+ * B2-opponent (this round's own design, GAP-11 Phase 3-C — deliberately a
+ * different approach from B3's dense trash+density policy): the LossReport's
+ * #2 mismatched decision point is `buy` (18.1%); this candidate targets it
+ * directly with a plain money-first buy order and sidesteps the #1
+ * mismatched point (chapelTrash, 67.4%) entirely by never trashing anything
+ * (always `doneTrash` immediately) rather than trying to get the trash
+ * policy right — a genuinely different bet than B3's "fix chapelTrash"
+ * approach: "avoid the risky decision, win on a simpler curve instead."
+ * Standalone (same convention as chapelEconomy above).
+ */
+const simpleEconomyNoTrash: StrategyFlagSpec<DominionObservation, DominionChoice> = {
+  flag: 'simpleEconomyNoTrash',
+  description:
+    'B2 opponent-info design (GAP-11 Phase 3-C): plain money-first buy order (Province>=8, Gold>=6, late Duchy>=5, Silver>=3, late Estate mop-up) targeting the buy mismatch (18.1%); never trashes (always doneTrash immediately), sidestepping the chapelTrash mismatch (67.4%) rather than fixing it. Standalone.',
+  apply() {
+    return (seed) => {
+      const fallback = heuristicBaseline(seed);
+      return {
+        id: 'dominion-heuristic+simpleEconomyNoTrash',
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'chapelTrash') {
+            const doneTrash = legal.find((c) => c.kind === 'doneTrash');
+            if (doneTrash) return doneTrash;
+            return fallback.decide(decisionPoint, observation, legal);
+          }
+          if (decisionPoint === 'buy') {
+            const findBuy = (name: CardName): DominionChoice | undefined =>
+              legal.find((c) => c.kind === 'buy' && c.card === name);
+            const remainingProvince = observation.supply.Province ?? 0;
+            const coins = observation.coins;
+
+            if (coins >= 8) {
+              const province = findBuy('Province');
+              if (province) return province;
+            }
+            if (coins >= 6) {
+              const gold = findBuy('Gold');
+              if (gold) return gold;
+            }
+            if (remainingProvince <= 4 && coins >= 5) {
+              const duchy = findBuy('Duchy');
+              if (duchy) return duchy;
+            }
+            if (coins >= 3) {
+              const silver = findBuy('Silver');
+              if (silver) return silver;
+            }
+            if (remainingProvince <= 2) {
+              const estate = findBuy('Estate');
+              if (estate) return estate;
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          }
+          return fallback.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
+/**
+ * B4-explore (A5 tree prior, this round's untried axis): static per-choice
+ * value evaluator (ADR-0011) for use as an IS-MCTS `priorSource:
+ * 'choiceEvaluator'` — buy value tiers roughly mirroring the opus bot's own
+ * priorities, trash value tiers (Curse/Estate/Copper preferred), and a light
+ * cantrip-synergy score for playAction; every other choice kind (endActions,
+ * endBuy, doneTrash, gainCard, discardCard) is left neutral (score 0) since
+ * this evaluator's job is only to bias search toward promising buy/trash/
+ * action choices, not to fully replace the rollout policy.
+ */
+function dominionBuyValueScore(card: CardName, state: DominionState, player: PlayerId): number {
+  const remainingProvince = state.supply.Province ?? 0;
+  if (card === 'Province') return 100;
+  if (card === 'Curse') return -50;
+  if (card === 'Gold') return 70;
+  if (card === 'Duchy') return remainingProvince <= 4 ? 55 : 20;
+  if (card === 'Silver') return 40;
+  if (card === 'Estate') return remainingProvince <= 2 ? 25 : 5;
+  if (card === 'Chapel') {
+    const owns = getPlayer(state, player).deck.some((c) => c === 'Chapel') ||
+      getPlayer(state, player).hand.some((c) => c === 'Chapel') ||
+      getPlayer(state, player).discard.some((c) => c === 'Chapel') ||
+      getPlayer(state, player).play.some((c) => c === 'Chapel');
+    return owns ? 10 : 45;
+  }
+  const def = CARD_DEFS[card];
+  return 30 + def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+}
+
+function dominionTrashValueScore(card: CardName): number {
+  if (card === 'Curse') return 100;
+  if (card === 'Estate') return 60;
+  if (card === 'Copper') return 40;
+  return -50;
+}
+
+function dominionChoiceEvaluator(
+  state: DominionState,
+  player: PlayerId,
+  choices: readonly DominionChoice[],
+): readonly number[] {
+  return choices.map((choice) => {
+    if (choice.kind === 'buy') return dominionBuyValueScore(choice.card, state, player);
+    if (choice.kind === 'trashCard') return dominionTrashValueScore(choice.card);
+    if (choice.kind === 'playAction') {
+      const def = CARD_DEFS[choice.card];
+      return def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+    }
+    return 0;
+  });
+}
+
 /**
  * Replay fixtures: random-vs-random self-play, captured by actually running
  * this adapter (see src/reference/__tests__/dominion.test.ts generation
@@ -1301,5 +1651,14 @@ export const dominionAdapter: GameAdapter<DominionState, DominionObservation, Do
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [rushProvinces, playCheapestActionFirst, trashCoppersEagerly],
+  strategySurface: [
+    rushProvinces,
+    playCheapestActionFirst,
+    trashCoppersEagerly,
+    chapelEconomy,
+    chapelEconomyD08,
+    chapelEconomyLate3,
+    simpleEconomyNoTrash,
+  ],
+  choiceEvaluator: dominionChoiceEvaluator,
 };

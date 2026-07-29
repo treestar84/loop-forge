@@ -1,4 +1,4 @@
-import { dominionAdapter, type DominionChoice, type DominionState } from '../dominion';
+import { dominionAdapter, type DominionChoice, type DominionObservation, type DominionState } from '../dominion';
 import { createRng } from '../../kernel/rng';
 
 function playSelfPlay(
@@ -294,6 +294,182 @@ describe('dominion strategySurface (C6)', () => {
       state = adapter.applyChoice(state, choice) as DominionState;
     }
     expect(found).toBe(true);
+  });
+});
+
+describe('dominion chapelEconomy (GAP-11 Phase 3-C A8, B3 deep design)', () => {
+  function findFlag(flag: string) {
+    const found = dominionAdapter.strategySurface.find((f) => f.flag === flag);
+    if (!found) throw new Error(`strategy flag not found: ${flag}`);
+    return found;
+  }
+
+  /** Full DominionObservation fixture with sane, self-consistent defaults —
+   * deterministic synthetic-observation testing (rather than a self-play
+   * search) since chapelEconomy's growth/transition/density branches are
+   * conditions on Province-supply level and deck composition that pure
+   * random self-play only reaches by chance within any reasonable step
+   * budget (verified: a rushProvinces-composed driver still needed ~800
+   * steps/seed across 30 seeds without ever depleting the Province pile
+   * below 8, since neither driver reliably accumulates 8 coins). decide()
+   * only consumes (decisionPoint, observation, legal) — no state access — so
+   * a hand-built observation is a legitimate, much more reliable way to pin
+   * each branch exactly. */
+  function fixtureObservation(overrides: Partial<DominionObservation> = {}): DominionObservation {
+    return {
+      self: 0,
+      active: 0,
+      phase: 'buy',
+      actions: 1,
+      buys: 1,
+      coins: 0,
+      supply: {
+        Copper: 60, Silver: 40, Gold: 30, Estate: 8, Duchy: 8, Province: 8, Curse: 10,
+        Village: 10, Smithy: 10, Laboratory: 10, Festival: 10, Market: 10, Woodcutter: 10,
+        CouncilRoom: 10, Witch: 10, Militia: 10, Moat: 10, Chapel: 10, Workshop: 10,
+      },
+      kingdomCards: ['Chapel', 'Village', 'Smithy', 'Laboratory', 'Festival', 'Market', 'Woodcutter', 'CouncilRoom', 'Witch', 'Moat'],
+      pending: null,
+      trash: [],
+      own: {
+        hand: [],
+        discard: [],
+        play: [],
+        deckCount: 0,
+        deckComposition: {},
+        turnsTaken: 5,
+      },
+      opponent: {
+        handCount: 5,
+        discard: [],
+        play: [],
+        deckCount: 10,
+        turnsTaken: 5,
+      },
+      ...overrides,
+    };
+  }
+
+  it('growth phase (remaining Province >= 5): trashes Estate over Copper on a chapelTrash decision', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+
+    const observation = fixtureObservation({
+      supply: { ...fixtureObservation().supply, Province: 6 },
+      own: { hand: ['Estate', 'Copper', 'Copper'], discard: [], play: ['Chapel'], deckCount: 7, deckComposition: { Copper: 7 }, turnsTaken: 3 },
+    });
+    const legal: readonly DominionChoice[] = [
+      { kind: 'trashCard', card: 'Estate' },
+      { kind: 'trashCard', card: 'Copper' },
+      { kind: 'doneTrash' },
+    ];
+
+    const choice = variantBot.decide('chapelTrash', observation, legal);
+    expect(choice).toEqual({ kind: 'trashCard', card: 'Estate' });
+  });
+
+  it('growth phase, no Estate legal: trashes Copper only while the deck keeps >= 3 total money after the trash', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    const legal: readonly DominionChoice[] = [{ kind: 'trashCard', card: 'Copper' }, { kind: 'doneTrash' }];
+
+    // 4 total money (4 Coppers) -> after trashing one, 3 remain: at the floor, still allowed.
+    const okObservation = fixtureObservation({
+      supply: { ...fixtureObservation().supply, Province: 6 },
+      own: { hand: ['Copper', 'Copper'], discard: [], play: ['Chapel'], deckCount: 2, deckComposition: { Copper: 2 }, turnsTaken: 3 },
+    });
+    expect(variantBot.decide('chapelTrash', okObservation, legal)).toEqual({ kind: 'trashCard', card: 'Copper' });
+
+    // 2 total money (2 Coppers) -> after trashing one, 1 remains: below the floor, refuses.
+    const belowFloorObservation = fixtureObservation({
+      supply: { ...fixtureObservation().supply, Province: 6 },
+      own: { hand: ['Copper'], discard: [], play: ['Chapel'], deckCount: 1, deckComposition: { Copper: 1 }, turnsTaken: 3 },
+    });
+    expect(variantBot.decide('chapelTrash', belowFloorObservation, legal)).toEqual({ kind: 'doneTrash' });
+  });
+
+  it('transition phase (remaining Province <= 4): stops trashing entirely (Copper not legal to pick) even when nothing else fires', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    const observation = fixtureObservation({
+      supply: { ...fixtureObservation().supply, Province: 4 },
+      own: { hand: ['Copper', 'Copper'], discard: [], play: ['Chapel'], deckCount: 2, deckComposition: { Copper: 2 }, turnsTaken: 12 },
+    });
+    const legal: readonly DominionChoice[] = [{ kind: 'trashCard', card: 'Copper' }, { kind: 'doneTrash' }];
+
+    expect(variantBot.decide('chapelTrash', observation, legal)).toEqual({ kind: 'doneTrash' });
+  });
+
+  it('transition phase: Curse is the sole exception — still trashed even though trashing is otherwise halted', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    const observation = fixtureObservation({
+      supply: { ...fixtureObservation().supply, Province: 4 },
+      own: { hand: ['Copper', 'Curse'], discard: [], play: ['Chapel'], deckCount: 2, deckComposition: { Copper: 2 }, turnsTaken: 12 },
+    });
+    const legal: readonly DominionChoice[] = [
+      { kind: 'trashCard', card: 'Copper' },
+      { kind: 'trashCard', card: 'Curse' },
+      { kind: 'doneTrash' },
+    ];
+
+    expect(variantBot.decide('chapelTrash', observation, legal)).toEqual({ kind: 'trashCard', card: 'Curse' });
+  });
+
+  it('density-based buy at 5-7 coins: low money density (all-Copper deck) buys Gold over Silver/Duchy', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    // 7 Coppers total (deck size 7) -> density = 7/7 = 1.0... use fewer
+    // coppers than deck slots by including a low-value action card so
+    // density stays clearly under the 1.0 default threshold: money=4
+    // (4 Coppers), deck size=6 (4 Coppers + 2 Village) -> density=0.667.
+    const observation = fixtureObservation({
+      coins: 6,
+      own: { hand: ['Copper', 'Copper', 'Village'], discard: ['Village'], play: [], deckCount: 2, deckComposition: { Copper: 2 }, turnsTaken: 4 },
+    });
+    const legal: readonly DominionChoice[] = [
+      { kind: 'buy', card: 'Gold' },
+      { kind: 'buy', card: 'Silver' },
+      { kind: 'buy', card: 'Duchy' },
+      { kind: 'endBuy' },
+    ];
+
+    expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Gold' });
+  });
+
+  it('density-based buy at 5-7 coins: high money density in the transition phase buys Duchy instead of Gold/Silver', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    // Money=9 (3 Gold) over deck size 3 -> density=3.0 (>> 1.0 threshold).
+    const observation = fixtureObservation({
+      coins: 6,
+      supply: { ...fixtureObservation().supply, Province: 3 }, // transition (<= 4)
+      own: { hand: ['Gold', 'Gold', 'Gold'], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 15 },
+    });
+    const legal: readonly DominionChoice[] = [
+      { kind: 'buy', card: 'Gold' },
+      { kind: 'buy', card: 'Silver' },
+      { kind: 'buy', card: 'Duchy' },
+      { kind: 'endBuy' },
+    ];
+
+    expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Duchy' });
+  });
+
+  it('always buys Province at 8+ coins regardless of phase/density', () => {
+    const flag = findFlag('chapelEconomy');
+    const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+    const observation = fixtureObservation({
+      coins: 8,
+      own: { hand: ['Gold', 'Gold', 'Copper'], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 6 },
+    });
+    const legal: readonly DominionChoice[] = [
+      { kind: 'buy', card: 'Province' },
+      { kind: 'buy', card: 'Gold' },
+      { kind: 'endBuy' },
+    ];
+
+    expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Province' });
   });
 });
 

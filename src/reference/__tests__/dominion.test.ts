@@ -1,5 +1,6 @@
 import { dominionAdapter, type DominionChoice, type DominionObservation, type DominionState } from '../dominion';
 import { createRng } from '../../kernel/rng';
+import { dominionOpusBot } from '../experiments/dominion-opus-bot';
 
 function playSelfPlay(
   seed: number,
@@ -552,5 +553,293 @@ describe('dominion sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () => {
     const arrangementOf = (s: DominionState): string =>
       JSON.stringify([s.players[decision.player]!.deck, s.players[opponentId]!.hand, s.players[opponentId]!.deck]);
     expect(arrangementOf(sampledA)).not.toEqual(arrangementOf(sampledB));
+  });
+});
+
+describe('dominion round-2 candidate batch (GAP-11 Phase 4-C, scratchpad/dominion-round2-design-spec.md)', () => {
+  function findFlag(flag: string) {
+    const found = dominionAdapter.strategySurface.find((f) => f.flag === flag);
+    if (!found) throw new Error(`strategy flag not found: ${flag}`);
+    return found;
+  }
+
+  /** Same fixture shape as the 'dominion chapelEconomy' describe block above
+   * (this file) — hand-built DominionObservation so growth/transition/
+   * density/tally branches are pinned exactly rather than reached by chance
+   * self-play. */
+  function fixtureObservation(overrides: Partial<DominionObservation> = {}): DominionObservation {
+    return {
+      self: 0,
+      active: 0,
+      phase: 'buy',
+      actions: 1,
+      buys: 1,
+      coins: 0,
+      supply: {
+        Copper: 60, Silver: 40, Gold: 30, Estate: 8, Duchy: 8, Province: 8, Curse: 10,
+        Village: 10, Smithy: 10, Laboratory: 10, Festival: 10, Market: 10, Woodcutter: 10,
+        CouncilRoom: 10, Witch: 10, Militia: 10, Moat: 10, Chapel: 10, Workshop: 10,
+      },
+      kingdomCards: ['Chapel', 'Village', 'Smithy', 'Laboratory', 'Festival', 'Market', 'Woodcutter', 'CouncilRoom', 'Witch', 'Moat'],
+      pending: null,
+      trash: [],
+      own: {
+        hand: [],
+        discard: [],
+        play: [],
+        deckCount: 0,
+        deckComposition: {},
+        turnsTaken: 5,
+      },
+      opponent: {
+        handCount: 5,
+        discard: [],
+        play: [],
+        deckCount: 10,
+        turnsTaken: 5,
+      },
+      ...overrides,
+    };
+  }
+
+  describe('chapelEconomyV2 (B3 redesign)', () => {
+    it('preserves chapelEconomy\'s chapelTrash policy verbatim (growth phase: Estate over Copper)', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        supply: { ...fixtureObservation().supply, Province: 6 },
+        own: { hand: ['Estate', 'Copper', 'Copper'], discard: [], play: ['Chapel'], deckCount: 7, deckComposition: { Copper: 7 }, turnsTaken: 3 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'trashCard', card: 'Estate' },
+        { kind: 'trashCard', card: 'Copper' },
+        { kind: 'doneTrash' },
+      ];
+      expect(variantBot.decide('chapelTrash', observation, legal)).toEqual({ kind: 'trashCard', card: 'Estate' });
+    });
+
+    it('contests Duchy at coins>=5 once transitioning, even at low money density (v1 would have bought Gold/Silver instead)', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      // Transition phase (Province=4<=4), density well below 1.0 (2 Coppers over deck size 6).
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 4 },
+        own: { hand: ['Copper', 'Copper', 'Village'], discard: ['Village', 'Village'], play: [], deckCount: 1, deckComposition: { Copper: 1 }, turnsTaken: 10 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Duchy' },
+        { kind: 'buy', card: 'Gold' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Duchy' });
+    });
+
+    it('buys Witch at the 5-coin tier ahead of Silver when Curses remain and owned Witches < cap', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 8, Curse: 10 }, // growth phase — no Duchy competition
+        own: { hand: [], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 4 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Witch' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Witch' });
+    });
+
+    it('falls back to Laboratory at the 5-coin tier once Witches are capped (v1 never buys either)', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 8, Curse: 10 },
+        own: { hand: ['Witch', 'Witch'], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 8 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Laboratory' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Laboratory' });
+    });
+
+    it('action phase: plays Witch immediately over Chapel while Curses remain', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        phase: 'action',
+        supply: { ...fixtureObservation().supply, Curse: 10 },
+        own: { hand: ['Witch', 'Chapel'], discard: [], play: [], deckCount: 5, deckComposition: {}, turnsTaken: 4 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'playAction', card: 'Witch' },
+        { kind: 'playAction', card: 'Chapel' },
+        { kind: 'endActions' },
+      ];
+      expect(variantBot.decide('action', observation, legal)).toEqual({ kind: 'playAction', card: 'Witch' });
+    });
+
+    it('action phase: allows a junk-clearing Chapel even in transition phase (v1 bans Chapel outright once transitioning)', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        phase: 'action',
+        supply: { ...fixtureObservation().supply, Province: 3, Curse: 0 }, // transition phase, no Curse to trigger Witch priority
+        own: { hand: ['Chapel', 'Curse'], discard: [], play: [], deckCount: 5, deckComposition: {}, turnsTaken: 12 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'playAction', card: 'Chapel' },
+        { kind: 'endActions' },
+      ];
+      expect(variantBot.decide('action', observation, legal)).toEqual({ kind: 'playAction', card: 'Chapel' });
+    });
+
+    it('action phase: refuses a pointless Chapel when no junk is in hand (unlike v1\'s unconditional growth-phase legality)', () => {
+      const flag = findFlag('chapelEconomyV2');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        phase: 'action',
+        supply: { ...fixtureObservation().supply, Province: 8, Curse: 0 }, // growth phase, no Curse
+        own: { hand: ['Chapel', 'Silver', 'Gold'], discard: [], play: [], deckCount: 5, deckComposition: {}, turnsTaken: 6 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'playAction', card: 'Chapel' },
+        { kind: 'endActions' },
+      ];
+      expect(variantBot.decide('action', observation, legal)).toEqual({ kind: 'endActions' });
+    });
+  });
+
+  describe('chapelEconomyV2-noGreen (B1 element isolation)', () => {
+    it('never buys Duchy/Estate regardless of remaining Province — only Province-at-8 greens', () => {
+      const flag = findFlag('chapelEconomyV2-noGreen');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 1, Curse: 0 }, // deep transition, no Curse (no Witch competing)
+        own: { hand: [], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 20 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Duchy' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      // Density (0) < threshold (1.0) so the Silver fallback fires instead of Duchy.
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Silver' });
+    });
+  });
+
+  describe('chapelEconomyV2-clonebuy (B1 element isolation)', () => {
+    it('still contests Duchy on the buy side (V2 buy kept in full)', () => {
+      const flag = findFlag('chapelEconomyV2-clonebuy');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 4 },
+        own: { hand: ['Copper', 'Copper'], discard: [], play: [], deckCount: 1, deckComposition: { Copper: 1 }, turnsTaken: 10 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Duchy' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Duchy' });
+    });
+
+    it('reverts to v1\'s blanket transition-phase Chapel ban on the action side (no junk-gating)', () => {
+      const flag = findFlag('chapelEconomyV2-clonebuy');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        phase: 'action',
+        supply: { ...fixtureObservation().supply, Province: 3, Curse: 0 }, // transition phase
+        own: { hand: ['Chapel', 'Curse'], discard: [], play: [], deckCount: 5, deckComposition: {}, turnsTaken: 12 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'playAction', card: 'Chapel' },
+        { kind: 'endActions' },
+      ];
+      // v1's chapelEconomyActionLegal filters Chapel out of the legal set entirely once !growth.
+      expect(variantBot.decide('action', observation, legal)).toEqual({ kind: 'endActions' });
+    });
+  });
+
+  describe('witchRushNoTrash (B2)', () => {
+    it('never trashes (always doneTrash immediately)', () => {
+      const flag = findFlag('witchRushNoTrash');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        own: { hand: ['Curse', 'Copper'], discard: [], play: ['Chapel'], deckCount: 5, deckComposition: {}, turnsTaken: 3 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'trashCard', card: 'Curse' },
+        { kind: 'trashCard', card: 'Copper' },
+        { kind: 'doneTrash' },
+      ];
+      expect(variantBot.decide('chapelTrash', observation, legal)).toEqual({ kind: 'doneTrash' });
+    });
+
+    it('buys Witch at the 5-coin tier ahead of Duchy/Silver', () => {
+      const flag = findFlag('witchRushNoTrash');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        coins: 5,
+        supply: { ...fixtureObservation().supply, Province: 4, Curse: 10 },
+        own: { hand: [], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 4 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Witch' },
+        { kind: 'buy', card: 'Duchy' },
+        { kind: 'buy', card: 'Silver' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual({ kind: 'buy', card: 'Witch' });
+    });
+
+    it('action phase: plays Witch immediately while Curses remain', () => {
+      const flag = findFlag('witchRushNoTrash');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(1);
+      const observation = fixtureObservation({
+        phase: 'action',
+        supply: { ...fixtureObservation().supply, Curse: 10 },
+        own: { hand: ['Witch', 'Smithy'], discard: [], play: [], deckCount: 5, deckComposition: {}, turnsTaken: 4 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'playAction', card: 'Witch' },
+        { kind: 'playAction', card: 'Smithy' },
+        { kind: 'endActions' },
+      ];
+      expect(variantBot.decide('action', observation, legal)).toEqual({ kind: 'playAction', card: 'Witch' });
+    });
+  });
+
+  describe('opusCloneDominion (B4)', () => {
+    it('apply() returns dominionOpusBot itself (zero-drift wrapping, not a re-derived copy)', () => {
+      const flag = findFlag('opusCloneDominion');
+      const variantFactory = flag.apply(dominionAdapter.baselines.random);
+      const variantBot = variantFactory(7);
+      expect(variantBot.id).toBe('dominion-opus');
+    });
+
+    it('reproduces dominionOpusBot\'s own buy decision exactly given the same seed/observation/legal set', () => {
+      const flag = findFlag('opusCloneDominion');
+      const variantBot = flag.apply(dominionAdapter.baselines.random)(42);
+      const referenceBot = dominionOpusBot(42);
+
+      const observation = fixtureObservation({
+        coins: 8,
+        own: { hand: ['Gold', 'Gold', 'Copper'], discard: [], play: [], deckCount: 0, deckComposition: {}, turnsTaken: 6 },
+      });
+      const legal: readonly DominionChoice[] = [
+        { kind: 'buy', card: 'Province' },
+        { kind: 'buy', card: 'Gold' },
+        { kind: 'endBuy' },
+      ];
+      expect(variantBot.decide('buy', observation, legal)).toEqual(referenceBot.decide('buy', observation, legal));
+    });
   });
 });

@@ -62,6 +62,15 @@ import type {
   StrategyFlagSpec,
 } from '../contract/types';
 import { createRng, shuffled } from '../kernel/rng';
+// `../experiments/dominion-opus-bot` is still the `reference` layer (only the
+// top-level directory matters for src/__tests__/dependency-rules.test.ts's
+// layer check), so this edge is allowed; the reverse edge
+// (dominion-opus-bot.ts importing CardName/DominionChoice/DominionObservation
+// from this file) is `import type`-only and erased at compile time, so there
+// is no runtime circular import. Used only by `opusCloneDominion` below
+// (GAP-11 Phase 4-C B4) to wrap the L2 feedback anchor as a strategy flag
+// with zero drift risk from a hand-copied re-derivation.
+import { dominionOpusBot } from './experiments/dominion-opus-bot';
 
 export type CardName =
   | 'Copper'
@@ -1398,6 +1407,364 @@ const simpleEconomyNoTrash: StrategyFlagSpec<DominionObservation, DominionChoice
   },
 };
 
+// --- GAP-11 Phase 4-C round-2 candidate batch (main-loop design spec,
+// scratchpad/dominion-round2-design-spec.md, "그대로 구현" — implemented
+// verbatim, no ad-hoc deviation) ---
+//
+// Evidence this batch responds to (dominion-loss-mining-round2.ts /
+// design-brief-round2.md): (1) v3 (=plain chapelEconomy, composeBot's
+// override semantics collapse the v3 flag list to this single flag) scored
+// L2=16.8%; (2) chapelTrash mismatch fell from 67.4% (v2) to 3.2% (v3) — A8's
+// trash redesign already converged with L2, leave it untouched; (3) the
+// mismatch bottleneck moved to action (19.4%) and buy (16.4%); (4) gomoku's
+// Phase 4-A/4-B/4-B2 lesson (design-brief-round2.md's own "오목 2·3회전
+// 교훈" section): imitation transfers best at the prior/evaluation level, not
+// as a literal action-by-action copy.
+//
+// IMPORTANT caveat carried over from dominion-loss-mining-round2.ts's own doc
+// comment: loss-mining.ts rebuilds the anchor bot fresh at *every single*
+// decisionIndex (its "per-decision anchor derivation" convention, needed so
+// scoreAgainstProbes can replay one decision in isolation) — so
+// dominion-opus-bot.ts's internal `owned` card tally is always reset to the
+// turn-1 starting deck when queried this way. A LossReport divergence like
+// "candidate bought Silver, anchor would have bought Chapel/Witch/Laboratory"
+// deep into a real game is largely this reconstruction artifact (the L2
+// snapshot always "thinks" it is still early game), not a real L2 policy the
+// candidates below should imitate verbatim. The B3/B1 designs below were
+// built by reading dominion-opus-bot.ts's *source* for buy/action elements
+// v1 chapelEconomy structurally lacks (Witch/Laboratory awareness, Duchy-pile
+// contesting timing, junk-gated Chapel), not by copying the raw divergence
+// pairs — the two LossReport patterns that are NOT artifacts (real
+// observation-driven, not owned-tally-driven) are (a) buy:Estate/Gold/Silver
+// vs buy:Duchy (415/1160 buy mismatches) — v1's Duchy trigger is gated behind
+// its money-density check and rarely fires, while dominion-opus-bot.ts's
+// Duchy trigger is purely `provinceLeft <= 4`, no density gate — and (b) the
+// action-phase Chapel gating pairs (781/1005 action mismatches,
+// endActions<->playAction:Chapel both directions) — v1 bans Chapel outright
+// once transitioning, while dominion-opus-bot.ts's `chooseAction` gates
+// Chapel on real hand contents (`junkInHand`, unaffected by the tally quirk
+// since it reads `observation.own.hand` directly) in every phase.
+
+/** B3 redesign's buy tier count caps — mirrors dominion-opus-bot.ts's
+ * MAX_WITCHES=2/MAX_LABS=3, kept slightly more conservative on Labs (2, not
+ * 3) since chapelEconomyV2 still contests Provinces earlier via its Duchy
+ * reorder below and does not want to over-invest turns in card-smoothing at
+ * the expense of that. */
+const CHAPEL_ECONOMY_V2_MAX_WITCHES = 2;
+const CHAPEL_ECONOMY_V2_MAX_LABS = 2;
+
+/**
+ * B3 buy redesign (design-spec §"buy 재설계"). Keeps chapelEconomy's
+ * Province-at-8 and one-time-Chapel rules verbatim; changes two things read
+ * directly off dominion-opus-bot.ts's source:
+ *   1. Endgame greening reordered: contest the Duchy pile at coins>=5 as soon
+ *      as the transition phase starts (remainingProvince<=options.
+ *      transitionRemaining), matching dominion-opus-bot.ts's
+ *      `provinceLeft <= 4` trigger — NOT gated behind the money-density
+ *      check v1 used (v1's Duchy branch only fired when density stayed >=
+ *      threshold, a rare state early in the transition phase, so v1
+ *      chronically under-bought Duchy relative to L2). Estate mop-up
+ *      (remainingProvince<=2) is now a fallback for when Duchy is
+ *      unaffordable/depleted, not a competing priority that fires first.
+ *   2. Witch (up to CHAPEL_ECONOMY_V2_MAX_WITCHES copies, while Curses remain
+ *      in supply) and Laboratory (up to CHAPEL_ECONOMY_V2_MAX_LABS copies)
+ *      added ahead of the density-gated Silver fallback at the 5-7 coin
+ *      tier — v1 chapelEconomy had no attack-card or draw-smoothing
+ *      awareness whatsoever.
+ * `includeGreeningReorder=false` (chapelEconomyV2-noGreen, B1) drops item 1
+ * entirely (no Duchy/Estate buying at all outside the Province-at-8 rule) —
+ * an element-contribution isolation, not a standalone design of its own.
+ */
+function chapelEconomyV2BuyChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  options: ChapelEconomyOptions,
+  includeGreeningReorder: boolean,
+): DominionChoice | undefined {
+  const findBuy = (name: CardName): DominionChoice | undefined =>
+    legal.find((c) => c.kind === 'buy' && c.card === name);
+  const remainingProvince = observation.supply.Province ?? 0;
+  const growth = chapelEconomyIsGrowthPhase(observation, options);
+  const coins = observation.coins;
+
+  if (coins >= 8) {
+    const province = findBuy('Province');
+    if (province) return province;
+  }
+
+  if (includeGreeningReorder && !growth) {
+    if (coins >= 5) {
+      const duchy = findBuy('Duchy');
+      if (duchy) return duchy;
+    }
+    if (remainingProvince <= 2) {
+      const estate = findBuy('Estate');
+      if (estate) return estate;
+    }
+  }
+
+  if (coins >= 6) {
+    const gold = findBuy('Gold');
+    if (gold) return gold;
+  }
+
+  if (coins >= 5) {
+    if (ownCardCount(observation, 'Witch') < CHAPEL_ECONOMY_V2_MAX_WITCHES && (observation.supply.Curse ?? 0) > 0) {
+      const witch = findBuy('Witch');
+      if (witch) return witch;
+    }
+    if (ownCardCount(observation, 'Laboratory') < CHAPEL_ECONOMY_V2_MAX_LABS) {
+      const lab = findBuy('Laboratory');
+      if (lab) return lab;
+    }
+    const density = ownMoneyDensity(observation);
+    if (density < options.densityThreshold) {
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    }
+  }
+
+  if (coins >= 3 && coins <= 4) {
+    const ownsChapel = ownCardCount(observation, 'Chapel') > 0;
+    if (!ownsChapel) {
+      const chapel = findBuy('Chapel');
+      if (chapel) return chapel;
+    } else if (growth) {
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * B3 action redesign (design-spec §"action 재설계"), read off
+ * dominion-opus-bot.ts's `chooseAction`: Witch gets immediate priority over
+ * every other action while Curses remain in supply (v1 had no attack-card
+ * awareness in the action phase at all), and Chapel's eligibility is gated
+ * on real junk actually being in hand (`observation.own.hand`, unaffected by
+ * the per-decision-anchor-freshness caveat above since it reads the true
+ * observation) in *every* phase — replacing v1's blanket
+ * `chapelEconomyActionLegal` transition-phase ban, which was the round2
+ * LossReport's single largest action mismatch (781/1005 decisions, both
+ * `endActions`<->`playAction:Chapel` directions: v1 sometimes plays a
+ * pointless Chapel in growth phase with no junk to trash, and sometimes
+ * refuses to play a genuinely useful late Chapel purely because it has
+ * transitioned).
+ */
+function chapelEconomyV2ActionChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+): DominionChoice | undefined {
+  if ((observation.supply.Curse ?? 0) > 0) {
+    const witch = legal.find((c) => c.kind === 'playAction' && c.card === 'Witch');
+    if (witch) return witch;
+  }
+  return undefined;
+}
+
+function chapelEconomyV2ActionLegal(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+): readonly DominionChoice[] {
+  const hand = observation.own.hand;
+  const junkInHand = hand.some((c) => c === 'Curse' || c === 'Estate' || c === 'Copper');
+  if (junkInHand) return legal;
+  const filtered = legal.filter((c) => !(c.kind === 'playAction' && c.card === 'Chapel'));
+  return filtered.length > 0 ? filtered : legal;
+}
+
+interface ChapelEconomyV2Options {
+  readonly includeGreeningReorder: boolean;
+  readonly useV2Action: boolean;
+}
+
+/**
+ * Builds a `chapelEconomyV2*` StrategyFlagSpec. Standalone (ignores `base`
+ * entirely, same convention as chapelEconomy) — chapelTrash is always
+ * chapelEconomy's own policy verbatim (design-spec: "트래시 정책은
+ * chapelEconomy 그대로 보존"), buy/action are gated by `v2Options` so the two
+ * B1 element-isolation variants can toggle one piece of the redesign off
+ * without duplicating this whole function.
+ */
+function chapelEconomyV2FlagSpec(
+  flag: string,
+  description: string,
+  v2Options: ChapelEconomyV2Options,
+): StrategyFlagSpec<DominionObservation, DominionChoice> {
+  return {
+    flag,
+    description,
+    apply() {
+      return (seed) => {
+        const fallback = heuristicBaseline(seed);
+        return {
+          id: `dominion-heuristic+${flag}`,
+          decide(decisionPoint, observation, legal) {
+            if (decisionPoint === 'chapelTrash') {
+              const growth = chapelEconomyIsGrowthPhase(observation, CHAPEL_ECONOMY_DEFAULT);
+              return (
+                chapelEconomyTrashChoice(observation, legal, growth) ?? fallback.decide(decisionPoint, observation, legal)
+              );
+            }
+            if (decisionPoint === 'buy') {
+              return (
+                chapelEconomyV2BuyChoice(observation, legal, CHAPEL_ECONOMY_DEFAULT, v2Options.includeGreeningReorder) ??
+                fallback.decide(decisionPoint, observation, legal)
+              );
+            }
+            if (decisionPoint === 'action') {
+              if (v2Options.useV2Action) {
+                const witchChoice = chapelEconomyV2ActionChoice(observation, legal);
+                if (witchChoice) return witchChoice;
+                return fallback.decide(decisionPoint, observation, chapelEconomyV2ActionLegal(observation, legal));
+              }
+              return fallback.decide(
+                decisionPoint,
+                observation,
+                chapelEconomyActionLegal(observation, legal, CHAPEL_ECONOMY_DEFAULT),
+              );
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          },
+        };
+      };
+    },
+  };
+}
+
+/** B3-deep round 2 (main-loop design, this round's primary A8 follow-up). */
+const chapelEconomyV2 = chapelEconomyV2FlagSpec(
+  'chapelEconomyV2',
+  "B3 deep redesign v2 (GAP-11 Phase 4-C A8 follow-up, main-loop spec): preserves chapelEconomy's chapelTrash policy verbatim (already near-converged with L2 in round 2, mismatch 67.4%->3.2%) and rebuilds buy/action using elements read from dominion-opus-bot.ts (L2 feedback anchor — imitation axis, L3 holdout never consulted): (1) endgame greening reordered to contest Duchy at coins>=5 once transitioning (provinceLeft-gated like L2, not density-gated like v1), Estate mop-up as fallback only; (2) Witch (<=2 copies while Curses remain) and Laboratory (<=2 copies) added at the 5-7 coin tier; (3) action phase gives Witch immediate priority while Curses remain, and gates Chapel's eligibility on real junk-in-hand in every phase instead of v1's blanket transition-phase ban. See dominion.ts's own 'GAP-11 Phase 4-C round-2 candidate batch' doc comment above for the LossReport-artifact caveat this design deliberately avoids naively imitating.",
+  { includeGreeningReorder: true, useV2Action: true },
+);
+
+/** B1-exploit mechanical variant (element-contribution isolation): removes
+ * the endgame-greening reorder entirely — no Duchy contesting, no Estate
+ * mop-up, VP buying relies solely on the Province-at-8 rule. */
+const chapelEconomyV2NoGreen = chapelEconomyV2FlagSpec(
+  'chapelEconomyV2-noGreen',
+  'B1 mechanical variant of chapelEconomyV2 (GAP-11 Phase 4-C, element-contribution isolation): removes the endgame-greening reorder entirely (no Duchy contest, no Estate mop-up) — isolates whether V2\'s gain (if any) comes from the greening-timing fix or from the Witch/Laboratory/action redesign.',
+  { includeGreeningReorder: false, useV2Action: true },
+);
+
+/** B1-exploit mechanical variant (element-contribution isolation): keeps
+ * V2's buy redesign in full but reverts the action phase to v1
+ * chapelEconomy's original blanket transition-phase Chapel ban (no Witch
+ * attack priority, no junk-gating). */
+const chapelEconomyV2CloneBuy = chapelEconomyV2FlagSpec(
+  'chapelEconomyV2-clonebuy',
+  "B1 mechanical variant of chapelEconomyV2 (GAP-11 Phase 4-C, element-contribution isolation): buy is V2's redesign in full (greening reorder + Witch/Laboratory); action reverts to v1 chapelEconomy's original blanket transition-phase Chapel ban (no Witch priority, no junk-gating) — isolates whether V2's gain comes from the buy side or the action side.",
+  { includeGreeningReorder: true, useV2Action: false },
+);
+
+/**
+ * B2-opponent (this round's own design, GAP-11 Phase 4-C — deliberately a
+ * different bet from B3's "preserve trash, fix buy/action" approach): round
+ * 1's B2 (simpleEconomyNoTrash) sidestepped the chapelTrash mismatch by never
+ * trashing and won on a plain money curve; this round's B2 keeps that
+ * never-trash simplicity but spends the buys a trash-heavy deck would have
+ * spent on early Chapels into a Witch/Laboratory tempo axis instead — a
+ * kingdom-card axis the entire chapelEconomy family (v1 and V2 alike) never
+ * touches. Standalone (same convention as every other candidate here).
+ */
+const WITCH_RUSH_MAX_WITCHES = 3;
+const WITCH_RUSH_MAX_LABS = 2;
+
+const witchRushNoTrash: StrategyFlagSpec<DominionObservation, DominionChoice> = {
+  flag: 'witchRushNoTrash',
+  description:
+    "B2 opponent-info design (GAP-11 Phase 4-C, deliberately distinct from B3's trash-preserving approach): never trashes (always doneTrash immediately, round1 B2's own bet, kept unchanged) but adds a Witch(<=3, attack+draw)/Laboratory(<=2) tempo axis chapelEconomy family never touches, ahead of plain Silver/Duchy at the 5-7 coin tier. Standalone.",
+  apply() {
+    return (seed) => {
+      const fallback = heuristicBaseline(seed);
+      return {
+        id: 'dominion-heuristic+witchRushNoTrash',
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'chapelTrash') {
+            const doneTrash = legal.find((c) => c.kind === 'doneTrash');
+            if (doneTrash) return doneTrash;
+            return fallback.decide(decisionPoint, observation, legal);
+          }
+          if (decisionPoint === 'action') {
+            if ((observation.supply.Curse ?? 0) > 0) {
+              const witch = legal.find((c) => c.kind === 'playAction' && c.card === 'Witch');
+              if (witch) return witch;
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          }
+          if (decisionPoint === 'buy') {
+            const findBuy = (name: CardName): DominionChoice | undefined =>
+              legal.find((c) => c.kind === 'buy' && c.card === name);
+            const remainingProvince = observation.supply.Province ?? 0;
+            const coins = observation.coins;
+
+            if (coins >= 8) {
+              const province = findBuy('Province');
+              if (province) return province;
+            }
+            if (coins >= 6) {
+              const gold = findBuy('Gold');
+              if (gold) return gold;
+            }
+            if (coins >= 5) {
+              if (ownCardCount(observation, 'Witch') < WITCH_RUSH_MAX_WITCHES && (observation.supply.Curse ?? 0) > 0) {
+                const witch = findBuy('Witch');
+                if (witch) return witch;
+              }
+              if (ownCardCount(observation, 'Laboratory') < WITCH_RUSH_MAX_LABS) {
+                const lab = findBuy('Laboratory');
+                if (lab) return lab;
+              }
+              if (remainingProvince <= 4) {
+                const duchy = findBuy('Duchy');
+                if (duchy) return duchy;
+              }
+            }
+            if (coins >= 3) {
+              const silver = findBuy('Silver');
+              if (silver) return silver;
+            }
+            if (remainingProvince <= 2) {
+              const estate = findBuy('Estate');
+              if (estate) return estate;
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          }
+          return fallback.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
+/**
+ * B4-explore (A10 full imitation, GAP-11 Phase 4-C — the analogous bet to
+ * gomoku's opusclone axis, but as a *literal* clone rather than a search
+ * prior since dominion's own candidates are all pure heuristics with no
+ * search layer): wraps dominion-opus-bot.ts (the L2 feedback anchor) itself
+ * as a strategy flag. `apply()` returns `dominionOpusBot` directly — not a
+ * hand-copied re-derivation — so there is zero drift risk between "the L2
+ * anchor" and "this imitation candidate": whatever dominion-opus-bot.ts does,
+ * this flag does, by construction. Unlike loss-mining.ts's per-decision
+ * anchor reconstruction (this file's own doc comment on the batch above),
+ * this bot is created once per real game via the normal `BotFactory(seed)`
+ * contract and plays that one game start-to-finish, so its internal `owned`
+ * tally stays accurate throughout — none of the reconstruction-artifact
+ * caveat applies here. What IS still live: kingdom-card randomization
+ * (10-of-12 KINGDOM_POOL draw per game) and seating/shuffle asymmetry are
+ * dominion-specific variance sources a literal clone must still contend with
+ * even in an otherwise mirror-policy matchup against the L2 anchor itself.
+ */
+const opusCloneDominion: StrategyFlagSpec<DominionObservation, DominionChoice> = {
+  flag: 'opusCloneDominion',
+  description:
+    "B4 explore (A10 full imitation, GAP-11 Phase 4-C): wraps dominion-opus-bot.ts (the L2 feedback anchor) verbatim as a strategy flag (apply() returns dominionOpusBot itself, zero drift risk from a re-derived copy). Ignores base entirely (imitation axis, same convention as chapelEconomy). See dominion.ts's own doc comment on this flag for why the per-decision-anchor-freshness caveat that affects loss-mining.ts's LossReport does NOT apply to this candidate's actual gameplay.",
+  apply: () => dominionOpusBot,
+};
+
 /**
  * B4-explore (A5 tree prior, this round's untried axis): static per-choice
  * value evaluator (ADR-0011) for use as an IS-MCTS `priorSource:
@@ -1659,6 +2026,11 @@ export const dominionAdapter: GameAdapter<DominionState, DominionObservation, Do
     chapelEconomyD08,
     chapelEconomyLate3,
     simpleEconomyNoTrash,
+    chapelEconomyV2,
+    chapelEconomyV2NoGreen,
+    chapelEconomyV2CloneBuy,
+    witchRushNoTrash,
+    opusCloneDominion,
   ],
   choiceEvaluator: dominionChoiceEvaluator,
 };

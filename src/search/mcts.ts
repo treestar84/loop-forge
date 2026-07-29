@@ -151,6 +151,38 @@ export interface MctsConfig {
     legal: readonly unknown[],
     player: PlayerId,
   ) => unknown | null;
+  /**
+   * PUCT-style progressive-bias prior weight (ADR-0011,
+   * docs/GAP-ANALYSIS-11.md D2 — the R3 fix: before this, the only channels
+   * for game knowledge to reach the tree were rollout-evaluator swaps
+   * (diluted by averaging across rollouts) and `rootOverride` (all-or-nothing
+   * at the root only) — neither injects knowledge into ordinary mid-tree
+   * selection). Left `undefined` (equivalent to 0, the default), every
+   * existing flag's behavior — including expansion order and child selection
+   * — is byte-for-byte unchanged; this is the field's regression pin.
+   *
+   * When set to a positive number, `selectChild`'s UCB term becomes
+   * `Q + uctC*sqrt(ln(N)/n) + priorWeight*P(c)/(1+n)` — the added term decays
+   * as a child accumulates visits (`n` in its denominator), so the prior only
+   * ever *guides* early exploration; accumulated statistics (`Q`, the explore
+   * term) eventually dominate regardless of `priorWeight`'s magnitude. `P(c)`
+   * is the softmax (numerically stabilized: max subtracted before `exp`) of
+   * `priorSource`'s per-choice scores for the node's own (state, mover,
+   * legal-choices) triple. Expansion order is also prior-descending (ties
+   * broken by `encodeChoice` key, for determinism) instead of the rng-shuffled
+   * order used when this is unset.
+   */
+  readonly priorWeight?: number;
+  /**
+   * Which per-choice evaluator supplies `priorWeight`'s scores. `v1` supports
+   * only the adapter's own `choiceEvaluator` (contract/types.ts, ADR-0011) —
+   * declared as a union of one literal so future prior sources are additive.
+   * Throws a clear error at the start of `mctsSearch` when `priorWeight` is
+   * a positive number (or this field is set at all) and the adapter does not
+   * declare `choiceEvaluator` — a silent no-op prior would be worse than a
+   * loud contract violation.
+   */
+  readonly priorSource?: 'choiceEvaluator';
 }
 
 interface ChildEdge {
@@ -171,11 +203,107 @@ class SearchNode {
   totalReward = 0;
   readonly children: ChildEdge[] = [];
   readonly untried: unknown[];
+  /**
+   * Softmax prior per child `encodeChoice` key, computed once at node
+   * creation time (the "evaluator called once per node, not per selection"
+   * cost constraint — ADR-0011/GAP-11 D2) from this node's own (state, mover,
+   * legal-choices) triple. `undefined` when priorWeight/priorSource are not
+   * active for this search, so an inactive prior costs nothing beyond the
+   * one extra optional field.
+   */
+  readonly priorByKey: ReadonlyMap<string, number> | undefined;
 
-  constructor(mover: PlayerId | null, untried: readonly unknown[]) {
+  constructor(mover: PlayerId | null, untried: readonly unknown[], priorByKey?: ReadonlyMap<string, number>) {
     this.mover = mover;
     this.untried = [...untried];
+    this.priorByKey = priorByKey;
   }
+}
+
+/**
+ * True iff `config.priorWeight` requests progressive-bias prior injection
+ * (MctsConfig's doc comment) — the single switch every prior-related branch
+ * below gates on. Exported so `search/ismcts.ts` can gate its own
+ * availability-UCB prior term on the exact same condition (MctsConfig is
+ * shared verbatim between the two search algorithms, docs/GAP-ANALYSIS-11.md
+ * D2 — "IS-MCTS는 MctsConfig를 재사용하므로 자동 적용").
+ */
+export function priorIsActive(config: MctsConfig): boolean {
+  return (config.priorWeight ?? 0) > 0;
+}
+
+/**
+ * Resolve and validate the per-choice evaluator `priorWeight` needs (MctsConfig's
+ * doc comment): only called when `priorIsActive(config)` is true. Throws a
+ * clear, adapter-identifying error rather than silently disabling the prior
+ * when the adapter has not declared `choiceEvaluator` (contract/types.ts,
+ * ADR-0011) — `priorSource` is a single-literal union in v1, so there is
+ * nothing else to branch on yet, but the check is written to fail loudly if
+ * that ever changes.
+ */
+export function requireChoiceEvaluator(
+  adapter: AnyGameAdapter,
+  config: MctsConfig,
+): (state: unknown, player: PlayerId, choices: readonly unknown[]) => readonly number[] {
+  const source = config.priorSource ?? 'choiceEvaluator';
+  if (source !== 'choiceEvaluator') {
+    throw new Error(`mctsSearch: unknown priorSource "${source}" — v1 supports only 'choiceEvaluator'`);
+  }
+  if (adapter.choiceEvaluator === undefined) {
+    throw new Error(
+      `mctsSearch: priorWeight is set but adapter "${adapter.spec.gameId}" does not declare choiceEvaluator ` +
+        '(required for priorSource \'choiceEvaluator\', see contract/types.ts GameAdapter.choiceEvaluator and docs/adr/0011-choice-evaluator-tree-prior.md)',
+    );
+  }
+  return adapter.choiceEvaluator;
+}
+
+/**
+ * Softmax over `scores`, numerically stabilized by subtracting the max
+ * before `exp` (MctsConfig.priorWeight's doc comment). Exported for
+ * `search/ismcts.ts`'s own prior term (same normalization, same source
+ * evaluator).
+ */
+export function softmax(scores: readonly number[]): readonly number[] {
+  const max = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - max));
+  const sum = exps.reduce((total, value) => total + value, 0);
+  return exps.map((value) => value / sum);
+}
+
+/**
+ * Order `legal` for a node's `untried` list and, when the prior is active,
+ * compute its softmax priorByKey — the one call site both root creation and
+ * per-simulation child creation share, so the evaluator is invoked exactly
+ * once per node regardless of caller (MctsConfig.priorWeight's "called once
+ * per node" cost constraint). When the prior is inactive, this reproduces the
+ * pre-existing `shuffled(legal, rng)` order byte-for-byte and returns no
+ * priorByKey — the regression pin for priorWeight-unset callers.
+ */
+function orderChoicesWithPrior(
+  adapter: AnyGameAdapter,
+  state: unknown,
+  player: PlayerId,
+  legal: readonly unknown[],
+  config: MctsConfig,
+  rng: Rng,
+): { readonly ordered: readonly unknown[]; readonly priorByKey: ReadonlyMap<string, number> | undefined } {
+  if (!priorIsActive(config)) {
+    return { ordered: shuffled(legal, rng), priorByKey: undefined };
+  }
+  const evaluator = requireChoiceEvaluator(adapter, config);
+  const scores = evaluator(state, player, legal);
+  const priors = softmax(scores);
+  const entries = legal.map((choice, index) => ({
+    choice,
+    key: adapter.encodeChoice(choice),
+    prior: priors[index] as number,
+  }));
+  entries.sort((a, b) => b.prior - a.prior || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return {
+    ordered: entries.map((entry) => entry.choice),
+    priorByKey: new Map(entries.map((entry) => [entry.key, entry.prior])),
+  };
 }
 
 function rewardOf(outcome: Outcome, player: PlayerId): number {
@@ -349,15 +477,25 @@ function tacticalSafeChoices(
   return safe;
 }
 
-/** UCT selection among `node`'s (already-expanded) children — never called while untried moves remain. */
-function selectChild(node: SearchNode, uctC: number): ChildEdge {
+/**
+ * UCT selection among `node`'s (already-expanded) children — never called
+ * while untried moves remain. When `config.priorWeight` is active, the value
+ * gains a third, progressive-bias term (`priorWeight*P(c)/(1+n)`,
+ * MctsConfig.priorWeight's doc comment) drawn from `node.priorByKey`
+ * (computed once at `node`'s own creation, never here); `priorWeight`
+ * unset/0 reproduces the pre-existing two-term UCT value exactly (the term
+ * evaluates to `0 * anything`, added to a sum, changing nothing).
+ */
+function selectChild(node: SearchNode, config: MctsConfig): ChildEdge {
   const logParent = Math.log(node.exploreCount);
+  const priorWeight = config.priorWeight ?? 0;
   let best: ChildEdge | null = null;
   let bestValue = -Infinity;
   for (const child of node.children) {
     const exploit = child.node.totalReward / child.node.exploreCount;
-    const explore = uctC * Math.sqrt(logParent / child.node.exploreCount);
-    const value = exploit + explore;
+    const explore = config.uctC * Math.sqrt(logParent / child.node.exploreCount);
+    const prior = priorWeight > 0 ? (priorWeight * (node.priorByKey?.get(child.key) ?? 0)) / (1 + child.node.exploreCount) : 0;
+    const value = exploit + explore + prior;
     if (value > bestValue) {
       bestValue = value;
       best = child;
@@ -392,6 +530,16 @@ export function mctsSearch(
   const rootDecision = adapter.currentDecision(rootState);
   if (rootDecision === null) {
     throw new Error('mctsSearch: rootState has no pending decision (already terminal)');
+  }
+
+  // Fail fast (MctsConfig.priorWeight's doc comment): a search that was
+  // asked for a prior it cannot compute should never silently fall back to
+  // no-prior behavior. `priorIsActive` is false when priorWeight is
+  // unset/0 — the byte-for-byte regression pin for every existing caller —
+  // so this check never even runs the erased `adapter.choiceEvaluator`
+  // lookup for those callers.
+  if (priorIsActive(config)) {
+    requireChoiceEvaluator(adapter, config);
   }
 
   // Tactical precheck (MctsConfig.tacticalDepth's doc comment): left
@@ -431,13 +579,17 @@ export function mctsSearch(
     }
   }
 
-  // Untried children are shuffled with the injected rng (not left in
-  // getLegalChoices order) before any expansion happens — same rng seed
-  // still yields the same shuffle, so this stays fully deterministic, but it
+  // Untried children are ordered before any expansion happens (not left in
+  // getLegalChoices order): rng-shuffled by default (same rng seed still
+  // yields the same shuffle, so this stays fully deterministic, but it
   // removes the positional bias that a FIFO `.shift()` over an
-  // adapter-ordered legal-choices array would otherwise impose (P5; observed
-  // in gomoku as expansion sticking to the board's first few scanned rows).
-  const root = new SearchNode(null, shuffled(rootLegal, rng));
+  // adapter-ordered legal-choices array would otherwise impose — P5; observed
+  // in gomoku as expansion sticking to the board's first few scanned rows),
+  // or prior-descending when priorWeight is active (MctsConfig.priorWeight's
+  // doc comment) — orderChoicesWithPrior picks between the two and also
+  // caches the root's priorByKey for selectChild.
+  const rootOrdering = orderChoicesWithPrior(adapter, rootState, rootDecision.player, rootLegal, config, rng);
+  const root = new SearchNode(null, rootOrdering.ordered, rootOrdering.priorByKey);
 
   for (let sim = 0; sim < config.simulations; sim += 1) {
     let state = rootState;
@@ -455,9 +607,21 @@ export function mctsSearch(
         const choice = node.untried.shift();
         const childState = adapter.applyChoice(state, choice);
         const childDecision = adapter.currentDecision(childState);
-        const childUntried =
-          childDecision === null ? [] : shuffled(adapter.getLegalChoices(childState), rng);
-        const childNode = new SearchNode(decision.player, childUntried);
+        let childUntried: readonly unknown[] = [];
+        let childPriorByKey: ReadonlyMap<string, number> | undefined;
+        if (childDecision !== null) {
+          const childOrdering = orderChoicesWithPrior(
+            adapter,
+            childState,
+            childDecision.player,
+            adapter.getLegalChoices(childState),
+            config,
+            rng,
+          );
+          childUntried = childOrdering.ordered;
+          childPriorByKey = childOrdering.priorByKey;
+        }
+        const childNode = new SearchNode(decision.player, childUntried, childPriorByKey);
         node.children.push({ choice, key: adapter.encodeChoice(choice), node: childNode });
         path.push(childNode);
         state = childState;
@@ -470,7 +634,7 @@ export function mctsSearch(
         // terminal) — guard rather than loop forever on an adapter defect.
         break;
       }
-      const selected = selectChild(node, config.uctC);
+      const selected = selectChild(node, config);
       state = adapter.applyChoice(state, selected.choice);
       node = selected.node;
       path.push(node);

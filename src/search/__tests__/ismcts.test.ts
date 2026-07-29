@@ -318,3 +318,121 @@ describe('mcts.ts unaffected by the ismcts.ts export addition', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fixture: docs/GAP-ANALYSIS-11.md D2/ADR-0011 tree prior, ported to IS-MCTS
+// — same 3-arm bandit (best=[0] > other=[0,1] co-win > lure=[1]) and the same
+// evaluator that inverts the ranking (lure=100 > other=0 > best=-100) as
+// `mcts.ts`'s own prior fixture, proving the exact claim
+// docs/GAP-ANALYSIS-11.md D2 makes: since `ismctsSearch` reuses `MctsConfig`
+// verbatim, `priorWeight`/`priorSource` now bias `selectByAvailabilityUcb`
+// too, through the same shared `priorIsActive`/`requireChoiceEvaluator`/
+// `softmax` helpers `mcts.ts` exports — not merely "the type has the field",
+// but the search actually reads it. `sampleStateFromObservation` is a
+// no-op determinization (nothing is actually hidden in this fixture; it
+// exists only to satisfy IS-MCTS's contract requirement).
+// ---------------------------------------------------------------------------
+
+type IsBanditChoice = 'best' | 'lure' | 'other';
+
+interface IsBanditState {
+  readonly chosen: IsBanditChoice | null;
+}
+
+type IsBanditObservation = Record<string, never>;
+
+const IS_BANDIT_WINNERS: Record<IsBanditChoice, readonly PlayerId[]> = {
+  best: [0],
+  other: [0, 1],
+  lure: [1],
+};
+
+const IS_BANDIT_SPEC: GameSpec = {
+  gameId: 'ismcts-prior-bandit-fixture',
+  playerCount: 2,
+  decisionPoints: [{ id: 'pick', description: 'pick best/lure/other' }],
+  seatingPlan: [
+    [0, 1],
+    [1, 0],
+  ],
+  maxDecisionsPerGame: 1,
+};
+
+function makeIsBanditAdapter(withEvaluator: boolean): GameAdapter<IsBanditState, IsBanditObservation, IsBanditChoice> {
+  const base: GameAdapter<IsBanditState, IsBanditObservation, IsBanditChoice> = {
+    spec: IS_BANDIT_SPEC,
+    createInitialState: () => ({ chosen: null }),
+    currentDecision: (state) => (state.chosen === null ? { player: 0, decisionPoint: 'pick' } : null),
+    getObservation: () => ({}) as IsBanditObservation,
+    getLegalChoices: () => ['best', 'lure', 'other'],
+    applyChoice: (_state, choice) => ({ chosen: choice }),
+    getOutcome: (state) => {
+      if (state.chosen === null) return null;
+      const winners = IS_BANDIT_WINNERS[state.chosen];
+      const scores = [0, 0];
+      for (const winner of winners) scores[winner] = 1;
+      return { scores, winners };
+    },
+    encodeChoice: (choice) => choice,
+    baselines: {
+      random: (_seed) => ({ id: 'is-bandit-random', decide: (_dp, _o, legal) => legal[0] as IsBanditChoice }),
+      heuristic: (_seed) => ({ id: 'is-bandit-heuristic', decide: (_dp, _o, legal) => legal[0] as IsBanditChoice }),
+    },
+    strategySurface: [],
+    sampleStateFromObservation: () => ({ chosen: null }),
+  };
+  if (!withEvaluator) {
+    return base;
+  }
+  return {
+    ...base,
+    choiceEvaluator: (_state, _player, choices) =>
+      (choices as readonly IsBanditChoice[]).map((choice) =>
+        choice === 'lure' ? 100 : choice === 'other' ? 0 : -100,
+      ),
+  };
+}
+
+describe('ismctsSearch priorWeight/priorSource (docs/GAP-ANALYSIS-11.md D2, ADR-0011)', () => {
+  it('priorWeight unset/0 reproduces the exact pre-prior decision (regression pin)', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(true));
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'is-bandit' };
+
+    const omitted = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    const explicitZero = ismctsSearch(adapter, {}, 0, { ...config, priorWeight: 0 }, createRng(1));
+    expect(omitted).toBe(explicitZero);
+    expect(omitted).toBe('best');
+  });
+
+  it('biases early visits toward the evaluator-favored (but truly worse) choice at a small simulation budget — the shared MctsConfig auto-applies to IS-MCTS', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(true));
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'is-bandit', priorWeight: 50 };
+
+    const choice = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    expect(choice).toBe('lure');
+  });
+
+  it('progressive bias decays: at a large simulation budget the true reward reasserts despite the same strong prior', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(true));
+    const config = { simulations: 2000, uctC: 1.4, rolloutCount: 1, label: 'is-bandit', priorWeight: 50 };
+
+    const choice = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    expect(choice).toBe('best');
+  });
+
+  it('is deterministic: same seed and config reproduce the same prior-biased decision', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(true));
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'is-bandit', priorWeight: 50 };
+
+    const first = ismctsSearch(adapter, {}, 0, config, createRng(9));
+    const second = ismctsSearch(adapter, {}, 0, config, createRng(9));
+    expect(first).toBe(second);
+  });
+
+  it('throws a clear error when priorWeight is active but the adapter declares no choiceEvaluator', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(false));
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'is-bandit', priorWeight: 50 };
+
+    expect(() => ismctsSearch(adapter, {}, 0, config, createRng(1))).toThrow(/choiceEvaluator/);
+  });
+});

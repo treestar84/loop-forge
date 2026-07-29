@@ -41,7 +41,7 @@
 import type { AnyBotFactory, AnyGameAdapter, PlayerId, Rng } from '../contract/types';
 import { canonicalJson } from '../kernel/digest';
 import { createRng, shuffled } from '../kernel/rng';
-import { evaluate, type MctsConfig } from './mcts';
+import { evaluate, priorIsActive, requireChoiceEvaluator, softmax, type MctsConfig } from './mcts';
 
 /** One edge in the information-set tree: an action taken from some node, keyed by `encodeChoice`. */
 interface IsEdge {
@@ -55,6 +55,21 @@ interface IsEdge {
   /** Times this action was *legal* (available) when its parent node was visited — SO-ISMCTS's UCB1 denominator, distinct from `visits`. */
   availability: number;
   totalReward: number;
+  /**
+   * Softmax prior (docs/GAP-ANALYSIS-11.md D2, ADR-0011) — 0 when
+   * `config.priorWeight` is inactive, the regression pin for every existing
+   * caller (MctsConfig is shared verbatim with `search/mcts.ts`, so an unset
+   * `priorWeight` leaves this field permanently 0 and `selectByAvailabilityUcb`'s
+   * prior term always evaluates to 0). When active, computed once — at the
+   * simulation that first creates this edge — from `adapter.choiceEvaluator`'s
+   * scores over whichever legal set that simulation's determinization
+   * happened to reveal; later simulations with a different legal set at the
+   * same node do not recompute it (same "evaluator called once per edge, not
+   * per selection" cost discipline `mcts.ts`'s per-node cache follows,
+   * adapted here since IS-MCTS nodes — unlike mcts.ts's — are visited by many
+   * different determinizations rather than one fixed state).
+   */
+  prior: number;
 }
 
 /** One information-set node: a map from `encodeChoice` key to the edge for that action. Persists across simulations. */
@@ -67,8 +82,17 @@ interface LegalEntry {
   readonly key: string;
 }
 
-/** UCB1 with availability-count denominators (Cowling et al. 2012) among `node`'s currently-legal children — never called while any legal child is still untried (visits === 0). */
-function selectByAvailabilityUcb(legal: readonly LegalEntry[], node: IsNode, uctC: number): IsEdge {
+/**
+ * UCB1 with availability-count denominators (Cowling et al. 2012) among
+ * `node`'s currently-legal children — never called while any legal child is
+ * still untried (visits === 0). When `config.priorWeight` is active, the
+ * value gains the same progressive-bias term `mcts.ts`'s `selectChild` adds
+ * (`priorWeight*edge.prior/(1+edge.visits)`); `priorWeight` unset/0
+ * reproduces the pre-existing two-term value exactly (docs/GAP-ANALYSIS-11.md
+ * D2's IS-MCTS regression pin).
+ */
+function selectByAvailabilityUcb(legal: readonly LegalEntry[], node: IsNode, config: MctsConfig): IsEdge {
+  const priorWeight = config.priorWeight ?? 0;
   let best: IsEdge | null = null;
   let bestValue = -Infinity;
   for (const { key } of legal) {
@@ -77,8 +101,9 @@ function selectByAvailabilityUcb(legal: readonly LegalEntry[], node: IsNode, uct
       throw new Error(`ismctsSearch selectByAvailabilityUcb: missing edge for legal key "${key}"`);
     }
     const exploit = edge.totalReward / edge.visits;
-    const explore = uctC * Math.sqrt(Math.log(edge.availability) / edge.visits);
-    const value = exploit + explore;
+    const explore = config.uctC * Math.sqrt(Math.log(edge.availability) / edge.visits);
+    const prior = priorWeight > 0 ? (priorWeight * edge.prior) / (1 + edge.visits) : 0;
+    const value = exploit + explore + prior;
     if (value > bestValue) {
       bestValue = value;
       best = edge;
@@ -88,6 +113,26 @@ function selectByAvailabilityUcb(legal: readonly LegalEntry[], node: IsNode, uct
     throw new Error('ismctsSearch selectByAvailabilityUcb: node has no legal children to select from');
   }
   return best;
+}
+
+/**
+ * Softmax priors for `legal`'s choices at `(state, player)`, via the same
+ * `adapter.choiceEvaluator`/`softmax` `mcts.ts`'s `orderChoicesWithPrior`
+ * uses (docs/GAP-ANALYSIS-11.md D2). Only called when `priorIsActive(config)`
+ * is true — callers must check that first, mirroring `mcts.ts`'s own
+ * discipline of never touching `choiceEvaluator` when the prior is inactive.
+ */
+function computeIsmctsPriors(
+  adapter: AnyGameAdapter,
+  config: MctsConfig,
+  state: unknown,
+  player: PlayerId,
+  legal: readonly LegalEntry[],
+): ReadonlyMap<string, number> {
+  const evaluator = requireChoiceEvaluator(adapter, config);
+  const scores = evaluator(state, player, legal.map((entry) => entry.choice));
+  const priors = softmax(scores);
+  return new Map(legal.map((entry, index) => [entry.key, priors[index] as number]));
 }
 
 /**
@@ -119,6 +164,12 @@ export function ismctsSearch(
         'IS-MCTS needs a determinization hook (see contract/types.ts GameAdapter.sampleStateFromObservation)',
     );
   }
+  // Fail fast (mirrors mcts.ts's mctsSearch — MctsConfig.priorWeight's doc
+  // comment): priorWeight unset/0 skips this entirely (priorIsActive false),
+  // the regression pin for every existing IS-MCTS caller.
+  if (priorIsActive(config)) {
+    requireChoiceEvaluator(adapter, config);
+  }
 
   const root = new IsNode();
 
@@ -147,14 +198,34 @@ export function ismctsSearch(
       const legalChoices = adapter.getLegalChoices(state);
       const legal: LegalEntry[] = legalChoices.map((choice) => ({ choice, key: adapter.encodeChoice(choice) }));
 
+      // Priors for choices newly seen at this node (docs/GAP-ANALYSIS-11.md
+      // D2): computed once per legal set only when priorWeight is active —
+      // `undefined` otherwise, so every existing (priorWeight-unset) caller
+      // never even reaches `requireChoiceEvaluator`.
+      const priorByKey = priorIsActive(config)
+        ? computeIsmctsPriors(adapter, config, state, decision.player, legal)
+        : undefined;
+
       // Every action legal under this determinization gets an edge (created
       // lazily on first sight) and its availability count bumped — the
       // "available this many times" denominator SO-ISMCTS's UCB1 needs,
       // independent of whether the action ends up selected this simulation.
+      // `edge.prior` is set once, at creation, from whichever determinization
+      // first revealed this edge (IsEdge's own doc comment) — never
+      // recomputed on later sightings of an already-existing edge.
       for (const { choice, key } of legal) {
         let edge = node.children.get(key);
         if (edge === undefined) {
-          edge = { choice, key, mover: decision.player, node: new IsNode(), visits: 0, availability: 0, totalReward: 0 };
+          edge = {
+            choice,
+            key,
+            mover: decision.player,
+            node: new IsNode(),
+            visits: 0,
+            availability: 0,
+            totalReward: 0,
+            prior: priorByKey?.get(key) ?? 0,
+          };
           node.children.set(key, edge);
         }
         edge.availability += 1;
@@ -163,13 +234,23 @@ export function ismctsSearch(
       const untried = legal.filter((entry) => (node.children.get(entry.key) as IsEdge).visits === 0);
       let selected: IsEdge;
       if (untried.length > 0) {
-        // rng-shuffled expansion order (docs/FIX-BACKLOG.md P5 lesson — never
-        // FIFO over an adapter-ordered legal-choices array).
-        const pick = shuffled(untried, rng)[0] as LegalEntry;
+        // Expansion order: prior-descending when priorWeight is active (ties
+        // broken by encodeChoice key, deterministic — mirrors mcts.ts's
+        // orderChoicesWithPrior), else the pre-existing rng-shuffled order
+        // (docs/FIX-BACKLOG.md P5 lesson — never FIFO over an
+        // adapter-ordered legal-choices array).
+        const orderedUntried = priorIsActive(config)
+          ? [...untried].sort((a, b) => {
+              const priorA = (node.children.get(a.key) as IsEdge).prior;
+              const priorB = (node.children.get(b.key) as IsEdge).prior;
+              return priorB - priorA || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+            })
+          : shuffled(untried, rng);
+        const pick = orderedUntried[0] as LegalEntry;
         selected = node.children.get(pick.key) as IsEdge;
         expanded = true;
       } else {
-        selected = selectByAvailabilityUcb(legal, node, config.uctC);
+        selected = selectByAvailabilityUcb(legal, node, config);
       }
       selected.visits += 1;
       path.push(selected);

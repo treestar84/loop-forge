@@ -763,3 +763,139 @@ describe('mctsSearch expansion order (docs/FIX-BACKLOG.md P5)', () => {
     expect(choiceSeed5).not.toBe(choiceSeed1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fixture: docs/GAP-ANALYSIS-11.md D2/ADR-0011 tree prior (`priorWeight`/
+// `priorSource`). A single-decision 3-arm bandit whose true reward ordering
+// (best=1 > other=0.5 co-win > lure=0) is deliberately *inverted* by
+// `choiceEvaluator`'s scores (lure=100 > other=0 > best=-100) — a candidate
+// picked purely to prove the prior can override plain UCT statistics early
+// (small `simulations`) and that the override fades as visits accumulate
+// (large `simulations`, "progressive bias" decaying via the `1/(1+n)`
+// denominator in MctsConfig.priorWeight's UCB term).
+// ---------------------------------------------------------------------------
+
+type BanditChoice = 'best' | 'lure' | 'other';
+
+interface BanditState {
+  readonly chosen: BanditChoice | null;
+}
+
+const BANDIT_WINNERS: Record<BanditChoice, readonly PlayerId[]> = {
+  best: [0],
+  other: [0, 1],
+  lure: [1],
+};
+
+const BANDIT_SPEC: GameSpec = {
+  gameId: 'mcts-prior-bandit-fixture',
+  playerCount: 2,
+  decisionPoints: [{ id: 'pick', description: 'pick best/lure/other' }],
+  seatingPlan: [
+    [0, 1],
+    [1, 0],
+  ],
+  perfectInformation: true,
+  maxDecisionsPerGame: 1,
+};
+
+function makeBanditAdapter(withEvaluator: boolean): GameAdapter<BanditState, BanditState, BanditChoice> {
+  const base: GameAdapter<BanditState, BanditState, BanditChoice> = {
+    spec: BANDIT_SPEC,
+    createInitialState: () => ({ chosen: null }),
+    currentDecision: (state) => (state.chosen === null ? { player: 0, decisionPoint: 'pick' } : null),
+    getObservation: (state) => state,
+    getLegalChoices: () => ['best', 'lure', 'other'],
+    applyChoice: (_state, choice) => ({ chosen: choice }),
+    getOutcome: (state) => {
+      if (state.chosen === null) return null;
+      const winners = BANDIT_WINNERS[state.chosen];
+      const scores = [0, 0];
+      for (const winner of winners) scores[winner] = 1;
+      return { scores, winners };
+    },
+    encodeChoice: (choice) => choice,
+    baselines: {
+      random: (_seed) => ({ id: 'bandit-random', decide: (_dp, _o, legal) => legal[0] as BanditChoice }),
+      heuristic: (_seed) => ({ id: 'bandit-heuristic', decide: (_dp, _o, legal) => legal[0] as BanditChoice }),
+    },
+    strategySurface: [],
+  };
+  if (!withEvaluator) {
+    return { ...base, reconstructState: (observation) => observation };
+  }
+  return {
+    ...base,
+    reconstructState: (observation) => observation,
+    choiceEvaluator: (_state, _player, choices) =>
+      (choices as readonly BanditChoice[]).map((choice) =>
+        choice === 'lure' ? 100 : choice === 'other' ? 0 : -100,
+      ),
+  };
+}
+
+const BANDIT_SEED = 1;
+
+describe('mctsSearch priorWeight/priorSource (docs/GAP-ANALYSIS-11.md D2, ADR-0011)', () => {
+  it('priorWeight unset/0 reproduces the exact pre-prior decision (regression pin)', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(true));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'bandit' };
+
+    const omitted = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    const explicitZero = mctsSearch(adapter, rootState, { ...config, priorWeight: 0 }, createRng(BANDIT_SEED));
+    expect(omitted).toBe(explicitZero);
+    expect(omitted).toBe('best'); // true reward ordering wins when the prior is inactive
+  });
+
+  it('biases early visits toward the evaluator-favored (but truly worse) choice at a small simulation budget', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(true));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'bandit', priorWeight: 50 };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    expect(choice).toBe('lure');
+  });
+
+  it('progressive bias decays: at a large simulation budget the true reward reasserts despite the same strong prior', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(true));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 2000, uctC: 1.4, rolloutCount: 1, label: 'bandit', priorWeight: 50 };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    expect(choice).toBe('best'); // same result as priorWeight unset at scale — the prior no longer decides
+  });
+
+  it('is deterministic: same seed and config reproduce the same prior-biased decision', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(true));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'bandit', priorWeight: 50 };
+
+    const first = mctsSearch(adapter, rootState, config, createRng(9));
+    const second = mctsSearch(adapter, rootState, config, createRng(9));
+    expect(first).toBe(second);
+  });
+
+  it('throws a clear error when priorWeight is active but the adapter declares no choiceEvaluator', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(false));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'bandit', priorWeight: 50 };
+
+    expect(() => mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED))).toThrow(/choiceEvaluator/);
+  });
+
+  it('throws the same clear error when priorSource is explicitly set without an adapter-declared choiceEvaluator', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(false));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = {
+      simulations: 20,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'bandit',
+      priorWeight: 1,
+      priorSource: 'choiceEvaluator' as const,
+    };
+
+    expect(() => mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED))).toThrow(/choiceEvaluator/);
+  });
+});

@@ -16,6 +16,7 @@
 | [0008](0008-mcts-root-override-hook.md) | MCTS에 게임 중립 루트 오버라이드 훅 신설 | 채택됨 |
 | [0009](0009-no-forcing-policy.md) | 큰루프 재도전의 "억지 반복 금지" 원칙 | 채택됨 |
 | [0010](0010-opus-bot-benchmark-methodology.md) | Opus봇 벤치마크 방법론 — 1회 설계 후 고정 | 채택됨 |
+| [0011](0011-choice-evaluator-tree-prior.md) | choiceEvaluator 계약 확장과 MCTS 트리 prior | 채택됨 |
 | [0012](0012-anchor-ladder-holdout-opponents.md) | 앵커 래더(L1/L2/L3)와 홀드아웃 상대 분리 | 채택됨 |
 
 ## 형식

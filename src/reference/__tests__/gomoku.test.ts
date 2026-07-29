@@ -1,6 +1,8 @@
 import {
   gomokuAdapter,
   OPENING_BOOK,
+  gomokuChoiceEvaluator,
+  CHOICE_EVALUATOR_TIER,
   type GomokuChoice,
   type GomokuState,
 } from '../gomoku';
@@ -429,5 +431,141 @@ describe('gomoku strategySurface (C6)', () => {
     const neutralObservation = adapter.getObservation(neutralState, 0);
     const neutralChoice = composedBot.decide('place', neutralObservation, neutralLegal);
     expect(neutralLegal.map((m) => `${m.row}-${m.col}`)).toContain(`${neutralChoice.row}-${neutralChoice.col}`);
+  });
+});
+
+describe('gomoku choiceEvaluator (ADR-0011, docs/GAP-ANALYSIS-11.md D1)', () => {
+  const idx = (r: number, c: number) => r * 15 + c;
+  const scoreOf = (
+    state: GomokuState,
+    player: 0 | 1,
+    legal: readonly GomokuChoice[],
+    move: GomokuChoice,
+  ): number => {
+    const scores = gomokuChoiceEvaluator(state, player, legal);
+    const i = legal.findIndex((m) => m.row === move.row && m.col === move.col);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return scores[i] as number;
+  };
+
+  it('scores an immediate-win move as the highest tier', () => {
+    // Black has 4 in a row (7,3..7,6), both ends (7,2) and (7,7) open — either
+    // completes 5. A far-away neutral cell has no threat at all.
+    const board = new Array(225).fill(0);
+    board[idx(7, 3)] = 1;
+    board[idx(7, 4)] = 1;
+    board[idx(7, 5)] = 1;
+    board[idx(7, 6)] = 1;
+    const state: GomokuState = { board, moveCount: 4, winner: null, openingId: 'test' };
+    const legal = [{ row: 7, col: 2 }, { row: 7, col: 7 }, { row: 0, col: 0 }];
+
+    expect(scoreOf(state, 0, legal, { row: 7, col: 2 })).toBe(CHOICE_EVALUATOR_TIER.win);
+    expect(scoreOf(state, 0, legal, { row: 7, col: 7 })).toBe(CHOICE_EVALUATOR_TIER.win);
+    expect(scoreOf(state, 0, legal, { row: 0, col: 0 })).toBeLessThan(CHOICE_EVALUATOR_TIER.win);
+  });
+
+  it('scores blocking the opponent immediate win above every non-win move', () => {
+    // White has 4 in a row (3,3..3,6); Black must occupy (3,2) or (3,7) to
+    // block. Black has no threats of its own on this board.
+    const board = new Array(225).fill(0);
+    board[idx(3, 3)] = 2;
+    board[idx(3, 4)] = 2;
+    board[idx(3, 5)] = 2;
+    board[idx(3, 6)] = 2;
+    const state: GomokuState = { board, moveCount: 4, winner: null, openingId: 'test' };
+    const legal = [{ row: 3, col: 2 }, { row: 3, col: 7 }, { row: 0, col: 0 }];
+
+    expect(scoreOf(state, 0, legal, { row: 3, col: 2 })).toBe(CHOICE_EVALUATOR_TIER.blockWin);
+    expect(scoreOf(state, 0, legal, { row: 3, col: 7 })).toBe(CHOICE_EVALUATOR_TIER.blockWin);
+    expect(scoreOf(state, 0, legal, { row: 0, col: 0 })).toBeLessThan(CHOICE_EVALUATOR_TIER.blockWin);
+  });
+
+  it('scores a fork-creating move above a single-threat move', () => {
+    // Same geometry as the "forkAwareness plays a fork" behavioral test
+    // above: (7,7) turns two separate pairs into simultaneous open threes.
+    // (9,9) merely extends one isolated stone (2,2) with no independent
+    // second threat — a plain single-threat/extension move by comparison.
+    const board = new Array(225).fill(0);
+    board[idx(7, 5)] = 1;
+    board[idx(7, 6)] = 1;
+    board[idx(5, 7)] = 1;
+    board[idx(6, 7)] = 1;
+    board[idx(9, 9)] = 1;
+    const state: GomokuState = { board, moveCount: 5, winner: null, openingId: 'test' };
+    const legal = [{ row: 7, col: 7 }, { row: 9, col: 10 }];
+
+    const forkScore = scoreOf(state, 0, legal, { row: 7, col: 7 });
+    const singleScore = scoreOf(state, 0, legal, { row: 9, col: 10 });
+    expect(forkScore).toBe(CHOICE_EVALUATOR_TIER.fork);
+    expect(forkScore).toBeGreaterThan(singleScore);
+  });
+
+  it('scores blocking an opponent fork above an ordinary extension move', () => {
+    // Same geometry as the "forkAwareness blocks a fork" behavioral test
+    // above: White (not to move) owns the two pairs; Black must occupy (7,7)
+    // to deny the fork. (0,2) merely extends Black's own unrelated pair with
+    // no fork/threat implication.
+    const board = new Array(225).fill(0);
+    board[idx(7, 5)] = 2;
+    board[idx(7, 6)] = 2;
+    board[idx(5, 7)] = 2;
+    board[idx(6, 7)] = 2;
+    board[idx(0, 0)] = 1;
+    board[idx(0, 1)] = 1;
+    const state: GomokuState = { board, moveCount: 6, winner: null, openingId: 'test' };
+    const legal = [{ row: 7, col: 7 }, { row: 0, col: 2 }];
+
+    const blockForkScore = scoreOf(state, 0, legal, { row: 7, col: 7 });
+    const extendScore = scoreOf(state, 0, legal, { row: 0, col: 2 });
+    expect(blockForkScore).toBe(CHOICE_EVALUATOR_TIER.blockFork);
+    expect(blockForkScore).toBeGreaterThan(extendScore);
+  });
+
+  it('ranks a four-with-open-end above an open three, and an open three above a plain extension', () => {
+    // Row 4: black at (4,3)-(4,5), open both ends -> playing (4,6) or (4,2)
+    // makes an open four ("열린4"). Row 9: black at (9,3)-(9,4) only, open
+    // both ends -> playing (9,5) or (9,2) makes an open three. (12,12) is an
+    // isolated stone whose neighbor is a plain 2-length extension.
+    const board = new Array(225).fill(0);
+    board[idx(4, 3)] = 1;
+    board[idx(4, 4)] = 1;
+    board[idx(4, 5)] = 1;
+    board[idx(9, 3)] = 1;
+    board[idx(9, 4)] = 1;
+    board[idx(12, 12)] = 1;
+    const state: GomokuState = { board, moveCount: 6, winner: null, openingId: 'test' };
+    const legal = [{ row: 4, col: 6 }, { row: 9, col: 5 }, { row: 12, col: 13 }];
+
+    const fourScore = scoreOf(state, 0, legal, { row: 4, col: 6 });
+    const openThreeScore = scoreOf(state, 0, legal, { row: 9, col: 5 });
+    const extensionScore = scoreOf(state, 0, legal, { row: 12, col: 13 });
+
+    expect(fourScore).toBe(CHOICE_EVALUATOR_TIER.four);
+    expect(openThreeScore).toBe(CHOICE_EVALUATOR_TIER.openThree);
+    expect(fourScore).toBeGreaterThan(openThreeScore);
+    expect(openThreeScore).toBeGreaterThan(extensionScore);
+  });
+
+  it('is deterministic and returns one score per choice, in order', () => {
+    const board = new Array(225).fill(0);
+    board[idx(7, 7)] = 1;
+    board[idx(3, 3)] = 2;
+    const state: GomokuState = { board, moveCount: 2, winner: null, openingId: 'test' };
+    const legal = gomokuAdapter.getLegalChoices(state);
+
+    const first = gomokuChoiceEvaluator(state, 0, legal);
+    const second = gomokuChoiceEvaluator(state, 0, legal);
+    expect(first.length).toBe(legal.length);
+    expect(first).toEqual(second);
+  });
+
+  it('is wired onto gomokuAdapter as an optional field without touching existing strategySurface flags', () => {
+    expect(gomokuAdapter.choiceEvaluator).toBe(gomokuChoiceEvaluator);
+    expect(gomokuAdapter.strategySurface.map((flag) => flag.flag)).toEqual([
+      'blockImmediateThreat',
+      'centerProximity',
+      'extendLongestLine',
+      'forkAwareness',
+    ]);
   });
 });

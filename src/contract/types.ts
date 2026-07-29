@@ -268,6 +268,27 @@ export interface GameAdapter<TState, TObservation, TChoice> {
   readonly strategySurface: ReadonlyArray<
     StrategyFlagSpec<TObservation, TChoice>
   >;
+  /**
+   * Per-choice static evaluation (ADR-0011, docs/GAP-ANALYSIS-11.md D1):
+   * the same "adapter declares game knowledge as data, kernel/search only
+   * executes" principle `strategySurface` already establishes, applied to a
+   * third injection point — the search layer's tree policy, which had no hook
+   * for game knowledge at all before this (search/mcts.ts's `MctsConfig.
+   * priorWeight`/`priorSource` is the consumer). Must return one score per
+   * entry of `choices`, in the same order (higher = more promising to the
+   * search — no fixed scale, since only the relative ordering and the
+   * softmax `search/mcts.ts` derives from it matter). Must be a pure,
+   * deterministic function of its inputs (no Date.now()/Math.random()/I/O —
+   * the same determinism rule as every other adapter method, contract/
+   * types.ts's file-level doc comment). Optional: adapters that omit this
+   * field are unaffected by anything that only activates when it is
+   * declared (e.g. `priorWeight` left unset).
+   */
+  choiceEvaluator?(
+    state: TState,
+    player: PlayerId,
+    choices: readonly TChoice[],
+  ): readonly number[];
 }
 
 /**

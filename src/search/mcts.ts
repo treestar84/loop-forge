@@ -183,6 +183,30 @@ export interface MctsConfig {
    * loud contract violation.
    */
   readonly priorSource?: 'choiceEvaluator';
+  /**
+   * Direct per-choice evaluator injection (docs/GAP-ANALYSIS-11.md Phase 3-B
+   * B3, `gomoku-chain-evaluator.ts`): takes precedence over `priorSource`/
+   * `adapter.choiceEvaluator` when supplied, so a caller can hand the search
+   * a game-neutral function value directly instead of going through the
+   * adapter's single `choiceEvaluator` field. This is what makes candidate-
+   * level evaluator *variants* possible — `adapter.choiceEvaluator` is one
+   * fixed field per adapter, so two candidates that want different evaluators
+   * (e.g. `mcts5-s256-chain-w16` vs a future evaluator experiment) cannot both
+   * express themselves through it, while each can supply its own
+   * `priorEvaluator` function. Search never inspects what the function does
+   * internally — same contract as `adapter.choiceEvaluator`, just supplied at
+   * the config call site instead of the adapter definition, so this stays
+   * game-neutral infrastructure even though the function itself is free to
+   * encode game knowledge (see `resolvePriorEvaluator`). Left `undefined`
+   * (the default), `priorSource`/`adapter.choiceEvaluator` resolution is
+   * exactly as before — this field is additive only, the regression pin for
+   * every existing `priorSource: 'choiceEvaluator'` caller.
+   */
+  readonly priorEvaluator?: (
+    state: unknown,
+    player: PlayerId,
+    choices: readonly unknown[],
+  ) => readonly number[];
 }
 
 interface ChildEdge {
@@ -259,6 +283,26 @@ export function requireChoiceEvaluator(
 }
 
 /**
+ * Resolve the per-choice evaluator `priorWeight` needs (MctsConfig's doc
+ * comment): `config.priorEvaluator` wins when supplied — it needs no
+ * adapter-declared `choiceEvaluator` at all — otherwise falls back to
+ * `requireChoiceEvaluator`'s existing `priorSource: 'choiceEvaluator'`
+ * resolution (adapter.choiceEvaluator). Only called when `priorIsActive(config)`
+ * is true, same discipline as `requireChoiceEvaluator`. Exported so
+ * `search/ismcts.ts` shares the identical resolution order (MctsConfig is
+ * shared verbatim between the two search algorithms).
+ */
+export function resolvePriorEvaluator(
+  adapter: AnyGameAdapter,
+  config: MctsConfig,
+): (state: unknown, player: PlayerId, choices: readonly unknown[]) => readonly number[] {
+  if (config.priorEvaluator !== undefined) {
+    return config.priorEvaluator;
+  }
+  return requireChoiceEvaluator(adapter, config);
+}
+
+/**
  * Softmax over `scores`, numerically stabilized by subtracting the max
  * before `exp` (MctsConfig.priorWeight's doc comment). Exported for
  * `search/ismcts.ts`'s own prior term (same normalization, same source
@@ -291,7 +335,7 @@ function orderChoicesWithPrior(
   if (!priorIsActive(config)) {
     return { ordered: shuffled(legal, rng), priorByKey: undefined };
   }
-  const evaluator = requireChoiceEvaluator(adapter, config);
+  const evaluator = resolvePriorEvaluator(adapter, config);
   const scores = evaluator(state, player, legal);
   const priors = softmax(scores);
   const entries = legal.map((choice, index) => ({
@@ -539,7 +583,7 @@ export function mctsSearch(
   // so this check never even runs the erased `adapter.choiceEvaluator`
   // lookup for those callers.
   if (priorIsActive(config)) {
-    requireChoiceEvaluator(adapter, config);
+    resolvePriorEvaluator(adapter, config);
   }
 
   // Tactical precheck (MctsConfig.tacticalDepth's doc comment): left

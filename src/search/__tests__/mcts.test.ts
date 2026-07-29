@@ -899,3 +899,81 @@ describe('mctsSearch priorWeight/priorSource (docs/GAP-ANALYSIS-11.md D2, ADR-00
     expect(() => mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED))).toThrow(/choiceEvaluator/);
   });
 });
+
+// The same lure-inverted evaluator as the adapter's `choiceEvaluator` above,
+// supplied instead as a `MctsConfig.priorEvaluator` function value — proves
+// direct injection biases the search the same way `priorSource:
+// 'choiceEvaluator'` does, and does so even on an adapter that declares no
+// `choiceEvaluator` at all (docs/GAP-ANALYSIS-11.md Phase 3-B B3).
+const BANDIT_PRIOR_EVALUATOR = (_state: unknown, _player: PlayerId, choices: readonly unknown[]): readonly number[] =>
+  (choices as readonly BanditChoice[]).map((choice) => (choice === 'lure' ? 100 : choice === 'other' ? 0 : -100));
+
+describe('mctsSearch priorEvaluator (docs/GAP-ANALYSIS-11.md Phase 3-B B3)', () => {
+  it('priorEvaluator unset reproduces the exact pre-prior decision (regression pin)', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(false));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'bandit' };
+
+    const omitted = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    const explicitZeroWeight = mctsSearch(adapter, rootState, { ...config, priorWeight: 0 }, createRng(BANDIT_SEED));
+    expect(omitted).toBe(explicitZeroWeight);
+    expect(omitted).toBe('best');
+  });
+
+  it('biases early visits toward the injected-evaluator-favored (but truly worse) choice, with no adapter choiceEvaluator declared', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(false));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = {
+      simulations: 20,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'bandit',
+      priorWeight: 50,
+      priorEvaluator: BANDIT_PRIOR_EVALUATOR,
+    };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    expect(choice).toBe('lure');
+  });
+
+  it('progressive bias decays at a large simulation budget, same as the choiceEvaluator path', () => {
+    const adapter = eraseAdapter(makeBanditAdapter(false));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const config = {
+      simulations: 2000,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'bandit',
+      priorWeight: 50,
+      priorEvaluator: BANDIT_PRIOR_EVALUATOR,
+    };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    expect(choice).toBe('best');
+  });
+
+  it('takes precedence over the adapter-declared choiceEvaluator when both are present', () => {
+    // The adapter's own choiceEvaluator (makeBanditAdapter(true)) also inverts toward
+    // "lure", so this alone would not distinguish precedence — supply a priorEvaluator
+    // that inverts toward "other" instead and confirm that wins, not "lure".
+    const adapter = eraseAdapter(makeBanditAdapter(true));
+    const rootState = adapter.createInitialState(BANDIT_SEED);
+    const otherFavoringEvaluator = (
+      _state: unknown,
+      _player: PlayerId,
+      choices: readonly unknown[],
+    ): readonly number[] =>
+      (choices as readonly BanditChoice[]).map((choice) => (choice === 'other' ? 100 : choice === 'lure' ? 0 : -100));
+    const config = {
+      simulations: 20,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'bandit',
+      priorWeight: 50,
+      priorEvaluator: otherFavoringEvaluator,
+    };
+
+    const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
+    expect(choice).toBe('other');
+  });
+});

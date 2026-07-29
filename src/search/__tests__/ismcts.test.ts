@@ -436,3 +436,59 @@ describe('ismctsSearch priorWeight/priorSource (docs/GAP-ANALYSIS-11.md D2, ADR-
     expect(() => ismctsSearch(adapter, {}, 0, config, createRng(1))).toThrow(/choiceEvaluator/);
   });
 });
+
+// Same lure-inverted evaluator as this file's `choiceEvaluator` fixture,
+// supplied instead as a `MctsConfig.priorEvaluator` function value
+// (docs/GAP-ANALYSIS-11.md Phase 3-B B3) — proves IS-MCTS's shared
+// `resolvePriorEvaluator` path also honors direct injection, including on an
+// adapter with no `choiceEvaluator` declared at all.
+const IS_BANDIT_PRIOR_EVALUATOR = (_state: unknown, _player: PlayerId, choices: readonly unknown[]): readonly number[] =>
+  (choices as readonly IsBanditChoice[]).map((choice) => (choice === 'lure' ? 100 : choice === 'other' ? 0 : -100));
+
+describe('ismctsSearch priorEvaluator (docs/GAP-ANALYSIS-11.md Phase 3-B B3)', () => {
+  it('priorEvaluator unset reproduces the exact pre-prior decision (regression pin)', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(false));
+    const config = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'is-bandit' };
+
+    const omitted = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    const explicitZeroWeight = ismctsSearch(adapter, {}, 0, { ...config, priorWeight: 0 }, createRng(1));
+    expect(omitted).toBe(explicitZeroWeight);
+    expect(omitted).toBe('best');
+  });
+
+  it('biases early visits toward the injected-evaluator-favored choice, with no adapter choiceEvaluator declared', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(false));
+    const config = {
+      simulations: 20,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'is-bandit',
+      priorWeight: 50,
+      priorEvaluator: IS_BANDIT_PRIOR_EVALUATOR,
+    };
+
+    const choice = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    expect(choice).toBe('lure');
+  });
+
+  it('takes precedence over the adapter-declared choiceEvaluator when both are present', () => {
+    const adapter = eraseAdapter(makeIsBanditAdapter(true));
+    const otherFavoringEvaluator = (
+      _state: unknown,
+      _player: PlayerId,
+      choices: readonly unknown[],
+    ): readonly number[] =>
+      (choices as readonly IsBanditChoice[]).map((choice) => (choice === 'other' ? 100 : choice === 'lure' ? 0 : -100));
+    const config = {
+      simulations: 20,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'is-bandit',
+      priorWeight: 50,
+      priorEvaluator: otherFavoringEvaluator,
+    };
+
+    const choice = ismctsSearch(adapter, {}, 0, config, createRng(1));
+    expect(choice).toBe('other');
+  });
+});

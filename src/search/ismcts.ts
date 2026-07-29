@@ -41,7 +41,7 @@
 import type { AnyBotFactory, AnyGameAdapter, PlayerId, Rng } from '../contract/types';
 import { canonicalJson } from '../kernel/digest';
 import { createRng, shuffled } from '../kernel/rng';
-import { evaluate, priorIsActive, requireChoiceEvaluator, softmax, type MctsConfig } from './mcts';
+import { evaluate, priorIsActive, resolvePriorEvaluator, softmax, type MctsConfig } from './mcts';
 
 /** One edge in the information-set tree: an action taken from some node, keyed by `encodeChoice`. */
 interface IsEdge {
@@ -129,7 +129,7 @@ function computeIsmctsPriors(
   player: PlayerId,
   legal: readonly LegalEntry[],
 ): ReadonlyMap<string, number> {
-  const evaluator = requireChoiceEvaluator(adapter, config);
+  const evaluator = resolvePriorEvaluator(adapter, config);
   const scores = evaluator(state, player, legal.map((entry) => entry.choice));
   const priors = softmax(scores);
   return new Map(legal.map((entry, index) => [entry.key, priors[index] as number]));
@@ -168,7 +168,7 @@ export function ismctsSearch(
   // comment): priorWeight unset/0 skips this entirely (priorIsActive false),
   // the regression pin for every existing IS-MCTS caller.
   if (priorIsActive(config)) {
-    requireChoiceEvaluator(adapter, config);
+    resolvePriorEvaluator(adapter, config);
   }
 
   const root = new IsNode();
@@ -201,7 +201,7 @@ export function ismctsSearch(
       // Priors for choices newly seen at this node (docs/GAP-ANALYSIS-11.md
       // D2): computed once per legal set only when priorWeight is active —
       // `undefined` otherwise, so every existing (priorWeight-unset) caller
-      // never even reaches `requireChoiceEvaluator`.
+      // never even reaches `resolvePriorEvaluator`.
       const priorByKey = priorIsActive(config)
         ? computeIsmctsPriors(adapter, config, state, decision.player, legal)
         : undefined;

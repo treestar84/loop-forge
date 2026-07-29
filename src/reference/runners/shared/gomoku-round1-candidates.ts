@@ -20,6 +20,14 @@
  * constants, same design rationale — see that file's own doc comment for
  * the full B1-B4 design write-up); gomoku-portfolio-round1.ts now imports
  * `buildCandidates` from here instead of defining it locally.
+ *
+ * GAP-11 Phase 4-B addendum: every helper here was widened from
+ * module-private to `export` (no other change) so
+ * ./gomoku-round2-candidates.ts's B2 candidate can reuse
+ * `gomokuOpeningThenPriorFlagSpec`/`openingPolicyMove`/`OPENING_WINDOW`/
+ * `championRolloutPriorConfig`/`erasePriorEvaluator` instead of re-deriving
+ * them — same "single source of truth" discipline this file's own doc
+ * comment already follows for `buildCandidates` itself.
  */
 
 import type { AnyGameAdapter, PlayerId, StrategyFlagSpec } from '../../../contract/types';
@@ -38,7 +46,7 @@ export interface RoundCandidate {
   readonly spec: StrategyFlagSpec<unknown, unknown>;
 }
 
-function championRolloutPriorConfig(
+export function championRolloutPriorConfig(
   bareAdapter: AnyGameAdapter,
   priorWeight: number,
   label: string,
@@ -63,16 +71,16 @@ function championRolloutPriorConfig(
  * for every other adapter field), so this is a type-level cast only, never a
  * behavior change.
  */
-function erasePriorEvaluator(
+export function erasePriorEvaluator(
   evaluator: (state: GomokuState, player: PlayerId, choices: readonly GomokuMove[]) => readonly number[],
 ): (state: unknown, player: PlayerId, choices: readonly unknown[]) => readonly number[] {
   return (state, player, choices) => evaluator(state as GomokuState, player, choices as readonly GomokuMove[]);
 }
 
 /** B2's opening window (portfolio-round1.ts's own design — see that file's doc comment's LossReport rationale). */
-const OPENING_WINDOW = 6;
+export const OPENING_WINDOW = 6;
 
-function chebyshevDistance(a: GomokuMove, b: GomokuMove): number {
+export function chebyshevDistance(a: GomokuMove, b: GomokuMove): number {
   return Math.max(Math.abs(a.row - b.row), Math.abs(a.col - b.col));
 }
 
@@ -83,7 +91,7 @@ function chebyshevDistance(a: GomokuMove, b: GomokuMove): number {
  * single existing line this early) — final ties broken deterministically by
  * `rng`. Pure function of `observation`/`legal`, reused nowhere else.
  */
-function openingPolicyMove(
+export function openingPolicyMove(
   observation: GomokuObservation,
   legal: readonly GomokuMove[],
   rng: ReturnType<typeof createRng>,
@@ -142,7 +150,7 @@ function openingPolicyMove(
  * flag spec in ./gomoku-mcts-flag.ts (this candidate builds its own decision
  * from scratch, it does not modulate a base bot's choice).
  */
-function gomokuOpeningThenPriorFlagSpec(
+export function gomokuOpeningThenPriorFlagSpec(
   adapter: AnyGameAdapter,
   openingMoves: number,
   config: MctsConfig,

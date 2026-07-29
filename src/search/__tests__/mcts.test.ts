@@ -8,7 +8,7 @@
 import type { AnyBotFactory, GameAdapter, GameSpec, PlayerId } from '../../contract/types';
 import { createRng } from '../../kernel/rng';
 import { eraseAdapter } from '../../loop/erase';
-import { mctsBotFactory, mctsSearch } from '../mcts';
+import { applyPriorWeightSchedule, mctsBotFactory, mctsSearch, type MctsConfig } from '../mcts';
 
 // ---------------------------------------------------------------------------
 // Fixture: a 2-ply tactical toy game. Player 0 picks 'a' | 'b' | 'c'; player 1
@@ -975,5 +975,47 @@ describe('mctsSearch priorEvaluator (docs/GAP-ANALYSIS-11.md Phase 3-B B3)', () 
 
     const choice = mctsSearch(adapter, rootState, config, createRng(BANDIT_SEED));
     expect(choice).toBe('other');
+  });
+});
+
+describe('applyPriorWeightSchedule / priorWeightSchedule (docs/GAP-ANALYSIS-11.md Phase 4-B B3 처치 2)', () => {
+  const BASE_CONFIG: MctsConfig = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'sched', priorWeight: 16 };
+
+  it('returns the exact same config object (by reference) when priorWeightSchedule is unset — regression pin', () => {
+    expect(applyPriorWeightSchedule(BASE_CONFIG, 0)).toBe(BASE_CONFIG);
+    expect(applyPriorWeightSchedule(BASE_CONFIG, 7)).toBe(BASE_CONFIG);
+  });
+
+  it('substitutes priorWeight from the schedule, leaving every other field untouched', () => {
+    const config: MctsConfig = { ...BASE_CONFIG, priorWeightSchedule: (decisionIndex) => (decisionIndex < 12 ? 48 : 16) };
+    const early = applyPriorWeightSchedule(config, 0);
+    const late = applyPriorWeightSchedule(config, 12);
+    expect(early.priorWeight).toBe(48);
+    expect(late.priorWeight).toBe(16);
+    expect(early.label).toBe('sched');
+    expect(early.simulations).toBe(20);
+  });
+
+  it('mctsBotFactory calls the schedule with a per-instance, incrementing decisionIndex across successive decide() calls', () => {
+    const adapter = eraseAdapter(makeTacticalAdapter(true));
+    const observation = { ply: 0 as const, p0Choice: null };
+    const legal = ['a', 'b', 'c'];
+    const seenIndices: number[] = [];
+    const config: MctsConfig = {
+      simulations: 5,
+      uctC: 1.4,
+      rolloutCount: 1,
+      label: 'sched-bot',
+      priorWeight: 0,
+      priorWeightSchedule: (decisionIndex) => {
+        seenIndices.push(decisionIndex);
+        return 0;
+      },
+    };
+    const bot = mctsBotFactory(adapter, config)(1);
+    bot.decide('p0', observation, legal);
+    bot.decide('p0', observation, legal);
+    bot.decide('p0', observation, legal);
+    expect(seenIndices).toEqual([0, 1, 2]);
   });
 });

@@ -9,7 +9,7 @@ import type { AnyBotFactory, GameAdapter, GameSpec, PlayerId, Rng } from '../../
 import { createRng } from '../../kernel/rng';
 import { eraseAdapter } from '../../loop/erase';
 import { ismctsBotFactory, ismctsSearch } from '../ismcts';
-import { mctsBotFactory } from '../mcts';
+import { mctsBotFactory, type MctsConfig } from '../mcts';
 
 // ---------------------------------------------------------------------------
 // Fixture: single-decision hidden-information game. Player 1 secretly holds a
@@ -490,5 +490,30 @@ describe('ismctsSearch priorEvaluator (docs/GAP-ANALYSIS-11.md Phase 3-B B3)', (
 
     const choice = ismctsSearch(adapter, {}, 0, config, createRng(1));
     expect(choice).toBe('other');
+  });
+});
+
+describe('ismctsBotFactory priorWeightSchedule (docs/GAP-ANALYSIS-11.md Phase 4-B B3 처치 2 — shared MctsConfig path)', () => {
+  it('resolves priorWeightSchedule(decisionIndex=0) for this bot instance\'s first decision, exactly like mctsBotFactory', () => {
+    const concrete = makeCoinAdapter(true);
+    const adapter = eraseAdapter(concrete);
+    const seenIndices: number[] = [];
+    const config: MctsConfig = {
+      ...COIN_CONFIG,
+      priorWeightSchedule: (decisionIndex) => {
+        seenIndices.push(decisionIndex);
+        return 0;
+      },
+    };
+    const bot = ismctsBotFactory(adapter, config)(42);
+    bot.decide('d', {}, ['a', 'b'] as const);
+    expect(seenIndices).toEqual([0]);
+  });
+
+  it('leaves behavior unchanged (regression pin) when priorWeightSchedule is unset', () => {
+    const concrete = makeCoinAdapter(true);
+    const adapter = eraseAdapter(concrete);
+    const withoutSchedule = ismctsBotFactory(adapter, COIN_CONFIG)(42).decide('d', {}, ['a', 'b'] as const);
+    expect(withoutSchedule).toBe('a');
   });
 });

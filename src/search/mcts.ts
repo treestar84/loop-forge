@@ -207,6 +207,42 @@ export interface MctsConfig {
     player: PlayerId,
     choices: readonly unknown[],
   ) => readonly number[];
+  /**
+   * Per-decision priorWeight override (GAP-11 Phase 4-B B3 처치 2, game-
+   * neutral time-axis extension of `priorWeight`): when supplied, each
+   * `decide()` call resolves an *effective* priorWeight from
+   * `priorWeightSchedule(decisionIndex)` instead of the fixed `priorWeight`
+   * field — `decisionIndex` counts how many decisions *this bot instance* has
+   * already made (0 for its first move in the game, 1 for its second, …),
+   * maintained by the bot factory (`mctsBotFactory`/`search/ismcts.ts`'s
+   * `ismctsBotFactory`), not by `mctsSearch`/`ismctsSearch` themselves — both
+   * search functions still only ever read the single `priorWeight` field, so
+   * this is purely a config-resolution concern the bot factories share via
+   * `applyPriorWeightSchedule` below (the "IS-MCTS shares MctsConfig
+   * verbatim" invariant this file's `priorIsActive` doc comment already
+   * documents extends to this field automatically). Left `undefined` (the
+   * default), `applyPriorWeightSchedule` returns `config` completely
+   * unchanged (same object reference, not just same values) — the regression
+   * pin for every existing caller of either bot factory.
+   */
+  readonly priorWeightSchedule?: (decisionIndex: number) => number;
+}
+
+/**
+ * Resolve `config.priorWeightSchedule` (this file's `MctsConfig` doc comment)
+ * against `decisionIndex` into an effective per-call config: when
+ * `priorWeightSchedule` is set, returns a shallow copy with `priorWeight`
+ * replaced by `priorWeightSchedule(decisionIndex)`; otherwise returns `config`
+ * itself, unchanged, by reference — the byte-for-byte regression pin every
+ * existing (schedule-unset) caller of `mctsBotFactory`/`ismctsBotFactory`
+ * relies on. Exported so `search/ismcts.ts`'s `ismctsBotFactory` can share
+ * this exact resolution instead of re-deriving it.
+ */
+export function applyPriorWeightSchedule(config: MctsConfig, decisionIndex: number): MctsConfig {
+  if (config.priorWeightSchedule === undefined) {
+    return config;
+  }
+  return { ...config, priorWeight: config.priorWeightSchedule(decisionIndex) };
 }
 
 interface ChildEdge {
@@ -738,11 +774,14 @@ export function mctsBotFactory(adapter: AnyGameAdapter, config: MctsConfig): Any
   return (seed) => {
     const rng = createRng(seed);
     const id = `mcts-${config.label}-${seed}`;
+    let decisionIndex = 0;
     return {
       id,
       decide(_decisionPoint, observation, legal) {
         const rootState = reconstructState(observation);
-        const choice = mctsSearch(adapter, rootState, config, rng);
+        const effectiveConfig = applyPriorWeightSchedule(config, decisionIndex);
+        decisionIndex += 1;
+        const choice = mctsSearch(adapter, rootState, effectiveConfig, rng);
         const key = adapter.encodeChoice(choice);
         const matched = legal.find((candidate) => adapter.encodeChoice(candidate) === key);
         if (matched === undefined) {

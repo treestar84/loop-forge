@@ -41,7 +41,7 @@
 import type { AnyBotFactory, AnyGameAdapter, PlayerId, Rng } from '../contract/types';
 import { canonicalJson } from '../kernel/digest';
 import { createRng, shuffled } from '../kernel/rng';
-import { evaluate, priorIsActive, resolvePriorEvaluator, softmax, type MctsConfig } from './mcts';
+import { applyPriorWeightSchedule, evaluate, priorIsActive, resolvePriorEvaluator, softmax, type MctsConfig } from './mcts';
 
 /** One edge in the information-set tree: an action taken from some node, keyed by `encodeChoice`. */
 interface IsEdge {
@@ -337,6 +337,7 @@ export function ismctsBotFactory(adapter: AnyGameAdapter, config: MctsConfig): A
     const rng = createRng(seed);
     const id = `ismcts-${config.label}-${seed}`;
     let cachedPlayer: PlayerId | null = null;
+    let decisionIndex = 0;
 
     return {
       id,
@@ -344,7 +345,9 @@ export function ismctsBotFactory(adapter: AnyGameAdapter, config: MctsConfig): A
         if (cachedPlayer === null) {
           cachedPlayer = detectViewer(adapter, sampleStateFromObservation, observation, rng.fork('ismcts-viewer-detect'));
         }
-        const choice = ismctsSearch(adapter, observation, cachedPlayer, config, rng);
+        const effectiveConfig = applyPriorWeightSchedule(config, decisionIndex);
+        decisionIndex += 1;
+        const choice = ismctsSearch(adapter, observation, cachedPlayer, effectiveConfig, rng);
         const key = adapter.encodeChoice(choice);
         const matched = legal.find((candidate) => adapter.encodeChoice(candidate) === key);
         if (matched === undefined) {

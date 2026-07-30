@@ -13,7 +13,7 @@
  * src/__tests__/dependency-rules.test.ts's APP_BOUNDARY_PREFIXES.
  */
 
-import type { AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
+import type { AnyBotFactory, AnyGameAdapter, StrategyFlagSpec } from '../../../contract/types';
 import { ismctsBotFactory } from '../../../search/ismcts';
 import type { MctsConfig } from '../../../search/mcts';
 
@@ -63,5 +63,62 @@ export function hearthstoneIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlag
       'SO-ISMCTS search candidate over sampled hand/deck determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, HEARTHSTONE_ISMCTS_S128_HR_CONFIG),
     assembly: 'terminal',
+  };
+}
+
+/**
+ * Build any `MctsConfig`-driven StrategyFlagSpec for hearthstone (GAP-11
+ * Phase 7 B1/B3/B4 — priorWeight sweep + rolloutFactory variants), same
+ * "`apply()` ignores `base` entirely" convention as `hearthstoneIsmctsFlagSpec`
+ * above and every other search-based flag spec in this codebase.
+ */
+export function hearthstoneIsmctsFlagSpecFor(
+  adapter: AnyGameAdapter,
+  config: MctsConfig,
+  flag: string,
+  description: string,
+): StrategyFlagSpec<unknown, unknown> {
+  return {
+    flag,
+    description,
+    apply: () => ismctsBotFactory(adapter, config),
+    assembly: 'terminal',
+  };
+}
+
+/**
+ * B3 본안 (GAP-11 Phase 7 design spec, main-loop): `ismcts-s128-hr`'s exact
+ * budget/rollout config plus a tree prior sourced from
+ * `hearthstoneAdapter.choiceEvaluator` (ADR-0011, ../../hearthstone.ts) —
+ * `priorSource` left at its default (`'choiceEvaluator'`) rather than set via
+ * `priorEvaluator`, since the prior knowledge here lives on the adapter
+ * itself, not a standalone evaluator function (unlike gomoku's chain/
+ * defensive evaluators or dominion's buy-priority evaluator).
+ */
+export function hearthstoneTempoPriorConfig(priorWeight: number, label: string): MctsConfig {
+  return {
+    ...HEARTHSTONE_ISMCTS_S128_HR_CONFIG,
+    label,
+    priorWeight,
+  };
+}
+
+/**
+ * B4 (GAP-11 Phase 7 design spec, "미시도 축" A2 rollout-policy replace):
+ * `ismcts-s128-hr`'s exact budget, but rollouts driven by `rolloutFactory`
+ * (search/mcts.ts's doc comment — takes precedence over `rolloutPolicy`)
+ * instead of the adapter's own `baselines.heuristic`. `rolloutFactory` is
+ * supplied by the caller (composeBot-assembled `hearthstoneMidBot`, same
+ * "compose then inject" pattern as gomoku-portfolio-round4.ts's own
+ * `championRollout` rolloutFactory) so this file stays independent of any
+ * one experiment module.
+ */
+export function hearthstoneL1RolloutConfig(rolloutFactory: AnyBotFactory, label: string): MctsConfig {
+  return {
+    simulations: 128,
+    uctC: 1.4,
+    rolloutCount: 1,
+    label,
+    rolloutFactory,
   };
 }

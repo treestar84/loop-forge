@@ -531,3 +531,93 @@ describe('hearthstone sampleStateFromObservation (docs/FIX-BACKLOG.md P4)', () =
     expect(arrangementOf(sampledA)).not.toEqual(arrangementOf(sampledB));
   });
 });
+
+describe('hearthstoneAdapter.choiceEvaluator (ADR-0011, GAP-11 Phase 7 B3)', () => {
+  const evaluate = hearthstoneAdapter.choiceEvaluator;
+  if (!evaluate) throw new Error('expected hearthstoneAdapter.choiceEvaluator to be declared');
+
+  it('scores a lethal face attack strictly above every other option', () => {
+    const state = customState([
+      player({
+        board: [minion({ instanceId: 'p0-yeti', defId: 'chillwind-yeti', attack: 4, health: 5 })],
+        manaCurrent: 10,
+      }),
+      player({ hero: { health: 3 }, board: [minion({ instanceId: 'p1-croc', defId: 'river-crocolisk', attack: 2, health: 3 })] }),
+    ]);
+    const choices: HearthstoneChoice[] = [
+      { kind: 'attack', attackerId: 'p0-yeti', targetId: 'hero:1' }, // lethal: 4 dmg >= 3 health
+      { kind: 'attack', attackerId: 'p0-yeti', targetId: 'p1-croc' }, // favorable trade, but not lethal
+      { kind: 'endTurn' },
+    ];
+    const scores = evaluate(state, 0, choices);
+    expect(scores[0]).toBeGreaterThan(scores[1] as number);
+    expect(scores[0]).toBeGreaterThan(scores[2] as number);
+  });
+
+  it('scores a favorable trade (kill, survive) above an unfavorable one (die, no kill)', () => {
+    const state = customState([
+      player({
+        board: [
+          minion({ instanceId: 'p0-golem', defId: 'war-golem', attack: 7, health: 7 }),
+          minion({ instanceId: 'p0-boar', defId: 'stonetusk-boar', attack: 1, health: 1 }),
+        ],
+      }),
+      player({
+        board: [
+          minion({ instanceId: 'p1-mage', defId: 'magma-rager', attack: 5, health: 1 }), // killable, but hits back for 5
+          minion({ instanceId: 'p1-yeti', defId: 'chillwind-yeti', attack: 4, health: 5 }), // not killable by the 1/1 boar
+        ],
+      }),
+    ]);
+    const favorable: HearthstoneChoice = { kind: 'attack', attackerId: 'p0-golem', targetId: 'p1-mage' }; // 7 dmg kills the 5/1; golem (7hp) survives the 5 dmg back
+    const unfavorable: HearthstoneChoice = { kind: 'attack', attackerId: 'p0-boar', targetId: 'p1-yeti' }; // boar (1 dmg) can't kill the 5-health yeti; boar dies to the 4 dmg back
+    const scores = evaluate(state, 0, [favorable, unfavorable]);
+    expect(scores[0]).toBeGreaterThan(scores[1] as number);
+  });
+
+  it('prioritizes killing the lowest-health, highest-attack enemy minion via removal', () => {
+    const state = customState([
+      player({
+        hand: [card('h-spark', 'spark-bolt')],
+        manaCurrent: 10,
+      }),
+      player({
+        board: [
+          minion({ instanceId: 'p1-yeti', defId: 'chillwind-yeti', attack: 4, health: 5 }), // not killable by 3 dmg
+          minion({ instanceId: 'p1-mage', defId: 'magma-rager', attack: 5, health: 1 }), // killable, high attack
+        ],
+      }),
+    ]);
+    const killMage: HearthstoneChoice = { kind: 'play', cardInstanceId: 'h-spark', targetId: 'p1-mage' };
+    const chipYeti: HearthstoneChoice = { kind: 'play', cardInstanceId: 'h-spark', targetId: 'p1-yeti' };
+    const scores = evaluate(state, 0, [killMage, chipYeti]);
+    expect(scores[0]).toBeGreaterThan(scores[1] as number);
+  });
+
+  it('scores developing the board above hitting face when nothing is lethal or a kill', () => {
+    const state = customState([
+      player({
+        hand: [card('h-yeti', 'chillwind-yeti')],
+        manaCurrent: 10,
+      }),
+      player({ hero: { health: 30 } }),
+    ]);
+    const develop: HearthstoneChoice = { kind: 'play', cardInstanceId: 'h-yeti' };
+    const endTurn: HearthstoneChoice = { kind: 'endTurn' };
+    const scores = evaluate(state, 0, [develop, endTurn]);
+    expect(scores[0]).toBeGreaterThan(scores[1] as number);
+  });
+
+  it('ranks face damage below removal but above passing', () => {
+    const state = customState([
+      player({ hand: [card('h-spark', 'spark-bolt')], manaCurrent: 10 }),
+      player({ hero: { health: 30 }, board: [minion({ instanceId: 'p1-mage', defId: 'magma-rager', attack: 5, health: 1 })] }),
+    ]);
+    const killMinion: HearthstoneChoice = { kind: 'play', cardInstanceId: 'h-spark', targetId: 'p1-mage' };
+    const face: HearthstoneChoice = { kind: 'play', cardInstanceId: 'h-spark', targetId: 'hero:1' };
+    const endTurn: HearthstoneChoice = { kind: 'endTurn' };
+    const scores = evaluate(state, 0, [killMinion, face, endTurn]);
+    expect(scores[0]).toBeGreaterThan(scores[1] as number);
+    expect(scores[1]).toBeGreaterThan(scores[2] as number);
+  });
+});

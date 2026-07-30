@@ -959,6 +959,206 @@ const hiddenInfoProbe: HiddenInfoProbe<HearthstoneState> = {
   },
 };
 
+// --- choiceEvaluator (ADR-0011, GAP-11 Phase 7 B3) -----------------------
+
+/**
+ * Strictly separated priority bands (same "no fixed scale, only relative
+ * ordering matters" convention as gomoku's `CHOICE_EVALUATOR_TIER`,
+ * contract/types.ts's own doc comment on `choiceEvaluator`) — big enough
+ * gaps that no in-band magnitude addition below can spill into the next
+ * band. Re-expresses the L2 anchor's judgment (../experiments/
+ * hearthstone-opus-bot.ts read for reference only, GAP-11 Phase 7 design
+ * spec — logic re-derived here from scratch, that file is never imported)
+ * as a strict tier order: 즉사 > 유리한 교환 > 제거 > 전개 > 명치 > 그 외.
+ */
+const CHOICE_EVALUATOR_TIER = {
+  lethal: 1000,
+  favorableTrade: 500,
+  removal: 350,
+  develop: 200,
+  face: 50,
+  passive: 0,
+} as const;
+
+function choiceEvaluatorBodyValue(attack: number, health: number): number {
+  return attack + health;
+}
+
+function cardDefInHand(ps: HearthstonePlayerState, cardInstanceId: string): CardDef | undefined {
+  const card = ps.hand.find((c) => c.instanceId === cardInstanceId);
+  return card ? CARD_DEFS_BY_ID.get(card.defId) : undefined;
+}
+
+/** Scales favorable-trade/removal scores up when the enemy board already
+ * threatens lethal soon — same "defense before greed" idea as the L2
+ * anchor's own pressure multiplier, re-derived independently from state. */
+function choiceEvaluatorPressure(state: HearthstoneState, player: PlayerId): number {
+  const ps = getPlayer(state, player);
+  const opp = getPlayer(state, otherPlayer(player));
+  if (ps.hero.health <= 0) return 1.0;
+  const enemyBoardAttack = opp.board.reduce((sum, m) => sum + m.attack, 0);
+  if (enemyBoardAttack >= ps.hero.health) return 2.0;
+  if (enemyBoardAttack >= ps.hero.health * 0.6) return 1.4;
+  return 1.0;
+}
+
+function isFaceChoice(choice: HearthstoneChoice, opponent: PlayerId): boolean {
+  if (choice.kind === 'attack' || choice.kind === 'heroPower') return isHeroTargetFor(choice.targetId, opponent);
+  if (choice.kind === 'play') return choice.targetId !== undefined && isHeroTargetFor(choice.targetId, opponent);
+  return false;
+}
+
+/** Sum of every face-damage option already present in `choices` — mirrors
+ * the L2 anchor's "즉사" lethal check, but re-derived purely from this
+ * decision's own legal choices (attack/spell/battlecry/hero-power reaching
+ * the enemy face), since this reduced game has no Taunt. */
+function reachableFaceDamage(
+  ps: HearthstonePlayerState,
+  opponent: PlayerId,
+  choices: readonly HearthstoneChoice[],
+): number {
+  let total = 0;
+  for (const choice of choices) {
+    if (choice.kind === 'attack' && isHeroTargetFor(choice.targetId, opponent)) {
+      const attacker = ps.board.find((m) => m.instanceId === choice.attackerId);
+      total += attacker?.attack ?? 0;
+    } else if (choice.kind === 'heroPower' && isHeroTargetFor(choice.targetId, opponent)) {
+      total += HERO_POWER_DAMAGE;
+    } else if (choice.kind === 'play' && choice.targetId !== undefined && isHeroTargetFor(choice.targetId, opponent)) {
+      const def = cardDefInHand(ps, choice.cardInstanceId);
+      if (def?.kind === 'spell' && def.effect.kind === 'damageEnemy') total += def.effect.amount;
+      else if (def?.kind === 'minion' && def.battlecry.kind === 'damageEnemy') total += def.battlecry.amount;
+    }
+  }
+  return total;
+}
+
+/**
+ * `hearthstoneAdapter.choiceEvaluator` (ADR-0011) — per-choice static score
+ * feeding `search/mcts.ts`'s tree prior (`MctsConfig.priorWeight`/
+ * `priorSource: 'choiceEvaluator'`, the default). Priority order, strictly
+ * banded (design brief GAP-11 Phase 7, "즉사 최고점 > 유리한 교환 가중
+ * (상대 리썰 임박시 배율 상향) > 제거는 최저체력·고가치 우선 > 전개는
+ * 템포값(공격+체력+배틀크라이) > 명치 최하위"):
+ *   1. lethal — any face-damage option once every face-damage option
+ *      already present in `choices` sums to lethal.
+ *   2. favorableTrade — an attack that kills the enemy minion without
+ *      losing mine, scaled up by `choiceEvaluatorPressure`.
+ *   3. removal — a spell/battlecry/hero-power/even-trade hit that kills an
+ *      enemy minion, ranked by that minion's value (a low-health,
+ *      high-attack target — e.g. a 5/1 — scores highest within the band).
+ *   4. develop — playing a minion (tempo = attack+health, plus its
+ *      battlecry against the chosen target) or a draw/heal/buff effect.
+ *   5. face — any remaining face-damage option (attack/spell/hero power).
+ *   6. passive — endTurn, plus any chip damage or losing trade that
+ *      accomplishes neither a kill nor face damage.
+ */
+function hearthstoneChoiceEvaluator(
+  state: HearthstoneState,
+  player: PlayerId,
+  choices: readonly HearthstoneChoice[],
+): readonly number[] {
+  const opponent = otherPlayer(player);
+  const ps = getPlayer(state, player);
+  const opp = getPlayer(state, opponent);
+  const pressure = choiceEvaluatorPressure(state, player);
+
+  const reachable = reachableFaceDamage(ps, opponent, choices);
+  const isLethal = opp.hero.health > 0 && reachable >= opp.hero.health;
+
+  return choices.map((choice) => {
+    if (isLethal && isFaceChoice(choice, opponent)) {
+      return CHOICE_EVALUATOR_TIER.lethal;
+    }
+    switch (choice.kind) {
+      case 'attack': {
+        const attacker = ps.board.find((m) => m.instanceId === choice.attackerId);
+        if (!attacker) return CHOICE_EVALUATOR_TIER.passive;
+        if (isHeroTargetFor(choice.targetId, opponent)) {
+          return CHOICE_EVALUATOR_TIER.face + attacker.attack;
+        }
+        const target = opp.board.find((m) => m.instanceId === choice.targetId);
+        if (!target) return CHOICE_EVALUATOR_TIER.passive;
+        const kills = attacker.attack >= target.health;
+        const dies = target.attack >= attacker.health;
+        if (kills && !dies) {
+          return CHOICE_EVALUATOR_TIER.favorableTrade + choiceEvaluatorBodyValue(target.attack, target.health) * pressure;
+        }
+        if (kills && dies) {
+          return CHOICE_EVALUATOR_TIER.removal + target.attack;
+        }
+        return CHOICE_EVALUATOR_TIER.passive;
+      }
+      case 'heroPower': {
+        if (isHeroTargetFor(choice.targetId, opponent)) {
+          return CHOICE_EVALUATOR_TIER.face + HERO_POWER_DAMAGE;
+        }
+        const target = opp.board.find((m) => m.instanceId === choice.targetId);
+        if (target && HERO_POWER_DAMAGE >= target.health) {
+          return CHOICE_EVALUATOR_TIER.removal + target.attack;
+        }
+        return CHOICE_EVALUATOR_TIER.passive;
+      }
+      case 'play': {
+        const def = cardDefInHand(ps, choice.cardInstanceId);
+        if (!def) return CHOICE_EVALUATOR_TIER.passive;
+        if (def.kind === 'spell') {
+          if (def.effect.kind === 'damageEnemy') {
+            if (choice.targetId !== undefined && isHeroTargetFor(choice.targetId, opponent)) {
+              return CHOICE_EVALUATOR_TIER.face + def.effect.amount;
+            }
+            const target = choice.targetId !== undefined ? opp.board.find((m) => m.instanceId === choice.targetId) : undefined;
+            if (target && def.effect.amount >= target.health) {
+              return CHOICE_EVALUATOR_TIER.removal + target.attack;
+            }
+            return CHOICE_EVALUATOR_TIER.passive;
+          }
+          return CHOICE_EVALUATOR_TIER.develop + def.effect.count;
+        }
+        // Minion: tempo of the body plus its battlecry against the chosen target.
+        let score = CHOICE_EVALUATOR_TIER.develop + choiceEvaluatorBodyValue(def.attack, def.health) + (def.charge ? 1 : 0);
+        switch (def.battlecry.kind) {
+          case 'damageEnemy': {
+            if (choice.targetId !== undefined) {
+              if (isHeroTargetFor(choice.targetId, opponent)) {
+                score += def.battlecry.amount;
+              } else {
+                const target = opp.board.find((m) => m.instanceId === choice.targetId);
+                if (target && def.battlecry.amount >= target.health) {
+                  score += choiceEvaluatorBodyValue(target.attack, target.health) + target.attack;
+                }
+              }
+            }
+            break;
+          }
+          case 'drawCard':
+            score += def.battlecry.count;
+            break;
+          case 'healOwnHero':
+            score += Math.max(0, Math.min(def.battlecry.amount, STARTING_HERO_HEALTH - ps.hero.health)) * 0.5;
+            break;
+          case 'buffFriendlyMinion':
+            score += 1;
+            break;
+          case 'none':
+            break;
+          default: {
+            const exhaustive: never = def.battlecry;
+            throw new Error(`hearthstoneChoiceEvaluator: unhandled battlecry ${JSON.stringify(exhaustive)}`);
+          }
+        }
+        return score;
+      }
+      case 'endTurn':
+        return CHOICE_EVALUATOR_TIER.passive;
+      default: {
+        const exhaustive: never = choice;
+        throw new Error(`hearthstoneChoiceEvaluator: unhandled choice ${JSON.stringify(exhaustive)}`);
+      }
+    }
+  });
+}
+
 // --- Baselines ------------------------------------------------------------
 
 const randomBaseline: BotFactory<HearthstoneObservation, HearthstoneChoice> = (seed) => {
@@ -1253,4 +1453,7 @@ export const hearthstoneAdapter: GameAdapter<HearthstoneState, HearthstoneObserv
     heuristic: heuristicBaseline,
   },
   strategySurface: [faceRush, curveDump, heroPowerSpam],
+  choiceEvaluator: hearthstoneChoiceEvaluator,
 };
+
+export { hearthstoneChoiceEvaluator, CHOICE_EVALUATOR_TIER };

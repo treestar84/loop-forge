@@ -70,6 +70,10 @@ function isCandidateLoss(record: MatchTrajectoryRecord): boolean {
   return record.outcome.winner !== null && record.outcome.winner !== record.candidateSeat;
 }
 
+function isDraw(record: MatchTrajectoryRecord): boolean {
+  return record.outcome.winner === null;
+}
+
 /**
  * Mine divergences between the candidate's actual choices and what
  * `anchorFactory` would have chosen at the same decision points, over every
@@ -187,5 +191,151 @@ export function mineLosses(
     divergences,
     mismatchRateByDecisionPoint,
     firstDivergenceDepthHistogram,
+  };
+}
+
+export interface DrawReport {
+  readonly totalGames: number;
+  readonly drawGames: number;
+  readonly divergences: readonly LossDivergence[];
+  readonly mismatchRateByDecisionPoint: Readonly<
+    Record<string, { readonly decisions: number; readonly mismatches: number }>
+  >;
+  /** Same bucketing convention as LossReport.firstDivergenceDepthHistogram. */
+  readonly firstDivergenceDepthHistogram: Readonly<Record<string, number>>;
+  /** Bucketed distribution of each drawn game's *last* divergence
+   * decisionIndex — a proxy for where the game "locks in" to a draw: after
+   * this point the candidate agreed with the anchor on every remaining
+   * candidate decision, so whatever settled the draw (mutual threat
+   * neutralization) had already happened by here. Games with zero
+   * divergences (candidate agreed with the anchor throughout) are not
+   * counted, same convention as firstDivergenceDepthHistogram. */
+  readonly lastDivergenceDepthHistogram: Readonly<Record<string, number>>;
+  /** Bucketed distribution of each drawn game's total recorded-choice count
+   * (record.choices.length) — how long the game ran before ending in a
+   * draw, independent of where divergences occurred. */
+  readonly gameLengthHistogram: Readonly<Record<string, number>>;
+}
+
+/**
+ * Same replay/comparison machinery as `mineLosses`, but over every *drawn*
+ * game in `records` (`outcome.winner === null`) instead of every lost game —
+ * GAP-11 Phase 4-C's question of where a high-draw-rate candidate's draws
+ * settle (early/mid/late) rather than just where its losses branch. Kept as
+ * a separate function rather than a `mineLosses` option so `mineLosses`'s
+ * existing output shape/behavior stays byte-for-byte unchanged for every
+ * current caller.
+ */
+export function mineDraws(
+  adapter: AnyGameAdapter,
+  records: readonly MatchTrajectoryRecord[],
+  anchorFactory: AnyBotFactory,
+  options: { readonly anchorSeedBase: number; readonly maxDivergencesPerGame?: number },
+): DrawReport {
+  const maxDivergencesPerGame = options.maxDivergencesPerGame ?? Infinity;
+  const rootRng = createRng(options.anchorSeedBase);
+
+  const divergences: LossDivergence[] = [];
+  const mismatchRateByDecisionPoint: Record<
+    string,
+    { decisions: number; mismatches: number }
+  > = {};
+  const firstDivergenceDepthHistogram: Record<string, number> = {};
+  const lastDivergenceDepthHistogram: Record<string, number> = {};
+  const gameLengthHistogram: Record<string, number> = {};
+
+  let drawGames = 0;
+
+  for (const record of records) {
+    if (!isDraw(record)) {
+      continue;
+    }
+    drawGames += 1;
+    gameLengthHistogram[depthBucket(record.choices.length)] =
+      (gameLengthHistogram[depthBucket(record.choices.length)] ?? 0) + 1;
+
+    let state = adapter.createInitialState(record.gameSeed);
+    let recordDivergences = 0;
+    let firstDivergenceDepth: number | null = null;
+    let lastDivergenceDepth: number | null = null;
+
+    for (let decisionIndex = 0; decisionIndex < record.choices.length; decisionIndex += 1) {
+      const decision = adapter.currentDecision(state);
+      if (!decision) {
+        break;
+      }
+      const legal = adapter.getLegalChoices(state);
+      if (legal.length === 0) {
+        break;
+      }
+
+      const candidateChoiceKey = record.choices[decisionIndex] as string;
+      const decider = record.deciders[decisionIndex];
+
+      if (decider === record.candidateSeat) {
+        const anchorSeed = rootRng
+          .fork(`${record.gameSeed}:${decisionIndex}`)
+          .nextInt(BOT_SEED_SPACE);
+        const anchor = anchorFactory(anchorSeed);
+        const observation = adapter.getObservation(state, decision.player);
+        let anchorChoice: unknown;
+        try {
+          anchorChoice = anchor.decide(decision.decisionPoint, observation, legal);
+        } catch {
+          break;
+        }
+        const anchorChoiceKey = adapter.encodeChoice(anchorChoice);
+
+        const dpId = decision.decisionPoint;
+        const dpStats = mismatchRateByDecisionPoint[dpId] ?? { decisions: 0, mismatches: 0 };
+        const decisions = dpStats.decisions + 1;
+        const mismatches = dpStats.mismatches + (anchorChoiceKey !== candidateChoiceKey ? 1 : 0);
+        mismatchRateByDecisionPoint[dpId] = { decisions, mismatches };
+
+        if (anchorChoiceKey !== candidateChoiceKey) {
+          if (firstDivergenceDepth === null) {
+            firstDivergenceDepth = decisionIndex;
+          }
+          lastDivergenceDepth = decisionIndex;
+          if (recordDivergences < maxDivergencesPerGame) {
+            divergences.push({
+              gameSeed: record.gameSeed,
+              decisionIndex,
+              decisionPointId: dpId,
+              candidateChoiceKey,
+              anchorChoiceKey,
+            });
+            recordDivergences += 1;
+          }
+        }
+      }
+
+      const matched = legal.find(
+        (candidate) => adapter.encodeChoice(candidate) === candidateChoiceKey,
+      );
+      if (matched === undefined) {
+        break;
+      }
+      state = adapter.applyChoice(state, matched);
+    }
+
+    if (firstDivergenceDepth !== null) {
+      const bucket = depthBucket(firstDivergenceDepth);
+      firstDivergenceDepthHistogram[bucket] = (firstDivergenceDepthHistogram[bucket] ?? 0) + 1;
+    }
+    if (lastDivergenceDepth !== null) {
+      const bucket = depthBucket(lastDivergenceDepth);
+      lastDivergenceDepthHistogram[bucket] = (lastDivergenceDepthHistogram[bucket] ?? 0) + 1;
+    }
+  }
+
+  return {
+    totalGames: records.length,
+    drawGames,
+    divergences,
+    mismatchRateByDecisionPoint,
+    firstDivergenceDepthHistogram,
+    lastDivergenceDepthHistogram,
+    gameLengthHistogram,
   };
 }

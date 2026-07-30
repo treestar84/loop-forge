@@ -1,7 +1,7 @@
 import type { AnyBotFactory } from '../../contract/types';
 import { eraseAdapter } from '../erase';
 import { runPairedBlock, type MatchTrajectoryRecord } from '../paired-match';
-import { mineLosses } from '../loss-mining';
+import { mineDraws, mineLosses } from '../loss-mining';
 import { longAccumulateAdapter } from './helpers/long-accumulate-game';
 
 const adapter = eraseAdapter(longAccumulateAdapter);
@@ -99,5 +99,40 @@ describe('mineLosses', () => {
     const first = mineLosses(adapter, lossRecords, ANCHOR_BOT, { anchorSeedBase: 999 });
     const second = mineLosses(adapter, lossRecords, ANCHOR_BOT, { anchorSeedBase: 999 });
     expect(second).toEqual(first);
+  });
+});
+
+describe('mineDraws', () => {
+  it('mines only drawn games, tracks game length and last-divergence depth, and skips losses/wins', () => {
+    // Both sides always pick 0: scores tie 0-0 on both seatings -> draws.
+    const drawRecords = collectRecords(LOW_BOT, LOW_BOT, 5);
+    const lossRecords = collectRecords(LOW_BOT, HIGH_BOT, 5);
+
+    const report = mineDraws(adapter, [...drawRecords, ...lossRecords], ANCHOR_BOT, {
+      anchorSeedBase: 999,
+    });
+
+    expect(report.totalGames).toBe(4);
+    expect(report.drawGames).toBe(2);
+    // Every one of the 60 candidate decisions per drawn game diverges from
+    // the anchor (anchor always picks 9, candidate always picked 0).
+    expect(report.divergences).toHaveLength(120);
+    // Full-length (120-choice) games bucket into "120-129".
+    expect(report.gameLengthHistogram['120-129']).toBe(2);
+    // The candidate's last decision is index 118 or 119 depending on seating.
+    const lastBuckets = Object.keys(report.lastDivergenceDepthHistogram);
+    expect(lastBuckets).toEqual(['110-119']);
+    expect(report.lastDivergenceDepthHistogram['110-119']).toBe(2);
+    expect(report.firstDivergenceDepthHistogram['0-9']).toBe(2);
+  });
+
+  it('reports zero divergences and an empty lastDivergenceDepthHistogram when the anchor agrees throughout', () => {
+    const drawRecords = collectRecords(LOW_BOT, LOW_BOT, 5);
+    const agreeingAnchor = fixedPickBot(0, 'anchor-agrees');
+    const report = mineDraws(adapter, drawRecords, agreeingAnchor, { anchorSeedBase: 999 });
+    expect(report.drawGames).toBe(2);
+    expect(report.divergences).toHaveLength(0);
+    expect(report.lastDivergenceDepthHistogram).toEqual({});
+    expect(report.firstDivergenceDepthHistogram).toEqual({});
   });
 });

@@ -12,9 +12,9 @@
 | ID | 항목 | 상태 |
 |---|---|---|
 | E1 | 포트폴리오 라운드 실행기 추출(`artifacts/portfolio-round.ts`) — diff가 파일 크기를 초과하는 복붙 문제 처치 | **완료**(2026-07-30, 커밋 2e3e232, GAP-12 §4) |
-| E2 | 6개 미적용 게임(스플랜더·윙스팬·장기·아발론·카탄·mini-trick)에 앵커 래더 최소 적용 | 미착수 |
-| E3 | 문서 분할(GAP-ANALYSIS-11의 라운드 로그를 별도 파일로) | 미착수 |
-| E4 | 테스트 시간 예산 성문화 | 미착수(E1이 개선 효과 확인, 상한 규칙화는 별도) |
+| E2 | 6개 미적용 게임(스플랜더·윙스팬·장기·아발론·카탄·mini-trick)에 앵커 래더 최소 적용 — 사용자 검토 결과 일괄 적용 부적합 판정(스플랜더·윙스팬은 이미 옛 벤치마크로 승리, 장기·아발론·카탄은 내부 채택 후보가 0개라 앵커 이전에 다른 병목, mini-trick은 사용자 가치 없음) — 재설계 필요 | 보류 |
+| E3 | 문서 분할(GAP-ANALYSIS-11의 라운드 로그를 `docs/GAP-11-ROUNDS.md`로) | **완료**(2026-07-31, GAP-12 §5) |
+| E4 | 테스트 시간 예산 성문화(`docs/TROUBLESHOOTING.md` §12) | **완료**(2026-07-31, GAP-12 §6) |
 | E5 | MCTS 옵션 필드 조합 계약 명시화 | 미착수 |
 
 ## 미착수 — GAP-11: 큰루프/작은루프 설계 수준 보완 (2026-07-29, `docs/GAP-ANALYSIS-11.md`, 사용자 지시)
@@ -31,14 +31,14 @@
 
 | ID | 항목 | Phase | 상태 |
 |---|---|---|---|
-| D4 | `runHeadToHead` trajectory 기록 옵션 + `loop/loss-mining.ts`(LossReport: 패배 확정 깊이·분기점 대조·결정지점별 불일치율) + `loop/probe-bank.ts`(프로브 국면 봉인·후보 채점기 — 웨이브 전 초저비용 필터) | 1 | **완료**(2026-07-29, 커밋 84954e2 + 자기일치율 1.0 후속 수정 — 결정별 파생 시드, GAP-11 §5.5) |
-| D3 | `BenchmarkAnchor kind:'external'`+`role:'feedback'\|'holdout'` + `WaveConfig.challenge?` 계측 열(+ADR-0012, 채택 판정 불개입) + L1(Sonnet 설계)·L2(기존 Opus봇 봉인)·L3(신스타일 Opus 설계, 피드백 경로 코드 수준 차단) 앵커 등록 — 등록 전 실측 게이트(heuristic<L1<L2, L3는 L2와 행동 지문 거리 확인) | 1 | **완료**(2026-07-29, 커밋 3ff81af·7219fa5·e091076 — 3게임 래더 봉인, 판정 실험으로 v5<L1<L2 서열 실측, GAP-11 §5.5) |
-| D1 | `choiceEvaluator?` 계약 확장(+ADR-0011) — 지식의 세 번째 주입 통로 (GameAdapter에 배치 — 제네릭 접근 필요, strategySurface와 동일 위치) | 2 | **완료**(2026-07-29, GAP-11 §5.5 Phase 2) |
-| D2 | `search/mcts.ts` PUCT prior/progressive bias(`priorWeight`, 미지정 시 불변, IS-MCTS 명시 공유) + 오목 실증 | 2 | **완료**(2026-07-29 — vs L1 0→34.5% 완전 단조 개선으로 "L1 곡선 유의 개선" 기준 충족·주입점 유효 실증, vs L2는 전 후보 0%로 미해결(무영향 — 다음 라운드 브리프 입력), GAP-11 §5.5) |
+| D4 | `runHeadToHead` trajectory 기록 옵션 + `loop/loss-mining.ts`(LossReport: 패배 확정 깊이·분기점 대조·결정지점별 불일치율) + `loop/probe-bank.ts`(프로브 국면 봉인·후보 채점기 — 웨이브 전 초저비용 필터) | 1 | **완료**(2026-07-29, 커밋 84954e2 + 자기일치율 1.0 후속 수정 — 결정별 파생 시드, GAP-11-ROUNDS.md) |
+| D3 | `BenchmarkAnchor kind:'external'`+`role:'feedback'\|'holdout'` + `WaveConfig.challenge?` 계측 열(+ADR-0012, 채택 판정 불개입) + L1(Sonnet 설계)·L2(기존 Opus봇 봉인)·L3(신스타일 Opus 설계, 피드백 경로 코드 수준 차단) 앵커 등록 — 등록 전 실측 게이트(heuristic<L1<L2, L3는 L2와 행동 지문 거리 확인) | 1 | **완료**(2026-07-29, 커밋 3ff81af·7219fa5·e091076 — 3게임 래더 봉인, 판정 실험으로 v5<L1<L2 서열 실측, GAP-11-ROUNDS.md) |
+| D1 | `choiceEvaluator?` 계약 확장(+ADR-0011) — 지식의 세 번째 주입 통로 (GameAdapter에 배치 — 제네릭 접근 필요, strategySurface와 동일 위치) | 2 | **완료**(2026-07-29, GAP-11-ROUNDS.md Phase 2) |
+| D2 | `search/mcts.ts` PUCT prior/progressive bias(`priorWeight`, 미지정 시 불변, IS-MCTS 명시 공유) + 오목 실증 | 2 | **완료**(2026-07-29 — vs L1 0→34.5% 완전 단조 개선으로 "L1 곡선 유의 개선" 기준 충족·주입점 유효 실증, vs L2는 전 후보 0%로 미해결(무영향 — 다음 라운드 브리프 입력), GAP-11-ROUNDS.md) |
 | D5 | 포트폴리오 후보 생성(B1~B5 버킷, 수율 기반 재배분·하한 5%) + `artifacts/design-brief.ts` + `artifacts/portfolio.ts` + 프로토콜 v2 6단계(DESIGN §6.2, +ADR-0013) | 3 | **완료**(2026-07-29, 커밋 cde13aa·4b01de4·ede0d01) |
 | D6 | 축 매트릭스 성문화(게임×축 시도 현황 A1~A10, ADR-0009 적용 단위 명확화) | 3 | **완료**(2026-07-29 — GAP-11 §3 D6 표 + DESIGN §6.2 + 브리프 axisMatrix 배선) |
-| — | 실증 1회전: 오목(브리프→B1~B5 배치→프로브 필터→웨이브→challenge) / 도미니언(A8 도메인 재설계, B3 주도) | 3 | **완료**(2026-07-29 — 오목: L2 0%→25.6% 사상 첫 돌파·v6 / 도미니언: 4차 정체를 A8 축 전환으로 돌파·v3·L2 3.75%→22.5%, 프로브 필터 예측력 두 게임 재현, GAP-11 §5.5) |
-| — | 도미니언 3회전: chapelTrash 재부상(상호작용 효과) 규명, `composeBotChecked`/`assembleFlags`(ADR-0014) 최초 실전 적용 — 클론 배제·V2를 계보 기준선으로 경쟁시켜 v5(ismcts-s64-v2buy-prior) 승격 | 5 | **완료**(2026-07-30, GAP-11 §5.5) |
+| — | 실증 1회전: 오목(브리프→B1~B5 배치→프로브 필터→웨이브→challenge) / 도미니언(A8 도메인 재설계, B3 주도) | 3 | **완료**(2026-07-29 — 오목: L2 0%→25.6% 사상 첫 돌파·v6 / 도미니언: 4차 정체를 A8 축 전환으로 돌파·v3·L2 3.75%→22.5%, 프로브 필터 예측력 두 게임 재현, GAP-11-ROUNDS.md) |
+| — | 도미니언 3회전: chapelTrash 재부상(상호작용 효과) 규명, `composeBotChecked`/`assembleFlags`(ADR-0014) 최초 실전 적용 — 클론 배제·V2를 계보 기준선으로 경쟁시켜 v5(ismcts-s64-v2buy-prior) 승격 | 5 | **완료**(2026-07-30, GAP-11-ROUNDS.md) |
 | — | 초월 판정: L3 홀드아웃 앵커 상대 >50%(CI 하한 0.5 초과)만 인정 — L2만 이기고 L3에 지면 과적합 실측으로 기록, B4 비중 상향 | 4 | 미착수 |
 | — | **registry 조립 시맨틱 재설계**(ADR-0014): `StrategyFlagSpec.assembly?: 'decorator'\|'terminal'` 선언 + `analyzeAssembly`/`composeBotChecked`/`assembleFlags` 신설(`composeBot` 본체는 무수정 — 기존 registry 전부 재현 불변, 실측 다이제스트로 증명). 6게임+mini-trick의 기존 터미널 플래그(MCTS/IS-MCTS/클론 계열) 전부 소급 선언. 다음 라운드(도미니언 3회전·오목 4회전)의 승격 코드부터 `composeBotChecked`/`assembleFlags` 사용 의무화 | 4 | **완료**(2026-07-30, 60 suites/797 tests, 전체 실행 47초) |
 

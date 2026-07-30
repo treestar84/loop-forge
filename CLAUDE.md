@@ -2,9 +2,10 @@
 
 먼저 읽을 것: `docs/HANDOFF-2026-07-30.md`(최신 핸드오프 — 전체 맥락·현재 상태·다음
 단계. `-2026-07-28.md`/`-2026-07-21.md`는 이전 핸드오프로 역사적 기록만), 그다음
-`docs/GAP-ANALYSIS-11.md`(현행 라운드 정본), `docs/GAP-ANALYSIS-12.md`(루프
-포지 자체의 인프라 성숙도 검토 — 게임 전략이 아니라 프레임워크 구조 문제),
-그다음 `DESIGN.md`, 그다음
+`docs/GAP-ANALYSIS-11.md`(원인 진단·처치 설계 정본, 안 바뀜) +
+`docs/GAP-11-ROUNDS.md`(라운드별 실측 기록 — 새 라운드는 여기에 추가),
+`docs/GAP-ANALYSIS-12.md`(루프포지 자체의 인프라 성숙도 검토 — 게임 전략이
+아니라 프레임워크 구조 문제), 그다음 `DESIGN.md`, 그다음
 `docs/adr/`(주요 결정의 맥락·대안·결과)와 `docs/TROUBLESHOOTING.md`(운영 함정).
 
 ## 작업 방식

@@ -26,6 +26,7 @@
 | D5 | 포트폴리오 후보 생성(B1~B5 버킷, 수율 기반 재배분·하한 5%) + `artifacts/design-brief.ts` + `artifacts/portfolio.ts` + 프로토콜 v2 6단계(DESIGN §6.2, +ADR-0013) | 3 | **완료**(2026-07-29, 커밋 cde13aa·4b01de4·ede0d01) |
 | D6 | 축 매트릭스 성문화(게임×축 시도 현황 A1~A10, ADR-0009 적용 단위 명확화) | 3 | **완료**(2026-07-29 — GAP-11 §3 D6 표 + DESIGN §6.2 + 브리프 axisMatrix 배선) |
 | — | 실증 1회전: 오목(브리프→B1~B5 배치→프로브 필터→웨이브→challenge) / 도미니언(A8 도메인 재설계, B3 주도) | 3 | **완료**(2026-07-29 — 오목: L2 0%→25.6% 사상 첫 돌파·v6 / 도미니언: 4차 정체를 A8 축 전환으로 돌파·v3·L2 3.75%→22.5%, 프로브 필터 예측력 두 게임 재현, GAP-11 §5.5) |
+| — | 도미니언 3회전: chapelTrash 재부상(상호작용 효과) 규명, `composeBotChecked`/`assembleFlags`(ADR-0014) 최초 실전 적용 — 클론 배제·V2를 계보 기준선으로 경쟁시켜 v5(ismcts-s64-v2buy-prior) 승격 | 5 | **완료**(2026-07-30, GAP-11 §5.5) |
 | — | 초월 판정: L3 홀드아웃 앵커 상대 >50%(CI 하한 0.5 초과)만 인정 — L2만 이기고 L3에 지면 과적합 실측으로 기록, B4 비중 상향 | 4 | 미착수 |
 | — | **registry 조립 시맨틱 재설계**(ADR-0014): `StrategyFlagSpec.assembly?: 'decorator'\|'terminal'` 선언 + `analyzeAssembly`/`composeBotChecked`/`assembleFlags` 신설(`composeBot` 본체는 무수정 — 기존 registry 전부 재현 불변, 실측 다이제스트로 증명). 6게임+mini-trick의 기존 터미널 플래그(MCTS/IS-MCTS/클론 계열) 전부 소급 선언. 다음 라운드(도미니언 3회전·오목 4회전)의 승격 코드부터 `composeBotChecked`/`assembleFlags` 사용 의무화 | 4 | **완료**(2026-07-30, 60 suites/797 tests, 전체 실행 47초) |
 

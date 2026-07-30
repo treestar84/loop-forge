@@ -7,6 +7,17 @@
  * this round's own new requirement: the promotion step is the first live use
  * of `composeBotChecked`/`assembleFlags` (ADR-0014, src/loop/compose.ts).
  *
+ * GAP-ANALYSIS-12.md E1 refactor (2026-07-31, scratchpad/e1-round-executor-
+ * design-spec.md): steps 2-5 of DESIGN.md §6.2 (probe filter -> wave ->
+ * challenge -> promotion -> reallocation) now delegate to
+ * `artifacts/portfolio-round.ts`'s `runPortfolioRound` — this file keeps
+ * only game knowledge (candidate batch, IS-MCTS flag spec, probe-bank/anchor
+ * loading) and this round's own bespoke steps outside the shared executor's
+ * scope (transcendence check, adoption ledger recording). Re-run with the
+ * same seeds against the pre-refactor commit (2d6cd67)'s
+ * runs/dominion/portfolio-round3.json confirmed byte-identical probeFilter
+ * agreementRate, wave verdicts, challenge winRate, and adoption flags.
+ *
  * Required design decision (design-spec's own instruction, "그대로 구현"):
  * registry v4's actual composed bot is `opusCloneDominion` (a full L2 clone —
  * composeBot's override semantics collapse v4's flags list to that one
@@ -51,30 +62,31 @@
  * B5-imitate exclusion).
  *
  * Probe filter: round1+round2+round3 probe banks (3 files) loaded and scored
- * together, deduped by probeId (mergeProbeBanks, same helper shape as
- * round2's own). Per-candidate cost check (5 games) same as round1/round2;
- * unlike round2 (all 5 candidates advanced, no cut), this round applies
- * round1's own top-4-of-5 cut (ranked by probe agreementRate desc, ties
- * broken by cheaper msPerGame) — team-lead instruction "상위 4 진출". The B4
- * IS-MCTS candidate is the resource-rule-flagged one (heuristic candidates
- * are cheap; only B4 needs the sequential/nice-precheck the team lead
- * specified) — this script must be invoked under `nice -n 10` externally
- * (this file cannot set OS scheduling priority on itself), and the 5-game
- * cost check below already runs every candidate (including B4) strictly
+ * together, deduped by probeId (mergeProbeBanks, now shared in
+ * portfolio-round.ts). Per-candidate cost check (5 games) same as
+ * round1/round2; unlike round2 (all 5 candidates advanced, no cut), this
+ * round applies round1's own top-4-of-5 cut (ranked by probe agreementRate
+ * desc, ties broken by cheaper msPerGame) — team-lead instruction "상위 4
+ * 진출". The B4 IS-MCTS candidate is the resource-rule-flagged one
+ * (heuristic candidates are cheap; only B4 needs the sequential/nice-precheck
+ * the team lead specified) — this script must be invoked under `nice -n 10`
+ * externally (this file cannot set OS scheduling priority on itself), and
+ * the 5-game cost check already runs every candidate (including B4) strictly
  * sequentially in one process, satisfying "사전 5판 비용 확인".
  *
  * Regression opponent = chapelEconomyV2 (design spec's own instruction, NOT
- * v4/latest.flags): achieved by setting `baselineFlags: ['chapelEconomyV2']`
- * directly (not `latest.flags`, which round2 used for its v3-champion
- * regression opponent) — `wave-runner.ts`'s `computeChallengeResult` also
- * measures this same composite under `subject: 'baseline'` in the challenge
- * table for free, which is exactly chapelEconomyV2's own N=40-vs-L1/L2
- * challenge score under this round's own seeds (used directly as
- * chapelEconomyV2's `challengeScore` input to `assembleFlags` below, for an
- * apples-to-apples comparison against this round's own candidates rather
- * than reusing the differently-seeded N=100 figure from loss-mining-round3).
- * Smoke/prune/holdout tiers still use the `opponent: 'heuristic'` raw
- * baseline (round1/round2's own convention — "티어는 도미니언 관행").
+ * v4/latest.flags): achieved by passing `regressionOpponentFlags:
+ * [LINEAGE_BASELINE_FLAG]` (not `latest.flags`, which round2 used for its
+ * v3-champion regression opponent) — `wave-runner.ts`'s
+ * `computeChallengeResult` also measures this same composite under
+ * `subject: 'baseline'` in the challenge table for free, which is exactly
+ * chapelEconomyV2's own N=40-vs-L1/L2 challenge score under this round's own
+ * seeds (used directly as chapelEconomyV2's `challengeScore` input to
+ * `assembleFlags` below, for an apples-to-apples comparison against this
+ * round's own candidates rather than reusing the differently-seeded N=100
+ * figure from loss-mining-round3). Smoke/prune/holdout tiers still use the
+ * `opponent: 'heuristic'` raw baseline (round1/round2's own convention —
+ * "티어는 도미니언 관행").
  *
  * Fresh seed ranges (verified non-overlapping with every prior dominion
  * runner's own documented range — see dominion-portfolio-round2.ts's own doc
@@ -82,7 +94,10 @@
  * dominion-loss-mining-round3.ts's 429,000+/430,000+/431,000+ and
  * 990_1xx-990_3xx):
  *   - probe-filter cost check: 730,000-730,004 (N=5, shared block).
- *   - wave smoke/prune/holdout/regression: 731,000+/732,000+/733,000+/734,000+.
+ *   - wave smoke/prune/holdout/regression: 731,000+/732,000+/733,000+/734,000+
+ *     (runPortfolioRound reserves these at fixed 1000-seed offsets from
+ *     waveSeedBase=731_000 — the exact convention this file used manually
+ *     before the E1 refactor).
  *   - challenge (L1/L2): 735,000-735,039 (N=40).
  *   - confirm (only if triggered): 736,000-736,199 (N=200).
  *   - transcendence L3 holdout (only if confirm also triggers): 737,000-737,099 (N=100).
@@ -107,12 +122,13 @@
  * this round's adopted decorator flags (if any — none of this round's 5
  * candidates declare `assembly: 'decorator'`, so expected empty).
  * opusCloneDominion is never added to this pool (the design spec's required
- * decision, above). `assembleFlags`'s `excluded` result is logged and saved
- * verbatim, never hidden. v5 branches from v4 (`parent: 'v4'`) but its
- * `flags` is `assembleFlags`'s result, NOT `[...latest.flags, ...adopted]`
- * (round2's own promotion shape) — that would re-append the surviving
- * terminal after possibly-stale decorators and risk resurrecting the exact
- * multi-terminal ambiguity ADR-0014 exists to catch.
+ * decision, above, enforced via `promotion.excludeFromLineage`).
+ * `assembleFlags`'s `excluded` result is logged and saved verbatim, never
+ * hidden. v5 branches from v4 (`parent: 'v4'`) but its `flags` is
+ * `assembleFlags`'s result, NOT `[...latest.flags, ...adopted]` (round2's own
+ * promotion shape) — that would re-append the surviving terminal after
+ * possibly-stale decorators and risk resurrecting the exact multi-terminal
+ * ambiguity ADR-0014 exists to catch.
  *
  * Transcendence check (team lead's instruction, matching round2's own
  * shape): if the N=40 challenge vs L2 already shows winRateCI.lower > 0.5,
@@ -135,14 +151,9 @@ import { writeFileSync } from 'node:fs';
 
 import type { AnyBotFactory, AnyGameAdapter, PlayerId } from '../../contract/types';
 import { eraseAdapter } from '../../loop/erase';
-import { composeBot, composeBotChecked, assembleFlags, type AssembleFlagsCandidate } from '../../loop/compose';
-import { withStrategyFlags } from '../../loop/compose';
+import { composeBot, withStrategyFlags } from '../../loop/compose';
 import { runHeadToHead, type HeadToHeadResult } from '../../loop/head-to-head';
-import { scoreAgainstProbes, type ProbePosition, type ProbeScore } from '../../loop/probe-bank';
 import { loadProbeBank } from '../../artifacts/trajectory-archive';
-import { assembleWaveConfig } from '../../loop/assemble-wave-config';
-import { runWave, type WaveChallengeEntry, type WaveReport } from '../../loop/wave-runner';
-import { SeedLedger } from '../../kernel/seed-ledger';
 import {
   loadOrCreateLedger,
   loadOrCreateRegistry,
@@ -150,15 +161,8 @@ import {
   saveRegistry,
 } from '../../artifacts/game-state';
 import { extractNearMissCandidates, type AdoptionEntry } from '../../artifacts/adoption-ledger';
-import {
-  BUCKET_ORDER,
-  INITIAL_ALLOCATION,
-  loadPortfolioState,
-  reallocate,
-  savePortfolioState,
-  type BucketId,
-  type BucketOutcome,
-} from '../../artifacts/portfolio';
+import { INITIAL_ALLOCATION, loadPortfolioState } from '../../artifacts/portfolio';
+import { runPortfolioRound, type RoundCandidateSpec } from '../../artifacts/portfolio-round';
 import { ismctsBotFactory } from '../../search/ismcts';
 import type { MctsConfig } from '../../search/mcts';
 import {
@@ -222,12 +226,7 @@ function ciStr(result: { readonly winRateCI: { readonly lower: number; readonly 
   return `[${pct(result.winRateCI.lower)}, ${pct(result.winRateCI.upper)}]`;
 }
 
-interface RoundCandidate {
-  readonly flag: string;
-  readonly bucket: BucketId;
-}
-
-function buildCandidates(): readonly RoundCandidate[] {
+function buildCandidates(): readonly RoundCandidateSpec[] {
   return [
     { flag: 'chapelEconomyV3', bucket: 'B3-deep' },
     { flag: 'chapelEconomyV3-aggressive', bucket: 'B1-exploit' },
@@ -277,67 +276,13 @@ function dominionIsmctsV2BuyPriorFlagSpec(adapter: AnyGameAdapter): StrategyFlag
   };
 }
 
-// ---------------------------------------------------------------------
-// Probe bank merge (round1 + round2 + round3, deduped by probeId)
-// ---------------------------------------------------------------------
-
-function mergeProbeBanks(banks: readonly (readonly ProbePosition[])[]): readonly ProbePosition[] {
-  const seen = new Map<string, ProbePosition>();
-  for (const bank of banks) {
-    for (const probe of bank) {
-      if (!seen.has(probe.probeId)) {
-        seen.set(probe.probeId, probe);
-      }
-    }
-  }
-  return [...seen.values()];
-}
-
-// ---------------------------------------------------------------------
-// Probe filter (+ per-candidate cost check, top-4-of-5 cut per round1 precedent)
-// ---------------------------------------------------------------------
-
-interface ProbeFilterRow {
+interface TranscendenceEntry {
   readonly flag: string;
-  readonly bucket: BucketId;
-  readonly probeScore: ProbeScore;
-  readonly msPerGame: number;
-  readonly advanced: boolean;
-}
-
-function runProbeFilter(
-  adapter: AnyGameAdapter,
-  candidates: readonly RoundCandidate[],
-  probes: readonly ProbePosition[],
-): readonly ProbeFilterRow[] {
-  const costSeeds = seeds(COST_CHECK_SEED_BASE, COST_CHECK_N);
-  const rows: Array<Omit<ProbeFilterRow, 'advanced'>> = [];
-
-  for (const candidate of candidates) {
-    const bot = composeBot(adapter, [candidate.flag]);
-    const probeScore = scoreAgainstProbes(adapter, bot, probes, PROBE_SCORE_BOT_SEED_BASE);
-
-    const t0 = Date.now();
-    const costResult = runHeadToHead(adapter, bot, dominionOpusBot, costSeeds, COST_CHECK_BOT_SEED_BASE);
-    const elapsedMs = Date.now() - t0;
-    const msPerGame = costResult.blocks > 0 ? elapsedMs / (costResult.blocks * 2) : Infinity;
-
-    console.log(
-      `  [probe-filter] ${candidate.flag} (${candidate.bucket}): agreement=${pct(probeScore.agreementRate)} ` +
-        `(${probeScore.agreements}/${probeScore.probes - probeScore.skipped}, skipped=${probeScore.skipped}) ms/game=${msPerGame.toFixed(0)}`,
-    );
-    rows.push({ flag: candidate.flag, bucket: candidate.bucket, probeScore, msPerGame });
-  }
-
-  const ranked = [...rows].sort((a, b) => {
-    if (b.probeScore.agreementRate !== a.probeScore.agreementRate) {
-      return b.probeScore.agreementRate - a.probeScore.agreementRate;
-    }
-    return a.msPerGame - b.msPerGame;
-  });
-  const advancingFlags = new Set(ranked.slice(0, 4).map((row) => row.flag));
-
-  return rows.map((row) => ({ ...row, advanced: advancingFlags.has(row.flag) }));
+  readonly wasAdopted: boolean;
+  readonly n40: { readonly winRate: number; readonly winRateCILower: number };
+  readonly confirm: HeadToHeadResult;
+  readonly confirmTriggered: boolean;
+  readonly l3: HeadToHeadResult | null;
 }
 
 function main(): void {
@@ -373,90 +318,84 @@ function main(): void {
   const probesRound1 = loadProbeBank(probeBankRound1Path);
   const probesRound2 = loadProbeBank(probeBankRound2Path);
   const probesRound3 = loadProbeBank(probeBankRound3Path);
-  const mergedProbes = mergeProbeBanks([probesRound1, probesRound2, probesRound3]);
-  console.log(
-    `   프로브 은행: round1=${probesRound1.length}, round2=${probesRound2.length}, round3=${probesRound3.length}, 합산(중복 제거 후)=${mergedProbes.length}`,
-  );
 
-  const l2SelfScore = scoreAgainstProbes(adapter, dominionOpusBot, mergedProbes, PROBE_SCORE_BOT_SEED_BASE);
-  console.log(
-    `   L2 자기일치율(합산 프로브)=${pct(l2SelfScore.agreementRate)} (probes=${l2SelfScore.probes}, skipped=${l2SelfScore.skipped}) — 1.0 기대`,
-  );
+  console.log('3-7) 정규 웨이브 -> challenge -> 승격 -> 재배분 (artifacts/portfolio-round.ts runPortfolioRound)');
+  const recordedAt = now();
+  const currentAllocation = loadPortfolioState(ROOT_DIR, GAME_ID) ?? INITIAL_ALLOCATION;
+  const outputPath = join(ROOT_DIR, 'runs', GAME_ID, 'portfolio-round3.json');
 
-  const probeFilterRows = runProbeFilter(adapter, candidates, mergedProbes);
-  const advanced = probeFilterRows.filter((row) => row.advanced);
-  const cutRow = probeFilterRows.find((row) => !row.advanced);
-  console.log(`   진출(상위 4): ${advanced.map((row) => row.flag).join(', ')}`);
-  if (cutRow) {
-    console.log(`   탈락: ${cutRow.flag} (agreement=${pct(cutRow.probeScore.agreementRate)})`);
-  }
-
-  console.log('3) 정규 웨이브 (신규 시드 뱅크, regression 상대=chapelEconomyV2, challenge L1/L2 N=40, L3 미포함)');
-  const waveCandidates = advanced.map((row) => ({ flag: row.flag }));
-  const waveLedger = new SeedLedger();
-  const reservedAt = now();
-  const SMOKE_MAX = 30;
-  const PRUNE_BLOCKS = 15;
-  const HOLDOUT_BLOCKS = 15;
-  const REGRESSION_BLOCKS = 20;
-  waveLedger.reserve({ bankId: 'dominion-portfolio3-smoke', range: { start: 731_000, end: 731_000 + SMOKE_MAX - 1 }, purpose: 'smoke', reservedAt });
-  waveLedger.reserve({ bankId: 'dominion-portfolio3-prune', range: { start: 732_000, end: 732_000 + PRUNE_BLOCKS - 1 }, purpose: 'prune', reservedAt });
-  waveLedger.reserve({ bankId: 'dominion-portfolio3-holdout', range: { start: 733_000, end: 733_000 + HOLDOUT_BLOCKS - 1 }, purpose: 'holdout', reservedAt });
-  waveLedger.reserve({ bankId: 'dominion-portfolio3-regression', range: { start: 734_000, end: 734_000 + REGRESSION_BLOCKS - 1 }, purpose: 'regression', reservedAt });
-
-  const CHALLENGE_N = 40;
-  const CHALLENGE_SEED_BASE = 735_000;
-  const CHALLENGE_BOT_SEED_BASE = 991_301;
-  const challengeEntries: readonly WaveChallengeEntry[] = [
-    { anchorId: L1_ANCHOR_ID, factory: dominionMidBot as AnyBotFactory, role: 'feedback' },
-    { anchorId: L2_ANCHOR_ID, factory: dominionOpusBot as AnyBotFactory, role: 'feedback' },
-  ];
-
-  const waveConfig = {
-    ...assembleWaveConfig(adapter, {
-      waveId: 'portfolio-round3',
-      candidates: waveCandidates,
-      opponent: 'heuristic',
-      ledger: waveLedger,
-      recordedAt: now(),
-      baselineFlags: [LINEAGE_BASELINE_FLAG], // this round's lineage baseline, NOT latest.flags (design spec's own instruction).
-      baselineVersion: latest.version,
-      tiers: {
-        smoke: { bankId: 'dominion-portfolio3-smoke', sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 }, maxBlocks: SMOKE_MAX, minBlocks: 5 },
-        prune: { bankId: 'dominion-portfolio3-prune', blocks: PRUNE_BLOCKS },
-        holdout: { bankId: 'dominion-portfolio3-holdout', blocks: HOLDOUT_BLOCKS },
-        regression: { bankId: 'dominion-portfolio3-regression', blocks: REGRESSION_BLOCKS },
-      },
-      screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
-    }),
-    challenge: {
-      entries: challengeEntries,
-      seeds: seeds(CHALLENGE_SEED_BASE, CHALLENGE_N),
-      botSeedBase: CHALLENGE_BOT_SEED_BASE,
+  const round = runPortfolioRound({
+    gameId: GAME_ID,
+    rootDir: ROOT_DIR,
+    adapter,
+    candidates,
+    probeFilter: {
+      probeBanks: [probesRound1, probesRound2, probesRound3],
+      probeScoreSeedBase: PROBE_SCORE_BOT_SEED_BASE,
+      costCheckN: COST_CHECK_N,
+      costCheckSeedBase: COST_CHECK_SEED_BASE,
+      costCheckOpponent: dominionOpusBot,
+      costCheckBotSeedBase: COST_CHECK_BOT_SEED_BASE,
+      advanceTopK: 4,
     },
-  };
+    wave: {
+      waveId: 'portfolio-round3',
+      waveSeedBase: 731_000,
+      tiers: {
+        smoke: { sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 }, maxBlocks: 30, minBlocks: 5 },
+        prune: { blocks: 15 },
+        holdout: { blocks: 15 },
+        regression: { blocks: 20 },
+      },
+      // this round's lineage baseline, NOT latest.flags (design spec's own instruction).
+      regressionOpponentFlags: [LINEAGE_BASELINE_FLAG],
+      comparabilityContext: undefined,
+    },
+    challenge: {
+      anchors: [
+        { anchorId: L1_ANCHOR_ID, factory: dominionMidBot as AnyBotFactory },
+        { anchorId: L2_ANCHOR_ID, factory: dominionOpusBot as AnyBotFactory },
+      ],
+      seedBase: 735_000,
+      botSeedBase: 991_301,
+      n: 40,
+    },
+    promotion: {
+      // Lineage baseline first (design spec's own instruction: chapelEconomyV2
+      // stays a "터미널 도전자" — if nothing new beats it on challengeScore,
+      // it survives assembleFlags's terminal tie-break).
+      latestVersionFlags: [LINEAGE_BASELINE_FLAG],
+      latestVersionAssembly: {},
+      excludeFromLineage: EXCLUDED_LINEAGE_STARTS,
+      registry,
+      notesPrefix:
+        'portfolio-round3에서 ',
+    },
+    bucketAllocation: { current: currentAllocation },
+    outputPath,
+    recordedAt,
+    clockNowMs: Date.now,
+  });
 
-  const report: WaveReport = runWave(adapter, waveConfig);
-  for (const result of report.results) {
+  for (const result of round.wave.results) {
     console.log(`   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`);
   }
-
-  console.log('4) challenge 결과');
-  const challengeTable: Record<string, Record<string, { winRate: number; blocks: number; winRateCI: { lower: number; upper: number } }>> = {};
-  for (const entry of report.challengeResult ?? []) {
-    challengeTable[entry.anchorId] ??= {};
-    (challengeTable[entry.anchorId] as Record<string, { winRate: number; blocks: number; winRateCI: { lower: number; upper: number } }>)[
-      entry.subject
-    ] = { winRate: entry.winRate, blocks: entry.blocks, winRateCI: entry.winRateCI };
-    console.log(`   ${entry.anchorId} vs ${entry.subject}: winRate=${pct(entry.winRate)} CI=${ciStr(entry)} blocks=${entry.blocks}`);
-  }
-  const lineageBaselineL2 = challengeTable[L2_ANCHOR_ID]?.['baseline'];
+  const lineageBaselineL2 = round.challenge[L2_ANCHOR_ID]?.['baseline'];
   console.log(
     `   ${LINEAGE_BASELINE_FLAG}(=subject:'baseline') vs L2 이번 라운드 재측정: winRate=${lineageBaselineL2 ? pct(lineageBaselineL2.winRate) : '(없음)'}`,
   );
+  if (round.adoption.promotedVersion) {
+    console.log(`   승격: ${round.adoption.promotedVersion}, flags=[${round.adoption.assembleFlagsResult?.flags.join(', ') ?? ''}]`);
+  } else {
+    console.log('   채택된 후보 없음 — 승격 없음 (v4 유지, opusCloneDominion 실체 문제는 이번 라운드 미해결로 남음)');
+  }
+  console.log('   재배분 결과:');
+  for (const entry of round.nextAllocation) {
+    console.log(`     ${entry.bucket}: ${(entry.share * 100).toFixed(1)}%`);
+  }
 
-  console.log('5) adoption ledger 기록');
-  const entries: AdoptionEntry[] = report.results.map((result) => {
+  console.log('8) adoption ledger 기록');
+  const entries: AdoptionEntry[] = round.wave.results.map((result) => {
     const tierStats: AdoptionEntry['tierStats'] = {};
     for (const tier of ['screen', 'smoke', 'prune', 'holdout', 'regression'] as const) {
       const stats = result.stats[tier];
@@ -479,131 +418,23 @@ function main(): void {
     };
   });
   const adoptionRecord = ledgerStore.add({
-    waveId: report.waveId,
-    recordedAt: now(),
-    comparabilityKey: report.comparabilityKey,
+    waveId: round.wave.waveId,
+    recordedAt,
+    comparabilityKey: round.wave.comparabilityKey,
     baselineVersion: latest.version,
-    opponentId: waveConfig.opponent,
+    opponentId: 'heuristic',
     entries,
     nextLoopNotes: [],
   });
 
-  const nearMiss = extractNearMissCandidates(adoptionRecord, waveConfig.criteria);
-  writeFileSync(join(ROOT_DIR, 'runs', GAME_ID, 'portfolio-round3-near-miss.json'), JSON.stringify(nearMiss, null, 2));
-
-  console.log("6) registry 승격 — 첫 composeBotChecked/assembleFlags 실전 사용 (ADR-0014)");
-  const adoptedFlags = report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
-  const surfaceByFlag = new Map(adapter.strategySurface.map((spec) => [spec.flag, spec]));
-
-  let promotedVersion: string | null = null;
-  let promotedFlags: readonly string[] = latest.flags;
-  let assembleResult: { flags: readonly string[]; excluded: readonly { flag: string; reason: string }[] } | null = null;
-
-  if (adoptedFlags.length > 0) {
-    const lineage = registry.lineage(latest.version);
-    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === report.waveId);
-    if (alreadyPromoted) {
-      console.log('   이 웨이브는 이미 승격됨 — 스킵');
-      const promoted = lineage.find((version) => version.sourceWaveId === report.waveId);
-      promotedVersion = promoted?.version ?? null;
-      promotedFlags = promoted?.flags ?? latest.flags;
-    } else {
-      const toCandidate = (flag: string, challengeScore: number | undefined): AssembleFlagsCandidate => {
-        const assembly = surfaceByFlag.get(flag)?.assembly;
-        return {
-          flag,
-          ...(assembly !== undefined ? { assembly } : {}),
-          ...(challengeScore !== undefined ? { challengeScore } : {}),
-        };
-      };
-
-      const pool: AssembleFlagsCandidate[] = [];
-      // Lineage baseline first (design spec's own instruction: chapelEconomyV2
-      // stays a "터미널 도전자" — if nothing new beats it on challengeScore,
-      // it survives assembleFlags's terminal tie-break).
-      pool.push(toCandidate(LINEAGE_BASELINE_FLAG, lineageBaselineL2?.winRate));
-      for (const flag of adoptedFlags) {
-        if (EXCLUDED_LINEAGE_STARTS.has(flag)) {
-          continue; // never reachable this round (opusCloneDominion is not a wave candidate) — defensive per design spec's required decision.
-        }
-        pool.push(toCandidate(flag, challengeTable[L2_ANCHOR_ID]?.[flag]?.winRate));
-      }
-      assembleResult = assembleFlags(pool);
-      console.log(`   assembleFlags 후보 풀: ${pool.map((c) => `${c.flag}(${c.challengeScore !== undefined ? pct(c.challengeScore) : 'n/a'})`).join(', ')}`);
-      console.log(`   assembleFlags 결과 flags=[${assembleResult.flags.join(', ')}]`);
-      if (assembleResult.excluded.length > 0) {
-        for (const excluded of assembleResult.excluded) {
-          console.log(`   excluded: ${excluded.flag} — ${excluded.reason}`);
-        }
-      } else {
-        console.log('   excluded: (없음)');
-      }
-
-      // First live composeBotChecked use (ADR-0014) — validates the assembled
-      // flags array before registering it, throws loudly on any assembly
-      // ordering violation instead of silently registering a broken lineage.
-      composeBotChecked(adapter, assembleResult.flags);
-
-      const nextVersion = registry.register({
-        version: `v${lineage.length + 1}`,
-        flags: assembleResult.flags,
-        parent: latest.version,
-        createdAt: now(),
-        sourceWaveId: report.waveId,
-        notes:
-          `portfolio-round3에서 assembleFlags(ADR-0014)로 승격: pool=[${pool.map((c) => c.flag).join(', ')}], ` +
-          `excluded=[${assembleResult.excluded.map((e) => e.flag).join(', ') || '(없음)'}]. ` +
-          `opusCloneDominion은 설계 명세의 필수 결정에 따라 후보 풀에서 배제(계보 기준선은 ${LINEAGE_BASELINE_FLAG}).`,
-      });
-      promotedVersion = nextVersion.version;
-      promotedFlags = nextVersion.flags;
-      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
-    }
-  } else {
-    console.log('   채택된 후보 없음 — 승격 없음 (v4 유지, opusCloneDominion 실체 문제는 이번 라운드 미해결로 남음)');
-  }
   saveRegistry(ROOT_DIR, GAME_ID, registry);
   saveLedger(ROOT_DIR, GAME_ID, ledgerStore);
 
-  console.log('7) 버킷 수율 계산 + 재배분 (round2 portfolio-state.json 로드 후 갱신)');
-  const verdictByFlag = new Map(report.results.map((result) => [result.flag, result.verdict]));
-  const roundBaselineL2WinRate = lineageBaselineL2?.winRate ?? 0.42;
-
-  const bucketOutcomes: BucketOutcome[] = BUCKET_ORDER.map((bucket) => {
-    const bucketCandidates = candidates.filter((candidate) => candidate.bucket === bucket);
-    const adopted = bucketCandidates.filter((candidate) => verdictByFlag.get(candidate.flag) === 'adopted').length;
-
-    const deltas = bucketCandidates
-      .map((candidate) => challengeTable[L2_ANCHOR_ID]?.[candidate.flag]?.winRate)
-      .filter((winRate): winRate is number => winRate !== undefined)
-      .map((winRate) => winRate - roundBaselineL2WinRate);
-    const challengeDelta = deltas.length > 0 ? deltas.reduce((sum, delta) => sum + delta, 0) / deltas.length : 0;
-
-    return { bucket, candidates: bucketCandidates.length, adopted, challengeDelta };
-  });
-  for (const outcome of bucketOutcomes) {
-    console.log(`   ${outcome.bucket}: candidates=${outcome.candidates} adopted=${outcome.adopted} challengeDelta=${outcome.challengeDelta.toFixed(4)}`);
-  }
-
-  const currentAllocation = loadPortfolioState(ROOT_DIR, GAME_ID) ?? INITIAL_ALLOCATION;
-  const nextAllocation = reallocate(currentAllocation, bucketOutcomes);
-  savePortfolioState(ROOT_DIR, GAME_ID, nextAllocation);
-  console.log('   재배분 결과:');
-  for (const entry of nextAllocation) {
-    console.log(`     ${entry.bucket}: ${(entry.share * 100).toFixed(1)}%`);
-  }
-
-  console.log('8) 초월 판정 트리거 검사 (vs L2 winRateCI.lower > 0.5, N=40)');
-  interface TranscendenceEntry {
-    readonly flag: string;
-    readonly wasAdopted: boolean;
-    readonly n40: { readonly winRate: number; readonly winRateCILower: number };
-    readonly confirm: HeadToHeadResult;
-    readonly confirmTriggered: boolean;
-    readonly l3: HeadToHeadResult | null;
-  }
+  console.log('9) 초월 판정 트리거 검사 (vs L2 winRateCI.lower > 0.5, N=40)');
+  const promotedFlags = round.adoption.assembleFlagsResult?.flags ?? latest.flags;
+  const adoptedFlags = round.adoption.adoptedFlags;
   const transcendenceEntries: TranscendenceEntry[] = [];
-  for (const entry of report.challengeResult ?? []) {
+  for (const entry of round.wave.challengeResult ?? []) {
     if (entry.anchorId !== L2_ANCHOR_ID || entry.subject === 'baseline') {
       continue;
     }
@@ -613,7 +444,7 @@ function main(): void {
     const flag = entry.subject;
     const wasAdopted = adoptedFlags.includes(flag);
     console.log(`   N=40 트리거됨: ${flag} (winRateCI.lower=${pct(entry.winRateCI.lower)}) — N=${CONFIRM_N} 확증 측정 실행`);
-    const candidateBot = wasAdopted ? composeBotChecked(adapter, promotedFlags) : composeBot(adapter, [flag]);
+    const candidateBot = wasAdopted ? composeBot(adapter, promotedFlags) : composeBot(adapter, [flag]);
     const confirmResult = runHeadToHead(adapter, candidateBot, dominionOpusBot, seeds(CONFIRM_SEED_BASE, CONFIRM_N), CONFIRM_BOT_SEED_BASE);
     console.log(`   확증(N=${CONFIRM_N}) ${flag} vs L2: winRate=${pct(confirmResult.candidateWinRate)} CI=${ciStr(confirmResult)}`);
 
@@ -639,11 +470,14 @@ function main(): void {
     console.log('   N=40에서 어떤 후보도 트리거 미달 — 확증/L3 홀드아웃 미실행');
   }
 
-  console.log('9) runs/dominion/portfolio-round3.json 저장');
+  console.log('10) near-miss 추출 + runs/dominion/portfolio-round3.json 저장(설계 결정/transcendence 추가 병합)');
+  const nearMiss = extractNearMissCandidates(adoptionRecord, round.criteria);
+  writeFileSync(join(ROOT_DIR, 'runs', GAME_ID, 'portfolio-round3-near-miss.json'), JSON.stringify(nearMiss, null, 2));
+
   const summary = {
     gameId: GAME_ID,
-    generatedAt: now(),
-    designSpecPath: 'scratchpad/dominion-round3-design-spec.md (main-loop, 그대로 구현)',
+    generatedAt: recordedAt,
+    designSpecPath: 'scratchpad/dominion-round3-design-spec.md (main-loop, 그대로 구현) + GAP-ANALYSIS-12.md E1 리팩터',
     requiredDesignDecision: {
       excludedFromLineagePool: [...EXCLUDED_LINEAGE_STARTS],
       lineageBaselineFlag: LINEAGE_BASELINE_FLAG,
@@ -658,10 +492,8 @@ function main(): void {
       round1: { path: `runs/${GAME_ID}/probe-bank.json`, probes: probesRound1.length },
       round2: { path: `runs/${GAME_ID}/probe-bank-round2.json`, probes: probesRound2.length },
       round3: { path: `runs/${GAME_ID}/probe-bank-round3.json`, probes: probesRound3.length },
-      merged: mergedProbes.length,
-      l2SelfAgreementRate: l2SelfScore.agreementRate,
     },
-    probeFilter: probeFilterRows.map((row) => ({
+    probeFilter: round.probeFilter.map((row) => ({
       flag: row.flag,
       bucket: row.bucket,
       agreementRate: row.probeScore.agreementRate,
@@ -671,25 +503,25 @@ function main(): void {
       advanced: row.advanced,
     })),
     wave: {
-      waveId: report.waveId,
-      comparabilityKey: report.comparabilityKey,
+      waveId: round.wave.waveId,
+      comparabilityKey: round.wave.comparabilityKey,
       baselineFlags: [LINEAGE_BASELINE_FLAG],
-      results: report.results.map((result) => ({
+      results: round.wave.results.map((result) => ({
         flag: result.flag,
         verdict: result.verdict,
         tiersPassed: result.tiersPassed,
       })),
     },
-    challenge: challengeTable,
+    challenge: round.challenge,
     adoption: {
-      promotedVersion,
-      adoptedFlags,
-      assembleFlags: assembleResult
-        ? { flags: assembleResult.flags, excluded: assembleResult.excluded }
+      promotedVersion: round.adoption.promotedVersion,
+      adoptedFlags: round.adoption.adoptedFlags,
+      assembleFlags: round.adoption.assembleFlagsResult
+        ? { flags: round.adoption.assembleFlagsResult.flags, excluded: round.adoption.assembleFlagsResult.excluded }
         : null,
     },
-    bucketOutcomes,
-    portfolioAllocation: { previous: currentAllocation, next: nextAllocation },
+    bucketOutcomes: round.bucketOutcomes,
+    portfolioAllocation: { previous: currentAllocation, next: round.nextAllocation },
     excludedBuckets: {
       'B5-imitate': '이번 라운드 0 후보.',
     },
@@ -719,7 +551,7 @@ function main(): void {
             reason: '어떤 후보도 N=40 challenge vs L2 winRateCI.lower > 0.5에 도달하지 못함 — 확증/L3 홀드아웃 미실행.',
           },
   };
-  writeFileSync(join(ROOT_DIR, 'runs', GAME_ID, 'portfolio-round3.json'), JSON.stringify(summary, null, 2));
+  writeFileSync(outputPath, JSON.stringify(summary, null, 2));
   console.log(`   저장: runs/${GAME_ID}/portfolio-round3.json`);
 }
 

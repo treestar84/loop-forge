@@ -547,6 +547,29 @@ portfolio-state.json}`.
   북/evaluator 초과 개선이 다음 카드다.
 - 초월 판정: 어떤 후보도 CI 하한 > 0.5 미달 — L3 미실행(정직 기록).
 
+**도미니언 3회전(2026-07-30 실측, ADR-0014 첫 실전 적용)**: 채굴이 "chapelTrash
+불일치 재부상(12.9%) — 정책 열화가 아니라 V2의 buy/action이 만든 새 국면
+분포에 대한 상호작용 효과"를 규명. B3(적응형 trash 임계 `chapelEconomyV3`
+및 변형 2종)와 B2(witchFirst)는 전부 **regression 근접실패**(챔피언
+chapelEconomyV2를 못 넘음 — 부정 결과, 적응형 임계 가설은 이번 형태로는
+기각). 대신 **B4(A5×A10 결합 — chapelEconomyV2의 buy 지식을 choiceEvaluator로
+재표현해 IS-MCTS priorSource에 주입)가 regression 통과 → v5 승격**.
+
+- **`composeBotChecked`/`assembleFlags` 최초 실전 사용**: 승격 후보 풀에서
+  클론(opusCloneDominion)을 의도적으로 배제하고 chapelEconomyV2를 계보
+  기준선으로 세움 — assembleFlags가 새 터미널(ismcts-s64-v2buy-prior)의
+  challenge 성적이 더 높다고 판정해 V2를 `excluded`로 정직 기록하며 대체.
+  거울(클론)에 발목 잡히지 않고 실제 설계 간 경쟁으로 계보가 이어지는 첫
+  사례.
+- v5 challenge: vs L1 50.6%·vs L2 36.2%(N=40, 같은 wave 문맥에서 V2 자신도
+  33.8%로 측정돼 상대적으로는 앞섬 — 절대 수치는 3회전 채굴의 42.0%(N=100)
+  와 다른 문맥이라 직접 비교 금지, INTERPRETATION 제1규칙). 내부 regression
+  게이트(통계적 유의성 검정)를 통과했다는 사실 자체가 V2 대비 실질 개선의
+  근거.
+- 초월 미달(CI 하한 미도달, 확증·L3 미실행) — 정직 기록.
+- 다음 카드: 이번에 기각된 "trash 재적합" 가설을 IS-MCTS 지식(v2buy-prior)
+  위에서 재시도하는 조합은 미탐색.
+
 **알아둘 주의점(감추지 않는다)**: ① 도미니언 L3(74.8%)는 L1(100%)보다 heuristic
 상대 승률이 낮다 — 홀드아웃 자격 요건은 충족하나 "고수2"라는 이름과 실제
 강도의 간극 가능성이 있다. 앵커 봉인 규칙상 교체하지 않으며, 초월 판정에서

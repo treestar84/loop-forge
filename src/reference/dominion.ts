@@ -1596,6 +1596,12 @@ function chapelEconomyV2FlagSpec(
   return {
     flag,
     description,
+    // ADR-0014, round-3 retroactive declaration (3회전 채굴 보고 지적):
+    // this whole family ignores `base` entirely (same convention as
+    // chapelEconomy), so it is a terminal by construction — was previously
+    // undeclared ('unknown'), which is how v4's opusCloneDominion silently
+    // shadowed it (ADR-0014's own motivating incident).
+    assembly: 'terminal',
     apply() {
       return (seed) => {
         const fallback = heuristicBaseline(seed);
@@ -1659,6 +1665,300 @@ const chapelEconomyV2CloneBuy = chapelEconomyV2FlagSpec(
   "B1 mechanical variant of chapelEconomyV2 (GAP-11 Phase 4-C, element-contribution isolation): buy is V2's redesign in full (greening reorder + Witch/Laboratory); action reverts to v1 chapelEconomy's original blanket transition-phase Chapel ban (no Witch priority, no junk-gating) — isolates whether V2's gain comes from the buy side or the action side.",
   { includeGreeningReorder: true, useV2Action: false },
 );
+
+// --- GAP-11 Phase 5 round-3 candidate batch (main-loop design spec,
+// scratchpad/dominion-round3-design-spec.md, "그대로 구현") ---
+//
+// Evidence (dominion-loss-mining-round3.ts / design-brief-round3.md): (1)
+// chapelEconomyV2 vs L2 = 42.0% [36.3, 48.0], reproducible; (2) the mismatch
+// bottleneck moved chapelTrash(67.4%, r1) -> action/buy(19.4%/16.4%, r2) ->
+// chapelTrash re-emerges(12.9%) > buy(10.7%) > action(4.6%, r3); (3) the
+// re-emergence is not a policy regression — chapelEconomyV2's chapelTrash
+// policy is byte-for-byte the same function as v1/v2's — but a *distribution*
+// shift: V2's buy/action redesign reaches different deck-composition/timing
+// states than v1 ever did, so the same fixed Copper-trash safety floor (the
+// hardcoded "totalMoney - 2 >= 3" check in chapelEconomyTrashChoice) is
+// tested against unfamiliar states.
+//
+// Design (B3 본안, chapelEconomyV3): keep chapelEconomyV2's buy/action
+// verbatim (reused directly below, not re-derived — chapelEconomyV2BuyChoice/
+// chapelEconomyV2ActionChoice/chapelEconomyV2ActionLegal are the exact same
+// module-level functions chapelEconomyV2FlagSpec calls), and replace only the
+// fixed floor with one derived from an estimated remaining-game-length
+// signal: `own.turnsTaken` (how long this player's game has run) and
+// `supply.Province` (how far the Province pile has been drawn down) each
+// independently estimate progress toward the transition phase; taking their
+// max means either signal running ahead is enough to raise caution. Early
+// growth (both signals near 0) uses the low end of the range (aggressive —
+// keep trashing Coppers even when deck money is thin, since there is time to
+// recover); as either signal approaches "about to transition" the floor
+// rises toward the high end (conservative — stop cannibalizing money the
+// deck will need for the incoming Province sprint). EXPECTED_GAME_TURNS=18 is
+// a rough typical-2p-game estimate (not measured from this session's own
+// data — a deliberately coarse anchor, since the province-progress signal is
+// the harder constraint in practice and turnsTaken mainly matters for
+// unusually slow/fast games).
+
+const CHAPEL_ECONOMY_V3_EXPECTED_GAME_TURNS = 18;
+const CHAPEL_ECONOMY_V3_TOTAL_PROVINCE = BASIC_STARTING_SUPPLY.Province;
+
+function clamp01(x: number): number {
+  return Math.max(0, Math.min(1, x));
+}
+
+interface ChapelEconomyV3TrashOptions {
+  /** Copper-trash safety floor at progress=0 (just started, most aggressive). */
+  readonly lowFloor: number;
+  /** Copper-trash safety floor at progress=1 (about to transition, most conservative). */
+  readonly highFloor: number;
+}
+
+const CHAPEL_ECONOMY_V3_DEFAULT_TRASH: ChapelEconomyV3TrashOptions = { lowFloor: 2, highFloor: 4 };
+/** B1 mechanical variant: one step more aggressive at both ends. */
+const CHAPEL_ECONOMY_V3_AGGRESSIVE_TRASH: ChapelEconomyV3TrashOptions = { lowFloor: 1, highFloor: 3 };
+/** B1 mechanical variant: one step more conservative at both ends. */
+const CHAPEL_ECONOMY_V3_CONSERVATIVE_TRASH: ChapelEconomyV3TrashOptions = { lowFloor: 3, highFloor: 5 };
+
+/** Estimated progress toward the transition phase, in [0, 1] — see this
+ * batch's own doc comment above for the two signals and why max() combines
+ * them. */
+function chapelEconomyV3Progress(observation: DominionObservation): number {
+  const remainingProvince = observation.supply.Province ?? 0;
+  const provinceProgress = clamp01(
+    (CHAPEL_ECONOMY_V3_TOTAL_PROVINCE - remainingProvince) / CHAPEL_ECONOMY_V3_TOTAL_PROVINCE,
+  );
+  const turnProgress = clamp01(observation.own.turnsTaken / CHAPEL_ECONOMY_V3_EXPECTED_GAME_TURNS);
+  return Math.max(provinceProgress, turnProgress);
+}
+
+/** Adaptive Copper-trash safety floor (replaces chapelEconomyTrashChoice's
+ * fixed "3") — linearly interpolated between `options.lowFloor` (progress=0)
+ * and `options.highFloor` (progress=1). */
+function chapelEconomyV3TrashFloor(observation: DominionObservation, options: ChapelEconomyV3TrashOptions): number {
+  const progress = chapelEconomyV3Progress(observation);
+  return options.lowFloor + (options.highFloor - options.lowFloor) * progress;
+}
+
+/**
+ * chapelTrash policy (B3 본안): identical priority order to
+ * chapelEconomyTrashChoice (Estate > Copper (if the deck's total money value
+ * stays >= the adaptive floor after trashing it) > Curse), only the Copper
+ * gate's floor is adaptive instead of the fixed "3".
+ */
+function chapelEconomyV3TrashChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  growth: boolean,
+  options: ChapelEconomyV3TrashOptions,
+): DominionChoice | undefined {
+  const findTrash = (name: CardName): DominionChoice | undefined =>
+    legal.find((c) => c.kind === 'trashCard' && c.card === name);
+  const doneTrash = legal.find((c) => c.kind === 'doneTrash');
+
+  if (!growth) {
+    return findTrash('Curse') ?? doneTrash;
+  }
+
+  const estate = findTrash('Estate');
+  if (estate) return estate;
+
+  const copper = findTrash('Copper');
+  if (copper) {
+    const totalMoney =
+      ownCardCount(observation, 'Copper') * CARD_DEFS.Copper.coins +
+      ownCardCount(observation, 'Silver') * CARD_DEFS.Silver.coins +
+      ownCardCount(observation, 'Gold') * CARD_DEFS.Gold.coins;
+    if (totalMoney - CARD_DEFS.Copper.coins >= chapelEconomyV3TrashFloor(observation, options)) return copper;
+  }
+
+  const curse = findTrash('Curse');
+  if (curse) return curse;
+
+  return doneTrash;
+}
+
+/**
+ * Builds a `chapelEconomyV3*` StrategyFlagSpec: buy/action are
+ * chapelEconomyV2's own functions reused verbatim (imported by reference,
+ * not re-derived — the spec's explicit "buy/action 로직 재사용, 중복 금지"
+ * instruction), always with `includeGreeningReorder: true, useV2Action: true`
+ * (V2's fully-redesigned buy/action, the only combination this round's
+ * evidence supports); only chapelTrash's floor is parameterized. Standalone
+ * (ignores `base` entirely, same convention as the rest of the
+ * chapelEconomy family) — terminal by construction (ADR-0014).
+ */
+function chapelEconomyV3FlagSpec(
+  flag: string,
+  description: string,
+  trashOptions: ChapelEconomyV3TrashOptions,
+): StrategyFlagSpec<DominionObservation, DominionChoice> {
+  return {
+    flag,
+    description,
+    assembly: 'terminal',
+    apply() {
+      return (seed) => {
+        const fallback = heuristicBaseline(seed);
+        return {
+          id: `dominion-heuristic+${flag}`,
+          decide(decisionPoint, observation, legal) {
+            if (decisionPoint === 'chapelTrash') {
+              const growth = chapelEconomyIsGrowthPhase(observation, CHAPEL_ECONOMY_DEFAULT);
+              return (
+                chapelEconomyV3TrashChoice(observation, legal, growth, trashOptions) ??
+                fallback.decide(decisionPoint, observation, legal)
+              );
+            }
+            if (decisionPoint === 'buy') {
+              return (
+                chapelEconomyV2BuyChoice(observation, legal, CHAPEL_ECONOMY_DEFAULT, true) ??
+                fallback.decide(decisionPoint, observation, legal)
+              );
+            }
+            if (decisionPoint === 'action') {
+              const witchChoice = chapelEconomyV2ActionChoice(observation, legal);
+              if (witchChoice) return witchChoice;
+              return fallback.decide(decisionPoint, observation, chapelEconomyV2ActionLegal(observation, legal));
+            }
+            return fallback.decide(decisionPoint, observation, legal);
+          },
+        };
+      };
+    },
+  };
+}
+
+/** B3-deep round 3 (main-loop design, this round's primary A8 follow-up —
+ * targets chapelTrash's round-3 re-emergence, 12.9%). */
+const chapelEconomyV3 = chapelEconomyV3FlagSpec(
+  'chapelEconomyV3',
+  "B3 deep redesign v3 (GAP-11 Phase 5 A8 follow-up, main-loop spec): reuses chapelEconomyV2's buy/action verbatim and replaces chapelTrash's fixed Copper-trash safety floor (was a hardcoded 3) with an adaptive floor derived from estimated game-length progress (max of Province-pile-drawdown fraction and turnsTaken/18) — low floor (2) early in growth phase, rising toward a high floor (4) as the transition phase approaches. Targets the round-3 LossReport's #1 mismatch (chapelTrash re-emerged at 12.9% after V2's buy/action redesign shifted the deck-composition distribution the fixed floor was tuned against).",
+  CHAPEL_ECONOMY_V3_DEFAULT_TRASH,
+);
+
+/** B1-exploit mechanical variant: one step more aggressive (lower floors — trash Coppers more eagerly). */
+const chapelEconomyV3Aggressive = chapelEconomyV3FlagSpec(
+  'chapelEconomyV3-aggressive',
+  'B1 mechanical variant of chapelEconomyV3: adaptive floor range shifted one step more aggressive (lowFloor 2->1, highFloor 4->3).',
+  CHAPEL_ECONOMY_V3_AGGRESSIVE_TRASH,
+);
+
+/** B1-exploit mechanical variant: one step more conservative (higher floors — trash Coppers more cautiously). */
+const chapelEconomyV3Conservative = chapelEconomyV3FlagSpec(
+  'chapelEconomyV3-conservative',
+  'B1 mechanical variant of chapelEconomyV3: adaptive floor range shifted one step more conservative (lowFloor 2->3, highFloor 4->5).',
+  CHAPEL_ECONOMY_V3_CONSERVATIVE_TRASH,
+);
+
+/**
+ * B2-opponent (this round's own design, GAP-11 Phase 5 — targets the
+ * round-3 LossReport's #2 mismatch, buy at 10.7%, with an approach distinct
+ * from B3's trash-floor axis): chapelEconomyV2's buy tier already includes
+ * Witch/Laboratory at the 5-7 coin tier, but only *after* Gold — so on a
+ * coins=6-7 turn while Curses remain in the supply, V2 always takes Gold
+ * over Witch even though Witch is a stronger tempo play (denies the
+ * opponent's deck quality *and* draws a card) whenever the Witch pile is not
+ * yet capped. This candidate keeps chapelEconomyV2's chapelTrash/action
+ * verbatim and reorders only the 5-7 coin buy tier: Witch (while Curses
+ * remain and under the copy cap) *before* Gold, Laboratory unchanged after
+ * Gold. Standalone (ignores `base` entirely, same convention as the rest of
+ * the family) — terminal by construction.
+ */
+function chapelEconomyWitchFirstBuyChoice(
+  observation: DominionObservation,
+  legal: readonly DominionChoice[],
+  options: ChapelEconomyOptions,
+): DominionChoice | undefined {
+  const findBuy = (name: CardName): DominionChoice | undefined =>
+    legal.find((c) => c.kind === 'buy' && c.card === name);
+  const remainingProvince = observation.supply.Province ?? 0;
+  const growth = chapelEconomyIsGrowthPhase(observation, options);
+  const coins = observation.coins;
+
+  if (coins >= 8) {
+    const province = findBuy('Province');
+    if (province) return province;
+  }
+
+  if (!growth) {
+    if (coins >= 5) {
+      const duchy = findBuy('Duchy');
+      if (duchy) return duchy;
+    }
+    if (remainingProvince <= 2) {
+      const estate = findBuy('Estate');
+      if (estate) return estate;
+    }
+  }
+
+  if (coins >= 5) {
+    if (ownCardCount(observation, 'Witch') < CHAPEL_ECONOMY_V2_MAX_WITCHES && (observation.supply.Curse ?? 0) > 0) {
+      const witch = findBuy('Witch');
+      if (witch) return witch;
+    }
+    if (coins >= 6) {
+      const gold = findBuy('Gold');
+      if (gold) return gold;
+    }
+    if (ownCardCount(observation, 'Laboratory') < CHAPEL_ECONOMY_V2_MAX_LABS) {
+      const lab = findBuy('Laboratory');
+      if (lab) return lab;
+    }
+    const density = ownMoneyDensity(observation);
+    if (density < options.densityThreshold) {
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    }
+  }
+
+  if (coins >= 3 && coins <= 4) {
+    const ownsChapel = ownCardCount(observation, 'Chapel') > 0;
+    if (!ownsChapel) {
+      const chapel = findBuy('Chapel');
+      if (chapel) return chapel;
+    } else if (growth) {
+      const silver = findBuy('Silver');
+      if (silver) return silver;
+    }
+  }
+
+  return undefined;
+}
+
+const chapelEconomyV2WitchFirst: StrategyFlagSpec<DominionObservation, DominionChoice> = {
+  flag: 'chapelEconomyV2-witchFirst',
+  description:
+    "B2 opponent-info design (GAP-11 Phase 5, targets round-3 buy mismatch 10.7%, distinct axis from B3's trash-floor redesign): chapelEconomyV2's chapelTrash/action kept verbatim; buy reorders the 5-7 coin tier to try Witch (while Curses remain, under the copy cap) before Gold instead of after it — the Witch/Laboratory kingdom-card interaction the LossReport's buy divergence points at.",
+  assembly: 'terminal',
+  apply() {
+    return (seed) => {
+      const fallback = heuristicBaseline(seed);
+      return {
+        id: 'dominion-heuristic+chapelEconomyV2-witchFirst',
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'chapelTrash') {
+            const growth = chapelEconomyIsGrowthPhase(observation, CHAPEL_ECONOMY_DEFAULT);
+            return (
+              chapelEconomyTrashChoice(observation, legal, growth) ?? fallback.decide(decisionPoint, observation, legal)
+            );
+          }
+          if (decisionPoint === 'buy') {
+            return (
+              chapelEconomyWitchFirstBuyChoice(observation, legal, CHAPEL_ECONOMY_DEFAULT) ??
+              fallback.decide(decisionPoint, observation, legal)
+            );
+          }
+          if (decisionPoint === 'action') {
+            const witchChoice = chapelEconomyV2ActionChoice(observation, legal);
+            if (witchChoice) return witchChoice;
+            return fallback.decide(decisionPoint, observation, chapelEconomyV2ActionLegal(observation, legal));
+          }
+          return fallback.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
 
 /**
  * B2-opponent (this round's own design, GAP-11 Phase 4-C — deliberately a
@@ -1809,6 +2109,83 @@ function dominionChoiceEvaluator(
 ): readonly number[] {
   return choices.map((choice) => {
     if (choice.kind === 'buy') return dominionBuyValueScore(choice.card, state, player);
+    if (choice.kind === 'trashCard') return dominionTrashValueScore(choice.card);
+    if (choice.kind === 'playAction') {
+      const def = CARD_DEFS[choice.card];
+      return def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+    }
+    return 0;
+  });
+}
+
+/** Count of `name` across every zone of `player`'s full deck in a live
+ * `DominionState` (deck + hand + discard + play) — the state-level analogue
+ * of `ownCardCount` above (which reads a `DominionObservation`), needed
+ * because `dominionV2BuyValueScore` below runs inside IS-MCTS search over
+ * sampled determinized states, not real observations. */
+function stateOwnCardCount(state: DominionState, player: PlayerId, name: CardName): number {
+  const p = getPlayer(state, player);
+  return countOf(p.deck, name) + countOf(p.hand, name) + countOf(p.discard, name) + countOf(p.play, name);
+}
+
+/**
+ * B4-explore (A5 tree prior, GAP-11 Phase 5 round-3, untried combination —
+ * design-spec's own instruction: "chapelEconomyV2의 buy 로직 자체를
+ * choiceEvaluator로 재표현"): mirrors chapelEconomyV2BuyChoice's actual
+ * priority order (Province -> greening reorder -> Gold -> Witch/Laboratory ->
+ * density-gated Silver -> one-time Chapel) as a tiered static score, instead
+ * of the generic dominionBuyValueScore's independent card-value heuristic
+ * above. This is a genuinely different prior source than round-1/round-2's
+ * A5 attempts (docs/adr/0009): those used `adapter.choiceEvaluator`
+ * (dominionChoiceEvaluator, generic heuristic knowledge); this one encodes
+ * chapelEconomyV2's own converged policy knowledge instead, injected via
+ * `MctsConfig.priorEvaluator` (takes precedence over `priorSource`/
+ * `adapter.choiceEvaluator`, search/mcts.ts's own doc comment) so it can
+ * coexist with the adapter's existing choiceEvaluator field rather than
+ * replacing it. trashCard/playAction scoring reuses the generic evaluator's
+ * own scoring (dominionTrashValueScore / the CARD_DEFS-derived playAction
+ * score) unchanged — only buy's scoring differs, since buy is what round-3's
+ * A8 evidence (10.7% mismatch) and the design spec target.
+ */
+function dominionV2BuyValueScore(card: CardName, state: DominionState, player: PlayerId): number {
+  const remainingProvince = state.supply.Province ?? 0;
+  const growth = remainingProvince > CHAPEL_ECONOMY_DEFAULT.transitionRemaining;
+
+  if (card === 'Province') return 100;
+  if (card === 'Curse') return -50;
+  if (!growth && card === 'Duchy') return 90;
+  if (!growth && card === 'Estate') return remainingProvince <= 2 ? 70 : 10;
+  if (card === 'Gold') return 65;
+  if (card === 'Witch') {
+    const owned = stateOwnCardCount(state, player, 'Witch');
+    return owned < CHAPEL_ECONOMY_V2_MAX_WITCHES && (state.supply.Curse ?? 0) > 0 ? 60 : 5;
+  }
+  if (card === 'Laboratory') {
+    const owned = stateOwnCardCount(state, player, 'Laboratory');
+    return owned < CHAPEL_ECONOMY_V2_MAX_LABS ? 55 : 5;
+  }
+  if (card === 'Silver') return 40;
+  if (card === 'Chapel') {
+    const owned = stateOwnCardCount(state, player, 'Chapel');
+    return owned > 0 ? 5 : 45;
+  }
+  const def = CARD_DEFS[card];
+  return 20 + def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+}
+
+/** Typed `MctsConfig.priorEvaluator` body pairing `dominionV2BuyValueScore`
+ * for buy choices with the generic evaluator's own trashCard/playAction
+ * scoring — exported so a runner can widen it to the erased
+ * `(state: unknown, ...) => ...` signature (same pattern as gomoku's
+ * `erasePriorEvaluator`, shared/gomoku-round1-candidates.ts) without
+ * re-deriving the scoring logic. */
+export function dominionV2BuyPriorEvaluator(
+  state: DominionState,
+  player: PlayerId,
+  choices: readonly DominionChoice[],
+): readonly number[] {
+  return choices.map((choice) => {
+    if (choice.kind === 'buy') return dominionV2BuyValueScore(choice.card, state, player);
     if (choice.kind === 'trashCard') return dominionTrashValueScore(choice.card);
     if (choice.kind === 'playAction') {
       const def = CARD_DEFS[choice.card];
@@ -2032,6 +2409,10 @@ export const dominionAdapter: GameAdapter<DominionState, DominionObservation, Do
     chapelEconomyV2CloneBuy,
     witchRushNoTrash,
     opusCloneDominion,
+    chapelEconomyV3,
+    chapelEconomyV3Aggressive,
+    chapelEconomyV3Conservative,
+    chapelEconomyV2WitchFirst,
   ],
   choiceEvaluator: dominionChoiceEvaluator,
 };

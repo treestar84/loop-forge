@@ -62,5 +62,6 @@ export function hearthstoneIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlag
     description:
       'SO-ISMCTS search candidate over sampled hand/deck determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, HEARTHSTONE_ISMCTS_S128_HR_CONFIG),
+    assembly: 'terminal',
   };
 }

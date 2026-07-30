@@ -174,6 +174,7 @@ function dominionIsmctsPriorFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpec<
     description:
       'B4 explore (A5 tree prior, GAP-11 Phase 3-C): SO-ISMCTS search candidate using dominionAdapter.choiceEvaluator (static buy/trash/action value evaluation) as its priorSource, s64 simulation budget unchanged from every prior dominion ismcts wave (ADR-0009); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, ISMCTS_PRIOR_CONFIG),
+    assembly: 'terminal',
   };
 }
 

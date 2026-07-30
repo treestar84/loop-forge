@@ -1763,6 +1763,7 @@ const opusCloneDominion: StrategyFlagSpec<DominionObservation, DominionChoice> =
   description:
     "B4 explore (A10 full imitation, GAP-11 Phase 4-C): wraps dominion-opus-bot.ts (the L2 feedback anchor) verbatim as a strategy flag (apply() returns dominionOpusBot itself, zero drift risk from a re-derived copy). Ignores base entirely (imitation axis, same convention as chapelEconomy). See dominion.ts's own doc comment on this flag for why the per-decision-anchor-freshness caveat that affects loss-mining.ts's LossReport does NOT apply to this candidate's actual gameplay.",
   apply: () => dominionOpusBot,
+  assembly: 'terminal',
 };
 
 /**

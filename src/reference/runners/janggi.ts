@@ -358,6 +358,7 @@ function main(): void {
     flag: MCTS_FLAG,
     description: 'UCT MCTS search candidate (docs/GAP-ANALYSIS-7.md O5/O6); ignores the base bot entirely.',
     apply: () => mctsBotFactory(adapter, JANGGI_MCTS_CONFIG),
+    assembly: 'terminal',
   };
   const mctsAdapter = withStrategyFlags(adapter, [mctsFlagSpec]);
 

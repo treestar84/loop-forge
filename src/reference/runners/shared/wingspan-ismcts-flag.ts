@@ -65,5 +65,6 @@ export function wingspanIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpe
     description:
       'SO-ISMCTS search candidate over sampled opponent-hand/deck determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, WINGSPAN_ISMCTS_S256_HR_CONFIG),
+    assembly: 'terminal',
   };
 }

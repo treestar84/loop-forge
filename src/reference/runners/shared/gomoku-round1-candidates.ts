@@ -173,6 +173,7 @@ export function gomokuOpeningThenPriorFlagSpec(
         },
       };
     },
+    assembly: 'terminal',
   };
 }
 

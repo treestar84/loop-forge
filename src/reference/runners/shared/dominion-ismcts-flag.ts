@@ -60,6 +60,7 @@ export function dominionIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpe
     description:
       'SO-ISMCTS search candidate over sampled hand/deck determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, DOMINION_ISMCTS_S64_HR_CONFIG),
+    assembly: 'terminal',
   };
 }
 
@@ -100,6 +101,7 @@ export function dominionIsmctsChampionRolloutFlagSpec(adapter: AnyGameAdapter): 
     description:
       'SO-ISMCTS search candidate whose rollouts are driven by the current champion composite bot instead of raw heuristic (DESIGN.md §6.1 near-miss retry); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, config),
+    assembly: 'terminal',
   };
 }
 
@@ -148,5 +150,6 @@ export function dominionIsmctsS256FlagSpec(adapter: AnyGameAdapter): StrategyFla
     description:
       'SO-ISMCTS search candidate with a 4x larger simulation budget (256 vs the 64 both prior retries used), raw heuristic rollout (no champion mimicry) — DESIGN.md §6.1 near-miss retry, third attempt, untried budget-increase axis; ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, DOMINION_ISMCTS_S256_HR_CONFIG),
+    assembly: 'terminal',
   };
 }

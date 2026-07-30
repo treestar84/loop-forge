@@ -56,6 +56,7 @@ export function splendorIsmctsFlagSpec(adapter: AnyGameAdapter): StrategyFlagSpe
     description:
       'SO-ISMCTS search candidate over sampled deck-order determinizations (docs/FIX-BACKLOG.md P4); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, SPLENDOR_ISMCTS_S128_HR_CONFIG),
+    assembly: 'terminal',
   };
 }
 
@@ -101,5 +102,6 @@ export function splendorIsmctsChampionRolloutFlagSpec(adapter: AnyGameAdapter): 
     description:
       'SO-ISMCTS search candidate whose rollouts are driven by the current champion composite bot instead of raw heuristic (DESIGN.md §6.1 near-miss retry); ignores the base bot entirely.',
     apply: () => ismctsBotFactory(adapter, config),
+    assembly: 'terminal',
   };
 }

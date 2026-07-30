@@ -373,6 +373,7 @@ function main(): void {
     flag: MCTS_FLAG,
     description: 'UCT MCTS search candidate (docs/GAP-ANALYSIS-7.md O5/O6); ignores the base bot entirely.',
     apply: () => mctsBotFactory(adapter, GOMOKU_MCTS_CONFIG),
+    assembly: 'terminal',
   };
   // Every MCTS flag spec ever defined by any wave in this file is built here,
   // up front, and threaded into every wave's wired adapter below (not just

@@ -75,5 +75,6 @@ export function janggiMctsFlagSpecFor(
     flag,
     description: `UCT MCTS search candidate "${flag}" (docs/GAP-ANALYSIS-7.md O5/O6, docs/FIX-BACKLOG.md P2/P5); ignores the base bot entirely.`,
     apply: () => mctsBotFactory(adapter, config),
+    assembly: 'terminal',
   };
 }

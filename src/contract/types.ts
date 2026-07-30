@@ -142,6 +142,11 @@ export interface StrategyFlagSpec<TObservation, TChoice> {
   readonly apply: (
     base: BotFactory<TObservation, TChoice>,
   ) => BotFactory<TObservation, TChoice>;
+  /** 조립 종류(옵션, 미선언 시 'unknown' 취급 — 기존 동작·기존 registry
+   *  재현에 전혀 영향 없음). 'decorator'는 base를 실제로 감싸 활용하는
+   *  플래그, 'terminal'은 base를 완전히 무시하고 독립된 봇을 반환하는
+   *  플래그(탐색/학습/클론 계열 전부 해당). ADR-0014. */
+  readonly assembly?: 'decorator' | 'terminal';
 }
 
 /** Probe used by the C3 hidden-information axis: mutate what `viewer` must not see. */

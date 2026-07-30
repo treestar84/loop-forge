@@ -268,6 +268,7 @@ function main(): void {
     flag: MCCFR_FLAG,
     description: `Outcome-sampling MCCFR policy-table candidate (docs/GAP-ANALYSIS-7.md O7, ${MCCFR_ITERATIONS} iterations); ignores the base bot entirely.`,
     apply: () => policyBotFactoryFor(adapter, policyTable),
+    assembly: 'terminal',
   };
   const mccfrAdapter = withStrategyFlags(adapter, [mccfrFlagSpec]);
 
@@ -464,6 +465,7 @@ function main(): void {
     flag: MCCFR_PR_FLAG,
     description: `Perfect-recall outcome-sampling MCCFR policy-table candidate (docs/FIX-BACKLOG.md P3, ${MCCFR_PR_ITERATIONS} iterations); ignores the base bot entirely.`,
     apply: () => policyBotFactoryFor(adapter, prPolicyTable),
+    assembly: 'terminal',
   };
   const mccfrWave2Adapter = withStrategyFlags(adapter, [prFlagSpec]);
 

@@ -19,6 +19,7 @@
 | [0011](0011-choice-evaluator-tree-prior.md) | choiceEvaluator 계약 확장과 MCTS 트리 prior | 채택됨 |
 | [0012](0012-anchor-ladder-holdout-opponents.md) | 앵커 래더(L1/L2/L3)와 홀드아웃 상대 분리 | 채택됨 |
 | [0013](0013-portfolio-candidate-generation.md) | 포트폴리오 후보 생성 — 큰루프 설계 단계의 버킷 배분 | 채택됨 |
+| [0014](0014-strategy-flag-assembly-kind.md) | StrategyFlagSpec 조립 종류 선언과 검증된 합성 | 채택됨 |
 
 ## 형식
 

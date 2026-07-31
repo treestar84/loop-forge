@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Loop Forge</title>
+  <desc id="desc">Turn-based game AI improves through iterative self-play and statistical validation.</desc>
+  <defs>
+    <linearGradient id="ember" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#ffcf5c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="300" fill="#14171f"/>
+
+  <!-- An improving arc of simple game pieces. -->
+  <g>
+    <circle cx="62" cy="195" r="11" fill="#4a4f5c"/>
+    <path d="M49 211h26l6 25H43l6-25Z" fill="#4a4f5c"/>
+    <circle cx="111" cy="181" r="13" fill="#676d7c"/>
+    <path d="M96 200h30l7 29H89l7-29Z" fill="#676d7c"/>
+    <circle cx="164" cy="165" r="15" fill="#9197a5"/>
+    <path d="M147 187h34l8 33H139l8-33Z" fill="#9197a5"/>
+    <circle cx="222" cy="145" r="18" fill="#ffc06a"/>
+    <path d="M202 171h40l9 39H193l9-39Z" fill="#ffc06a"/>
+    <circle cx="285" cy="120" r="21" fill="url(#ember)"/>
+    <path d="M262 151h46l11 45H251l11-45Z" fill="url(#ember)"/>
+  </g>
+
+  <!-- Ambient forge sparks. -->
+  <g fill="#ffd166">
+    <circle cx="35" cy="165" r="2" opacity=".55"/>
+    <circle cx="91" cy="229" r="3" opacity=".42"/>
+    <circle cx="146" cy="129" r="2.5" opacity=".72"/>
+    <circle cx="241" cy="104" r="3" opacity=".65"/>
+  </g>
+  <g fill="#ff8a3d">
+    <circle cx="191" cy="226" r="2.5" opacity=".58"/>
+    <circle cx="322" cy="101" r="3.5" opacity=".76"/>
+  </g>
+
+  <g text-anchor="middle" font-family="Arial, Helvetica, sans-serif">
+    <text x="610" y="145" fill="#e8ecf4" font-size="64" font-weight="700" letter-spacing="4">LOOP FORGE</text>
+    <text x="610" y="184" fill="#9aa1b2" font-size="20">Self-play. Statistically proven. Honestly reported.</text>
+  </g>
+
+  <!-- Scaled echo of the Loop Forge icon motif. -->
+  <g transform="translate(862 2) scale(2.3)">
+    <path d="M91.6 36.4A39 39 0 1 1 53.9 101.7" fill="none" stroke="url(#ember)" stroke-width="10" stroke-linecap="round"/>
+    <path d="M66 95 50 85 48 106Z" fill="url(#ember)"/>
+    <path d="M39 58h38l10 5-10 5H48l-9-5Z" fill="#e8ecf4"/>
+    <path d="M49 73h29l7 14H43l6-14Z" fill="#e8ecf4"/>
+    <path d="m88 45 3 7 7 3-7 3-3 7-3-7-7-3 7-3 3-7Z" fill="#ffd166"/>
+  </g>
+  <g fill="#ffd166">
+    <circle cx="928" cy="72" r="3" opacity=".7"/>
+    <circle cx="1110" cy="86" r="2.5" opacity=".62"/>
+    <circle cx="1137" cy="174" r="3.5" opacity=".84"/>
+  </g>
+  <circle cx="1088" cy="248" r="2.5" fill="#ff8a3d" opacity=".7"/>
+</svg>

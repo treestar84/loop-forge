@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Loop Forge">
+  <defs>
+    <linearGradient id="ember" x1="28" y1="98" x2="100" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#ffcf5c"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#14171f"/>
+  <path d="M91.6 36.4A39 39 0 1 1 53.9 101.7" fill="none" stroke="url(#ember)" stroke-width="10" stroke-linecap="round"/>
+  <path d="M66 95 50 85 48 106Z" fill="url(#ember)"/>
+  <path d="M39 58h38l10 5-10 5H48l-9-5Z" fill="#e8ecf4"/>
+  <path d="M49 73h29l7 14H43l6-14Z" fill="#e8ecf4"/>
+  <path d="m88 45 3 7 7 3-7 3-3 7-3-7-7-3 7-3 3-7Z" fill="#ffd166"/>
+</svg>

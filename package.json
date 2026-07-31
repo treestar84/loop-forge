@@ -2,7 +2,12 @@
   "name": "loop-forge",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Game-agnostic NPC difficulty engineering platform: onboard a game, score its harness-readiness, then evolve bot strategies through statistically rigorous big-loop/small-loop experimentation.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/treestar84/loop-forge.git"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "jest",

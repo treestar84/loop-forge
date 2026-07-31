@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" role="img" aria-labelledby="title desc">
+  <title id="title">갭 분석 11 — 챗봇 AI(Opus) 상대 승률, 같은 방법을 세 게임에 적용</title>
+  <desc id="desc">오목과 하스스톤의 이전 및 이후 승률을 비교하고, 도미니언의 챔피언 갱신 성공을 표시한 차트</desc>
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff8a3d"/>
+      <stop offset="100%" stop-color="#ffcf5c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="900" height="380" rx="20" fill="#14171f"/>
+
+  <text x="42" y="47" fill="#e8ecf4" font-family="system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" font-size="16" font-weight="500">갭 분석 11 — 챗봇 AI(Opus) 상대 승률, 같은 방법을 세 게임에 적용</text>
+
+  <g font-family="system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" font-size="12" fill="#8890a0">
+    <text x="190" y="92" text-anchor="middle">0%</text>
+    <text x="347.5" y="92" text-anchor="middle">25%</text>
+    <text x="505" y="92" text-anchor="middle">50%</text>
+    <text x="662.5" y="92" text-anchor="middle">75%</text>
+    <text x="820" y="92" text-anchor="middle">100%</text>
+  </g>
+
+  <g stroke="#2a2f3a" stroke-width="1">
+    <line x1="190" y1="104" x2="190" y2="264"/>
+    <line x1="347.5" y1="104" x2="347.5" y2="264"/>
+    <line x1="505" y1="104" x2="505" y2="264"/>
+    <line x1="662.5" y1="104" x2="662.5" y2="264"/>
+    <line x1="820" y1="104" x2="820" y2="264"/>
+  </g>
+
+  <g font-family="system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" font-size="12">
+    <rect x="696" y="34" width="12" height="12" rx="3" fill="#4a4f5c"/>
+    <text x="714" y="44" fill="#e8ecf4">이전</text>
+    <rect x="757" y="34" width="12" height="12" rx="3" fill="url(#ember)"/>
+    <text x="775" y="44" fill="#e8ecf4">이후</text>
+  </g>
+
+  <g font-family="system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif">
+    <text x="152" y="145" text-anchor="end" fill="#e8ecf4" font-size="15" font-weight="700">오목</text>
+    <rect x="190" y="119" width="0" height="18" rx="5" fill="#4a4f5c"/>
+    <text x="198" y="133" fill="#e8ecf4" font-size="12">0%</text>
+    <rect x="190" y="145" width="315" height="18" rx="5" fill="url(#ember)"/>
+    <text x="513" y="159" fill="#e8ecf4" font-size="12" font-weight="600">50.0%</text>
+
+    <text x="152" y="213" text-anchor="end" fill="#e8ecf4" font-size="15" font-weight="700">하스스톤</text>
+    <rect x="190" y="187" width="214.2" height="18" rx="5" fill="#4a4f5c"/>
+    <text x="412.2" y="201" fill="#e8ecf4" font-size="12" font-weight="600">34%</text>
+    <rect x="190" y="213" width="291.69" height="18" rx="5" fill="url(#ember)"/>
+    <text x="489.69" y="227" fill="#e8ecf4" font-size="12" font-weight="600">46.3%</text>
+  </g>
+
+  <rect x="190" y="286" width="630" height="48" rx="14" fill="#1b202a" stroke="#ff9a46" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <circle cx="218" cy="310" r="6" fill="url(#ember)"/>
+  <text x="505" y="315" text-anchor="middle" fill="#e8ecf4" font-family="system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" font-size="14" font-weight="600">도미니언: 4회 정체 → 챔피언 갱신 성공</text>
+</svg>

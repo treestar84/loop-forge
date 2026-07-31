@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-label="큰 루프 안에서 작은 루프가 수백에서 수천 판 반복되어 봇을 강화하는 구조">
+  <defs>
+    <linearGradient id="ember" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff8a3d"/>
+      <stop offset="100%" stop-color="#ffcf5c"/>
+    </linearGradient>
+    <marker id="arrow-ember" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M1 1L9 5L1 9Z" fill="url(#ember)"/>
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1L9 5L1 9Z" fill="#8e95a5"/>
+    </marker>
+    <filter id="glow" x="-20%" y="-30%" width="140%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="900" height="520" rx="20" fill="#14171f"/>
+
+  <!-- The enclosing, slower design-feedback loop. -->
+  <rect x="50" y="50" width="800" height="420" rx="24" fill="none" stroke="url(#ember)" stroke-width="2.5" stroke-dasharray="10 9" opacity=".95"/>
+  <text x="82" y="91" fill="#ffcf5c" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="24" font-weight="700">큰 루프</text>
+  <text x="82" y="113" fill="#e8ecf4" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="13">AI가 전략 후보 설계</text>
+
+  <!-- The high-frequency loop is physically contained inside the outer loop. -->
+  <rect x="100" y="140" width="460" height="230" rx="18" fill="#1d222d" stroke="#3c4352" stroke-width="1.5"/>
+  <path d="M123 168H140" stroke="url(#ember)" stroke-width="4" stroke-linecap="round"/>
+  <text x="151" y="175" fill="#ff8a3d" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="20" font-weight="700">작은 루프</text>
+  <text x="123" y="198" fill="#e8ecf4" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="12">무료 통계 검증 (AI 비용 없음)</text>
+  <line x1="123" y1="213" x2="537" y2="213" stroke="#333a48"/>
+
+  <!-- Compact five-stage statistical validation pipeline. -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" text-anchor="middle">
+    <rect x="123" y="236" width="60" height="30" rx="8" fill="#4a4f5c"/>
+    <text x="153" y="255" fill="#e8ecf4">screen</text>
+    <path d="M187 251H199" fill="none" stroke="#727987" stroke-width="1.3" marker-end="url(#arrow-muted)"/>
+    <rect x="203" y="236" width="60" height="30" rx="8" fill="#535966"/>
+    <text x="233" y="255" fill="#e8ecf4">smoke</text>
+    <path d="M267 251H279" fill="none" stroke="#727987" stroke-width="1.3" marker-end="url(#arrow-muted)"/>
+    <rect x="283" y="236" width="60" height="30" rx="8" fill="#5d6370"/>
+    <text x="313" y="255" fill="#e8ecf4">prune</text>
+    <path d="M347 251H359" fill="none" stroke="#727987" stroke-width="1.3" marker-end="url(#arrow-muted)"/>
+    <rect x="363" y="236" width="65" height="30" rx="8" fill="#676d7c"/>
+    <text x="395.5" y="255" fill="#e8ecf4">holdout</text>
+    <path d="M432 251H444" fill="none" stroke="#8e95a5" stroke-width="1.3" marker-end="url(#arrow-muted)"/>
+    <rect x="448" y="236" width="78" height="30" rx="8" fill="url(#ember)"/>
+    <text x="487" y="255" fill="#14171f" font-size="9.2" font-weight="700">graduation</text>
+  </g>
+
+  <!-- Repeat badge: the principal cue for massive iteration. -->
+  <rect x="155" y="292" width="350" height="49" rx="14" fill="#242a36" stroke="#48505f"/>
+  <path d="M188 319a13 13 0 1 1 8-20" fill="none" stroke="#9aa2b2" stroke-width="2.2" stroke-linecap="round" marker-end="url(#arrow-muted)"/>
+  <path d="M204 298l-8 1 3 7" fill="none" stroke="#9aa2b2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="224" y="323" fill="#ffcf5c" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="14" font-weight="700">수백~수천 판 반복</text>
+  <text x="455" y="322" fill="#8e95a5" font-family="Arial, sans-serif" font-size="11" text-anchor="end">many matches</text>
+
+  <!-- Outcome: a compact strengthening / leveling-up graphic. -->
+  <path d="M562 255H605" fill="none" stroke="url(#ember)" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrow-ember)" filter="url(#glow)"/>
+  <text x="680" y="185" fill="#e8ecf4" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="14" font-weight="700" text-anchor="middle">봇이 점점 강해짐</text>
+  <line x1="620" y1="320" x2="756" y2="320" stroke="#454c5b" stroke-width="1.5"/>
+  <rect x="630" y="292" width="20" height="28" rx="4" fill="#4a4f5c"/>
+  <rect x="660" y="273" width="20" height="47" rx="4" fill="#5d6370"/>
+  <rect x="690" y="249" width="20" height="71" rx="4" fill="#7b7166"/>
+  <rect x="720" y="218" width="20" height="102" rx="4" fill="url(#ember)"/>
+  <path d="M730 205V190" fill="none" stroke="url(#ember)" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrow-ember)"/>
+
+  <!-- Feedback stays inside the outer boundary and returns to the design area. -->
+  <path d="M760 337 C793 363 790 421 735 432 H160 C95 432 82 390 82 330 V143 C82 119 98 103 121 103 H166" fill="none" stroke="#8e95a5" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-muted)"/>
+  <rect x="330" y="414" width="225" height="23" rx="11.5" fill="#1d222d"/>
+  <text x="442.5" y="430" fill="#bfc6d3" font-family="Arial, 'Apple SD Gothic Neo', sans-serif" font-size="12" text-anchor="middle">패배 데이터 + 근접실패 피드백</text>
+</svg>

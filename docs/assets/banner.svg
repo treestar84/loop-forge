@@ -42,11 +42,8 @@
 
   <!-- Scaled echo of the Loop Forge icon motif. -->
   <g transform="translate(862 2) scale(2.3)">
-    <path d="M91.6 36.4A39 39 0 1 1 53.9 101.7" fill="none" stroke="url(#ember)" stroke-width="10" stroke-linecap="round"/>
-    <path d="M66 95 50 85 48 106Z" fill="url(#ember)"/>
-    <path d="M39 58h38l10 5-10 5H48l-9-5Z" fill="#e8ecf4"/>
-    <path d="M49 73h29l7 14H43l6-14Z" fill="#e8ecf4"/>
-    <path d="m88 45 3 7 7 3-7 3-3 7-3-7-7-3 7-3 3-7Z" fill="#ffd166"/>
+    <path d="M88.4 34.9A38 38 0 1 0 88.4 93.1" fill="none" stroke="url(#ember)" stroke-width="13" stroke-linecap="round"/>
+    <path d="M105 13C105 13 116 24.5 116 34.5C116 41.3 111.2 45.5 105.4 45.5C99.5 45.5 96.5 41.3 96.5 35.7C96.5 28.6 101.6 19.9 105 13Z" fill="#ffd166" stroke="#14171f" stroke-width="2" stroke-linejoin="round"/>
   </g>
   <g fill="#ffd166">
     <circle cx="928" cy="72" r="3" opacity=".7"/>

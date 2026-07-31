@@ -113,6 +113,29 @@ function centerBonus(move: GomokuMove): number {
 const DEFENSE_WEIGHT = 0.95;
 
 /**
+ * Own-side-only threat scores for `choices` (GAP-11 round5 addition): the
+ * offense half of `gomokuOpusCloneEvaluator` below, without the defensive
+ * mirror term or the center bonus. Added as an export (no behavior change to
+ * the evaluator itself) so round5's draw-averse evaluator
+ * (./gomoku-draw-averse-evaluator.ts) and round5's draw-convergence mining
+ * analysis (../runners/gomoku-loss-mining-round5.ts) both reuse this exact
+ * scoring instead of porting `directionThreat` a third time.
+ */
+export function gomokuOwnThreatScores(
+  state: GomokuState,
+  player: PlayerId,
+  choices: readonly GomokuMove[],
+): readonly number[] {
+  const cell = playerToCell(player);
+  return choices.map((move) => placementScore(state.board, move, cell));
+}
+
+/** Threat tier boundaries of `directionThreat` above, exported for round5's
+ * "was a decisive attack still available?" mining question — 800 is the
+ * open-three score, the lowest tier that forces a reply. */
+export const GOMOKU_OPEN_THREE_SCORE = 800;
+
+/**
  * Continuous L2-style per-choice evaluator (search/mcts.ts's
  * `MctsConfig.priorEvaluator` shape) — see this file's own doc comment.
  */

@@ -145,7 +145,25 @@ export interface RunPortfolioRoundInput {
    * — supplied by the app-boundary caller (determinism rule). Pass
    * `Date.now` from reference/runners/*.ts. */
   readonly clockNowMs: () => number;
+  /**
+   * Screen-tier probe seeds for `assembleWaveConfig`'s behavioral no-op
+   * check (GAP-11-ROUNDS.md gomoku round 5, FIX-BACKLOG E8): 3 seeds proved
+   * too few to reliably exercise a candidate's differing code path —
+   * `mcts17-s256-clone-earlyprior-sched` produced byte-identical trajectories
+   * to baseline on seeds [1,2,3] yet scored +8.7pp vs L2 at N=40 and held up
+   * at N=200 confirmation, meaning the 3-seed sample simply never hit the
+   * position where its schedule diverges. This is an exact trajectory-equality
+   * check (`screenCandidate` in loop/wave-runner.ts), not a statistical test,
+   * so more seeds strictly increase detection power with no false-positive
+   * risk. Optional and defaults to `DEFAULT_SCREEN_PROBE_SEEDS` (8 seeds) —
+   * omit to get the improved default; pass the historical `[1, 2, 3]`
+   * explicitly only if reproducing a pre-E8 round byte-for-byte.
+   */
+  readonly screenProbeSeeds?: readonly number[];
 }
+
+/** See `RunPortfolioRoundInput.screenProbeSeeds` (FIX-BACKLOG E8). */
+export const DEFAULT_SCREEN_PROBE_SEEDS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 export interface ProbeFilterRow {
   readonly flag: string;
@@ -268,6 +286,7 @@ function runRoundWave(
   wave: RoundWaveOptions,
   challenge: RoundChallengeOptions,
   recordedAt: string,
+  screenProbeSeeds: readonly number[],
 ): { readonly report: WaveReport; readonly criteria: PromotionCriteria } {
   const ledger = new SeedLedger();
   const SMOKE_START = wave.waveSeedBase;
@@ -331,7 +350,7 @@ function runRoundWave(
           ? { regression: { bankId: `${gameId}-round-regression`, blocks: wave.tiers.regression.blocks } }
           : {}),
       },
-      screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
+      screenProbe: { seeds: screenProbeSeeds, botSeedBase: 100 },
     },
     ctx.calibration,
     ctx.overrides,
@@ -491,7 +510,16 @@ export function runPortfolioRound(input: RunPortfolioRoundInput): RunPortfolioRo
   const probeFilterRows = runProbeFilter(input.adapter, input.candidates, mergedProbes, input.probeFilter, input.clockNowMs);
   const advancing = probeFilterRows.filter((row) => row.advanced);
 
-  const { report, criteria } = runRoundWave(input.adapter, input.gameId, advancing, latestVersion, input.wave, input.challenge, input.recordedAt);
+  const { report, criteria } = runRoundWave(
+    input.adapter,
+    input.gameId,
+    advancing,
+    latestVersion,
+    input.wave,
+    input.challenge,
+    input.recordedAt,
+    input.screenProbeSeeds ?? DEFAULT_SCREEN_PROBE_SEEDS,
+  );
   const challengeTable = buildChallengeTable(report);
   const primaryAnchorId = input.challenge.anchors[input.challenge.anchors.length - 1]?.anchorId;
 

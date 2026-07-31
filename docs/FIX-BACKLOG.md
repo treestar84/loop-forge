@@ -20,7 +20,7 @@
 | E5 | MCTS 옵션 필드 조합 계약 명시화 | 미착수 |
 | E6 | no-op 승격 억제 — 승격 후보의 flags가 부모 버전과 완전히 동일하면 새 버전을 만들지 않고 기존 버전에 `sourceWaveId`만 덧붙이는 처치(하스스톤 2회전에서 v4=v3 내용 동일로 실측, `docs/GAP-11-ROUNDS.md` 하스스톤 2회전 판정) | 미착수 |
 | E7 | 포트폴리오 수율 재배분이 "채택 여부"만 보고 "새 정보량"은 못 본다 — 하스스톤 2회전에서 B1이 이미 소진(우 소진: priorWeight 곡선 양옆 확인 완료)됐는데도 수율 계산상 80% 배분을 받음. 축 소진 여부를 수율 지표에 반영하는 처치 필요 | 미착수 |
-| E8 | **screen 단계 해상도 결함** — `screenProbe`가 3시드(`seeds:[1,2,3]`) 소표본이라, 실제로는 성능 차이가 있는 후보를 "behavioral no-op"으로 버린다. 오목 5회전 실측: `mcts17-s256-clone-earlyprior-sched`가 screen에서 no-op 탈락했는데 같은 라운드 challenge N=40에서 기준선보다 8.7%p 높고(53.1% vs 44.4%), 초월 사다리 N=200 확증에서 53.1%[49.8-56.5]로 이 게임 사상 최고 성적을 냈다 — 승격 자격이 없는 후보가 가장 좋은 성적을 낸 역설. 시드 수 증량 또는 판정 기준(동일 선택 비율 임계) 재설계 필요 | 미착수(2026-07-31 발견, GAP-11-ROUNDS.md 오목 5회전) |
+| E8 | **screen 단계 해상도 결함** — `screenProbe`가 3시드(`seeds:[1,2,3]`) 소표본이라, 실제로는 성능 차이가 있는 후보를 "behavioral no-op"으로 버린다. 오목 5회전 실측: `mcts17-s256-clone-earlyprior-sched`가 screen에서 no-op 탈락했는데 같은 라운드 challenge N=40에서 기준선보다 8.7%p 높고(53.1% vs 44.4%), 초월 사다리 N=200 확증에서 53.1%[49.8-56.5]로 이 게임 사상 최고 성적을 냈다 — 승격 자격이 없는 후보가 가장 좋은 성적을 낸 역설. `screenCandidate`(loop/wave-runner.ts)는 통계 검정이 아니라 정확한 trajectory 동일성 비교라 시드를 늘려도 오탐(false positive) 위험은 없다 | **완료**(2026-08-01) — `artifacts/portfolio-round.ts`에 `RunPortfolioRoundInput.screenProbeSeeds?`(옵션, 기본값 `DEFAULT_SCREEN_PROBE_SEEDS`=8시드)를 추가. 과거 라운드 재현이 필요하면 `[1,2,3]`을 명시적으로 넘기면 되고, 생략하면 새 기본값이 적용된다. `reference/runners/*.ts`의 개별 WaveConfig 30여 곳에 흩어진 동일 리터럴은 스코프 밖(과거 라운드 재현성 보존 목적으로 손대지 않음) |
 
 ## 미착수 — GAP-11: 큰루프/작은루프 설계 수준 보완 (2026-07-29, `docs/GAP-ANALYSIS-11.md`, 사용자 지시)
 

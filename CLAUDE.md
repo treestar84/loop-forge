@@ -24,7 +24,7 @@
 - 점수 비교는 comparabilityKey 동일 문맥 안에서만 (docs/INTERPRETATION.md 제1규칙).
 
 ## 문서 지도
-- 핸드오프(최신 상태 스냅샷): `docs/HANDOFF-2026-07-28.md`
+- 핸드오프(최신 상태 스냅샷): `docs/HANDOFF-2026-07-30.md`
 - 아키텍처 결정 기록(왜 이렇게 됐는가): `docs/adr/README.md` (ADR-0001~0010)
 - 운영 함정·재발 방지: `docs/TROUBLESHOOTING.md`
 - 온보딩 절차: `docs/ONBOARDING-GUIDE.md` (§0 적용 범위부터, §10까지 — 탐색 후보 자동 추천 포함)

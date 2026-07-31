@@ -1,6 +1,6 @@
 # Loop Forge — 설계도
 
-> **문서 지도**: 최신 상태는 [`docs/HANDOFF-2026-07-28.md`](docs/HANDOFF-2026-07-28.md),
+> **문서 지도**: 최신 상태는 [`docs/HANDOFF-2026-07-30.md`](docs/HANDOFF-2026-07-30.md),
 > 개별 결정의 맥락·대안·결과는 [`docs/adr/`](docs/adr/README.md), 운영 함정은
 > [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md). 이 문서는 "지금 구조가
 > 어떻게 생겼는가"의 정본이고, ADR은 "왜 이렇게 됐는가"의 정본이다.
@@ -366,6 +366,6 @@ M1~M4)한 뒤 실제 게임으로 실증하는 순서를 따랐다 — 이 순�
 게임 M3)에도 재사용 가능한 절차다.
 
 최종 9게임 registry 상태와 각 게임의 탐색 후보 실험 결과는
-[`docs/HANDOFF-2026-07-28.md`](docs/HANDOFF-2026-07-28.md) §2·§4 참고 — 특히
+[`docs/HANDOFF-2026-07-30.md`](docs/HANDOFF-2026-07-30.md) §2·§4 참고 — 특히
 오목의 C열(챗봇 AI 대비 맞대결) 5개 카드 전부 실패 사례는 이 프로젝트가 "성공만
 보여주지 않는다"는 원칙(ADR-0009)의 가장 상세한 실증이다.

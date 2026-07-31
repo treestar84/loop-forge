@@ -1731,12 +1731,22 @@ function chapelEconomyV3Progress(observation: DominionObservation): number {
   return Math.max(provinceProgress, turnProgress);
 }
 
+/** Linear interpolation between `options.lowFloor` (progress=0) and
+ * `options.highFloor` (progress=1). Factored out of
+ * `chapelEconomyV3TrashFloor` in round 4 so the state-level analogue the
+ * round-4 IS-MCTS prior needs (`chapelEconomyV3TrashFloorFromState` below)
+ * shares this arithmetic literally instead of re-deriving it — round 4's B3
+ * is precisely "the same adaptive-floor knowledge, injected as a prior", so
+ * the two must never drift. */
+function chapelEconomyV3InterpolateFloor(progress: number, options: ChapelEconomyV3TrashOptions): number {
+  return options.lowFloor + (options.highFloor - options.lowFloor) * progress;
+}
+
 /** Adaptive Copper-trash safety floor (replaces chapelEconomyTrashChoice's
  * fixed "3") — linearly interpolated between `options.lowFloor` (progress=0)
  * and `options.highFloor` (progress=1). */
 function chapelEconomyV3TrashFloor(observation: DominionObservation, options: ChapelEconomyV3TrashOptions): number {
-  const progress = chapelEconomyV3Progress(observation);
-  return options.lowFloor + (options.highFloor - options.lowFloor) * progress;
+  return chapelEconomyV3InterpolateFloor(chapelEconomyV3Progress(observation), options);
 }
 
 /**
@@ -2191,6 +2201,168 @@ export function dominionV2BuyPriorEvaluator(
       const def = CARD_DEFS[choice.card];
       return def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
     }
+    return 0;
+  });
+}
+
+// --- GAP-11 Phase 6 round-4 candidate knowledge (main-loop design spec,
+// scratchpad/dominion-round4-design-spec.md, B3 "부분 교체" 결합) ---
+//
+// Round 3 adopted `ismcts-s64-v2buy-prior` (v5): IS-MCTS whose prior is
+// chapelEconomyV2's own *buy* knowledge (`dominionV2BuyPriorEvaluator` above),
+// with trashCard scoring left on the generic flat `dominionTrashValueScore`
+// (Curse 100 > Estate 60 > Copper 40 — no money-safety gate at all). Round 3
+// also *rejected* chapelEconomyV3 as a standalone policy (regression
+// near-miss), while its own re-mining showed chapelTrash re-emerging as the
+// #1 mismatch (12.9%) as an interaction effect of V2's buy/action redesign.
+// The design spec's B3 for round 4 is the one combination round 3 explicitly
+// left untried: keep v5's prior exactly as-is on every other axis and swap
+// *only* the trash axis over to chapelEconomyV3's adaptive-floor knowledge.
+//
+// The floor is a function of the same two progress signals the standalone V3
+// policy uses (Province-pile drawdown, turnsTaken/18) and the same
+// interpolation (`chapelEconomyV3InterpolateFloor`, shared literally) — the
+// only difference is the input: IS-MCTS priors are scored against sampled
+// determinized `DominionState`s, not `DominionObservation`s, so the two
+// signals are read off the state's own supply/PlayerState instead.
+
+/** State-level analogue of `chapelEconomyV3Progress` (same two signals, same
+ * max() combination) for use inside IS-MCTS search over determinized states. */
+function chapelEconomyV3ProgressFromState(state: DominionState, player: PlayerId): number {
+  const remainingProvince = state.supply.Province ?? 0;
+  const provinceProgress = clamp01(
+    (CHAPEL_ECONOMY_V3_TOTAL_PROVINCE - remainingProvince) / CHAPEL_ECONOMY_V3_TOTAL_PROVINCE,
+  );
+  const turnProgress = clamp01(getPlayer(state, player).turnsTaken / CHAPEL_ECONOMY_V3_EXPECTED_GAME_TURNS);
+  return Math.max(provinceProgress, turnProgress);
+}
+
+/** State-level analogue of `chapelEconomyV3TrashFloor` — same interpolation
+ * helper, state-derived progress. */
+function chapelEconomyV3TrashFloorFromState(
+  state: DominionState,
+  player: PlayerId,
+  options: ChapelEconomyV3TrashOptions,
+): number {
+  return chapelEconomyV3InterpolateFloor(chapelEconomyV3ProgressFromState(state, player), options);
+}
+
+/**
+ * Round-4 B3's trash scoring: chapelEconomyV3TrashChoice's decision structure
+ * re-expressed as per-choice scores rather than a single picked choice.
+ *   - transition phase (Province pile at/below the transition threshold): V3
+ *     trashes nothing but Curse, so every non-Curse trash scores below
+ *     `doneTrash`'s neutral 0;
+ *   - growth phase: Estate > Copper > (everything else), with Copper's score
+ *     gated on the *adaptive* money floor — above the floor Copper outranks
+ *     `doneTrash`, below it Copper drops under `doneTrash` so search is
+ *     steered toward stopping instead of cannibalizing the deck's money.
+ * Curse is always the top trash (matches V3's non-growth branch and its
+ * growth-phase fallback alike).
+ */
+function dominionV3AdaptiveTrashValueScore(card: CardName, state: DominionState, player: PlayerId): number {
+  if (card === 'Curse') return 100;
+  const remainingProvince = state.supply.Province ?? 0;
+  const growth = remainingProvince > CHAPEL_ECONOMY_DEFAULT.transitionRemaining;
+  if (!growth) return -50;
+  if (card === 'Estate') return 60;
+  if (card === 'Copper') {
+    const totalMoney =
+      stateOwnCardCount(state, player, 'Copper') * CARD_DEFS.Copper.coins +
+      stateOwnCardCount(state, player, 'Silver') * CARD_DEFS.Silver.coins +
+      stateOwnCardCount(state, player, 'Gold') * CARD_DEFS.Gold.coins;
+    const floor = chapelEconomyV3TrashFloorFromState(state, player, CHAPEL_ECONOMY_V3_DEFAULT_TRASH);
+    return totalMoney - CARD_DEFS.Copper.coins >= floor ? 40 : -50;
+  }
+  return -50;
+}
+
+/**
+ * Round-4 B3 (`ismcts-s64-v2buy-adaptivetrash-prior`, main-loop design spec):
+ * `dominionV2BuyPriorEvaluator` with **only** the trashCard branch replaced by
+ * `dominionV3AdaptiveTrashValueScore`. buy scoring (`dominionV2BuyValueScore`)
+ * and playAction scoring are byte-for-byte the same expressions the round-3
+ * champion's prior uses — this is a partial replacement on one axis, not a
+ * re-attempt of chapelEconomyV3 as a standalone policy (that was measured and
+ * rejected in round 3).
+ */
+export function dominionV2BuyAdaptiveTrashPriorEvaluator(
+  state: DominionState,
+  player: PlayerId,
+  choices: readonly DominionChoice[],
+): readonly number[] {
+  return choices.map((choice) => {
+    if (choice.kind === 'buy') return dominionV2BuyValueScore(choice.card, state, player);
+    if (choice.kind === 'trashCard') return dominionV3AdaptiveTrashValueScore(choice.card, state, player);
+    if (choice.kind === 'playAction') {
+      const def = CARD_DEFS[choice.card];
+      return def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+    }
+    return 0;
+  });
+}
+
+// --- Round-4 B2 (opponent-info bucket, target re-selected from THIS round's
+// own mining per the design spec's own allowance) ---
+//
+// dominion-loss-mining-round4.ts (v5 vs L2, N=100) measured the champion's
+// mismatch profile as: action 19.9% (803/4044) > buy 18.9% (1091/5767) >
+// chapelTrash 0.0% (0/511). `action` is this round's top mismatch decision
+// point, so B2 targets it (round 3's targets — chapelTrash 12.9%, buy 10.7%,
+// measured against chapelEconomyV2 — no longer describe the champion).
+//
+// The concrete divergence pairs behind that 19.9% (loss-report.json, top
+// action pairs): `endActions` vs `playAction:Chapel` (321), `playAction:Moat`
+// vs `endActions` (212), `playAction:Witch` vs `endActions` (121),
+// `playAction:Witch` vs `playAction:Laboratory` (44). The first and third are
+// exactly the two rules chapelEconomyV2's *action* policy encodes and v5's
+// prior does not: v5's `priorEvaluator` replaced only the **buy** branch with
+// V2 knowledge (`dominionV2BuyPriorEvaluator`); its playAction branch is still
+// the generic CARD_DEFS-derived score, which rates Witch by `isAttack` with no
+// regard for whether Curses remain in the supply, and rates Chapel with no
+// regard for whether there is any junk in hand to trash.
+//
+// So B2 applies to the action axis the exact treatment that produced v5 on
+// the buy axis — "re-express the converged heuristic's own knowledge as the
+// search prior" — and nothing else: buy scoring stays V2's, trashCard scoring
+// stays generic, only playAction changes. Distinct from B3 (trash axis) and
+// from B4 (A3 precheck, a hard pre-search override rather than a prior).
+
+/** Round-4 B2's playAction scoring: chapelEconomyV2ActionChoice /
+ * chapelEconomyV2ActionLegal expressed as per-choice scores. Witch outranks
+ * everything while Curses remain and collapses to a low score once the Curse
+ * pile is empty (V2 plays Witch only under `supply.Curse > 0`); Chapel is
+ * promoted when the hand actually holds junk and pushed below `endActions`'s
+ * neutral 0 when it does not (V2's junk-gating, in every phase); every other
+ * action card keeps the generic CARD_DEFS-derived score unchanged. */
+function dominionV2ActionValueScore(card: CardName, state: DominionState, player: PlayerId): number {
+  const def = CARD_DEFS[card];
+  const generic = def.cards * 5 + def.actions * 5 + def.coins * 3 + def.buys * 3 + (def.isAttack ? 10 : 0);
+  if (card === 'Witch') {
+    return (state.supply.Curse ?? 0) > 0 ? 60 : 2;
+  }
+  if (card === 'Chapel') {
+    const hand = getPlayer(state, player).hand;
+    const junkInHand = hand.some((c) => c === 'Curse' || c === 'Estate' || c === 'Copper');
+    return junkInHand ? 55 : -20;
+  }
+  return generic;
+}
+
+/**
+ * Round-4 B2 (`ismcts-s64-v2action-prior`): `dominionV2BuyPriorEvaluator` with
+ * **only** the playAction branch replaced by `dominionV2ActionValueScore`.
+ * buy and trashCard scoring are byte-for-byte v5's.
+ */
+export function dominionV2ActionPriorEvaluator(
+  state: DominionState,
+  player: PlayerId,
+  choices: readonly DominionChoice[],
+): readonly number[] {
+  return choices.map((choice) => {
+    if (choice.kind === 'buy') return dominionV2BuyValueScore(choice.card, state, player);
+    if (choice.kind === 'trashCard') return dominionTrashValueScore(choice.card);
+    if (choice.kind === 'playAction') return dominionV2ActionValueScore(choice.card, state, player);
     return 0;
   });
 }

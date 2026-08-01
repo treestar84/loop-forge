@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" role="img" aria-labelledby="title desc">
   <title id="title">갭 분석 11 — 챗봇 AI(Opus) 상대 승률, 같은 방법을 세 게임에 적용</title>
-  <desc id="desc">오목과 하스스톤의 이전 및 이후 승률을 비교하고, 도미니언의 챔피언 갱신 성공을 표시한 차트</desc>
+  <desc id="desc">오목(1,000판 확증, 초월 확정)과 하스스톤의 이전 및 이후 승률을 비교하고, 도미니언의 챔피언 갱신 성공을 표시한 차트</desc>
   <defs>
     <linearGradient id="ember" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0%" stop-color="#ff8a3d"/>
@@ -39,8 +39,8 @@
     <text x="152" y="145" text-anchor="end" fill="#e8ecf4" font-size="15" font-weight="700">오목</text>
     <rect x="190" y="119" width="0" height="18" rx="5" fill="#4a4f5c"/>
     <text x="198" y="133" fill="#e8ecf4" font-size="12">0%</text>
-    <rect x="190" y="145" width="315" height="18" rx="5" fill="url(#ember)"/>
-    <text x="513" y="159" fill="#e8ecf4" font-size="12" font-weight="600">50.0%</text>
+    <rect x="190" y="145" width="338" height="18" rx="5" fill="url(#ember)"/>
+    <text x="536" y="159" fill="#e8ecf4" font-size="12" font-weight="600">53.67% — 초월 확정</text>
 
     <text x="152" y="213" text-anchor="end" fill="#e8ecf4" font-size="15" font-weight="700">하스스톤</text>
     <rect x="190" y="187" width="214.2" height="18" rx="5" fill="#4a4f5c"/>

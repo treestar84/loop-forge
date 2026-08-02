@@ -5,7 +5,8 @@
 `docs/GAP-ANALYSIS-11.md`(원인 진단·처치 설계 정본, 안 바뀜) +
 `docs/GAP-11-ROUNDS.md`(라운드별 실측 기록 — 새 라운드는 여기에 추가),
 `docs/GAP-ANALYSIS-12.md`(루프포지 자체의 인프라 성숙도 검토 — 게임 전략이
-아니라 프레임워크 구조 문제), 그다음 `DESIGN.md`, 그다음
+아니라 프레임워크 구조 문제), `docs/GAP-ANALYSIS-13.md`(셀프서브 온보딩
+장치 설계 — 게이트 수치표·S1~S5·Phase A~E), 그다음 `DESIGN.md`, 그다음
 `docs/adr/`(주요 결정의 맥락·대안·결과)와 `docs/TROUBLESHOOTING.md`(운영 함정).
 
 ## 작업 방식
@@ -35,6 +36,7 @@
   MCCFR) → `-8.md`(고도화+전 게임 스윕, 오목 C열 카드 1~3) → `-9.md`(탐색 후보 자동
   추천 계층) → `-10.md`(4개 신규 카테고리 사전 진단: 숨은 진영·협동·실시간·대인원)
   → `-11.md`(Opus봇 열세의 루프 설계 수준 근본 원인 R1~R5 + 초월 설계 D1~D6, Phase 1~4)
+  → `-12.md`(프레임워크 인프라 성숙도 E1~E9) → `-13.md`(셀프서브 온보딩 장치 S1~S5)
 - 벤치마크: 실험 설계 `docs/BENCHMARK-EXPERIMENT.md`, 실측 결과(1~7)
   `docs/BENCHMARK-LEADERBOARD.md`
 - 새 갭을 발견하면 새 GAP-ANALYSIS 문서에 기록하고 처치(구현/가이드/로드맵)를 명시한다.

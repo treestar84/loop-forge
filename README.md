@@ -182,22 +182,37 @@ npx ts-node src/reference/runners/<gameId>.ts   # 예: gomoku, splendor, janggi.
 <a id="apply-to-my-game"></a>
 ## 내 게임에 적용하기
 
-이미 봇(NPC)이 있는 내 게임 프로젝트에 Loop Forge를 붙이는 흐름이다. 코드를
-직접 짤 필요는 없다 — 아래 프롬프트를 코딩 에이전트(Claude Code 등)에게 순서
-대로 그대로 건네면 된다.
+준비물은 **내 게임의 소스코드(또는 정확한 규칙 문서) 하나**다 — 기존 봇은
+필요 없다(기준선 봇은 온보딩 과정에서 새로 만들어진다). 명령은 하나뿐이고,
+장치가 진행 상태를 기억하므로 길을 잃으면 언제든 같은 명령을 다시 치면 된다:
 
-| 단계 | 코딩 에이전트에게 줄 프롬프트(그대로 복사) | 확인 방법 |
-|---|---|---|
-| **1. 게임 파악** | "`docs/ONBOARDING-GUIDE.md`의 G-Profile 절차대로 `<내 게임 프로젝트 경로>`를 분석해서 GameProfile 문서를 만들어줘." | 결정 지점·승패 조건·은닉 정보가 문서로 정리됨 |
-| **2. 어댑터 구현** | "이 GameProfile을 기반으로 `src/contract/types.ts`의 `GameAdapter`를 구현해줘. `src/reference/gomoku.ts`를 템플릿으로 쓰고, `baselines`(Random/Heuristic)와 `strategySurface`도 같이 만들어줘." | `src/reference/<내게임>.ts` 파일 생성 |
-| **3. 적합성 채점** | `npx ts-node src/reference/runners/<gameId>.ts` 실행 | C0~C7 축별 점수 + 부족 항목 리포트 출력 (70점 미만 항목만 2단계로 되돌아가 반복 수정) |
-| **4. 큰 루프 시작** | "이 어댑터의 baseline을 상대로 `DESIGN.md` §6.2 포트폴리오 프로토콜대로 전략 후보를 설계하고 웨이브를 돌려줘." | `WaveReport`에 `adopted`/`near-miss`/`failed` 판정이 찍힘 |
-| **5. 반복** | "near-miss 후보를 `extractNearMissCandidates`로 뽑아서 재설계하고 다음 웨이브를 돌려줘." | 채택될 때마다 `BaselineRegistry`가 새 버전으로 자동 갱신 |
+```bash
+npm run onboard -- <내 게임 소스 경로>
+```
 
-3~5단계는 그대로 반복되는 사이클이다 — 이것이 위 "동작 원리"의 큰 루프/작은
-루프가 실제로 사람 손에서 어떻게 돌아가는지를 보여준다. 게임마다 걸리는 시간은
-다르지만, 사람이 직접 짜야 하는 코드는 1~2단계(어댑터 구현)뿐이고 그 이후의
-"강해졌는지 확인"은 전부 자동이다.
+**첫 실행이 진단 리포트다.** 어댑터를 한 줄도 짜기 전에 다음을 알려준다:
+
+- **지금 돌릴 수 있는가?** — 판정 3단계: 불가능(사유서 포함) / 구현 필요 / 실행 가능
+- **얼마나 준비됐는가?** — 준비도 %(어댑터 완성 전엔 추정 P-Score, 완성 후엔
+  실측 C-Score — 어느 쪽인지 항상 라벨로 구분)
+- **내 게임의 룰북** — `runs/<gameId>/RULEBOOK.md`: 룰 시스템 분류 +
+  무엇을 보완 구현해야 하는지(우선순위순)
+- **근본적으로 안 되는 게임이면** 어느 전제(실시간·협력·캠페인·자유 협상)가
+  왜 구현으로도 해결되지 않는지 설명하고 멈춘다 — 시간 낭비 방지
+
+이후는 게이트를 하나씩 통과하는 순서다. 각 단계에서 코딩 에이전트에게 줄
+프롬프트는 CLI가 그때그때 출력한다:
+
+| 명령 | 통과 기준(게이트) |
+|---|---|
+| `npm run onboard -- <경로>` | 프로필 스키마 검증 통과 (G1) |
+| `npm run onboard -- scaffold <gameId>` | 자동 생성된 어댑터 골격의 `TODO(onboard)` 마커 0개 + 타입 0에러 (G2) |
+| `npm run onboard -- score <gameId>` | blocker 0개 — 결정론 재현 100%·정보 은닉·통계 신뢰성 포함 (G3). **여러 번 반복이 정상** |
+| `npm run onboard -- wave <gameId>` | 첫 웨이브 완주 = **온보딩 완료** (G4). 후보가 전부 탈락해도 성공 — 완료 조건은 "루프가 돌 수 있는 상태"다 |
+
+명령·프롬프트·통과 수치·흔한 실패 처방을 한 문서로 정리한 절차서:
+[docs/ONBOARDING-PLAYBOOK.md](./docs/ONBOARDING-PLAYBOOK.md). 심층 체크리스트
+정본은 [docs/ONBOARDING-GUIDE.md](./docs/ONBOARDING-GUIDE.md).
 
 <div align="right"><a href="#toc">목차로</a></div>
 
@@ -384,7 +399,8 @@ src/reference/   레퍼런스+실전 게임 어댑터 9종(위 표) + 게임별 
 | [ROADMAP.md](./ROADMAP.md) | 단계 계획 |
 | [docs/adr/](./docs/adr/README.md) | 아키텍처 결정 기록(왜 이렇게 됐는가) |
 | [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | 운영 함정·재발 방지 |
-| [docs/ONBOARDING-GUIDE.md](./docs/ONBOARDING-GUIDE.md) | 온보딩 절차 |
+| [docs/ONBOARDING-PLAYBOOK.md](./docs/ONBOARDING-PLAYBOOK.md) | 온보딩 절차서 — 명령·프롬프트·통과 수치를 순서대로 |
+| [docs/ONBOARDING-GUIDE.md](./docs/ONBOARDING-GUIDE.md) | 온보딩 심층 체크리스트(정본) |
 | [docs/INTERPRETATION.md](./docs/INTERPRETATION.md) | 지표 해석 |
 | [docs/FIX-BACKLOG.md](./docs/FIX-BACKLOG.md) | 갭 분석 이력·수정 백로그(살아있는 목록) |
 | [docs/BENCHMARK-EXPERIMENT.md](./docs/BENCHMARK-EXPERIMENT.md) | 벤치마크 실험 설계 |

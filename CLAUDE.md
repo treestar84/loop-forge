@@ -28,7 +28,9 @@
 - 핸드오프(최신 상태 스냅샷): `docs/HANDOFF-2026-07-30.md`
 - 아키텍처 결정 기록(왜 이렇게 됐는가): `docs/adr/README.md` (ADR-0001~0010)
 - 운영 함정·재발 방지: `docs/TROUBLESHOOTING.md`
-- 온보딩 절차: `docs/ONBOARDING-GUIDE.md` (§0 적용 범위부터, §10까지 — 탐색 후보 자동 추천 포함)
+- 온보딩 절차: `docs/ONBOARDING-PLAYBOOK.md`(사용자용 절차서 — `npm run onboard`
+  명령·프롬프트·게이트 수치 순서) + `docs/ONBOARDING-GUIDE.md` (심층 정본,
+  §0 적용 범위부터 §10까지 — 탐색 후보 자동 추천 포함)
 - 지표 해석: `docs/INTERPRETATION.md`
 - 갭 분석 이력: `docs/GAP-ANALYSIS.md`(훌라·체스) → `-2.md`(5게임) → `-3.md`(12계열)
   → `-4.md`(실전 온보딩 1차: 스플랜더·오목) → `-5.md`(목표 정합성 점검) → `-6.md`

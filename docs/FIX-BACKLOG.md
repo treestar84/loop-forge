@@ -12,13 +12,13 @@
 
 | ID | 항목 | 상태 |
 |---|---|---|
-| S0 | 진단 스테이지(v2 신설) — P-Score 산식(`onboarding/readiness-estimate.ts`) + 룰북 렌더러(`artifacts/rulebook.ts`) + 판정 3단계(불가능/구현 필요/실행 가능)·불가능 사유서. 첫 실행이 "구현 더 해야 하나·지금 돌릴 수 있나·적합도 몇 %·룰북·보완 목록"에 전부 답한다 | 미착수 |
-| S1 | 온보딩 파이프라인 실행기 추출(`artifacts/onboarding-pipeline.ts`) — catan.ts 러너 6단계의 게임 중립화, E1과 동일 수법·검증법(기존 러너 2개 리팩터 후 필드 일치) | 미착수 |
-| S2 | 스캐폴드 생성기 — GameProfile 기반 아키타입 판정(perfect-info/hidden-info/multi-step/content-heavy, 조각 합성형) + `TODO(onboard)` 마커 골격 + S1 호출형 러너 자동 생성 | 미착수(S1 선행) |
-| S3 | 단일 CLI `npm run onboard` + `runs/<gameId>/onboarding-state.json` 상태 머신 — 인자 없이 치면 현재 스테이지·게이트 수치·다음 프롬프트 출력 | 미착수(S1·S2 선행) |
-| S4 | `docs/ONBOARDING-PLAYBOOK.md` — 스테이지별 복붙 프롬프트+통과 수치, CLI와 상호 참조 | 미착수(S3 선행, 메인 루프 직접) |
-| S5 | README "내 게임에 적용하기" 교체 — `npm run onboard` 여정 중심, "기존 봇 필수" 과장 정정 | 미착수(S4와 함께) |
-| S-E | 종단 판정 실험 — 이 설계를 모르는 신선한 에이전트가 플레이북만으로 신규 미니 게임 1종을 완주하는지 실측 | 미착수(S1~S5 완료 후) |
+| S0 | 진단 스테이지(v2 신설) — P-Score 산식(`onboarding/readiness-estimate.ts`) + 룰북 렌더러(`artifacts/rulebook.ts`) + 판정 3단계(불가능/구현 필요/실행 가능)·불가능 사유서. 첫 실행이 "구현 더 해야 하나·지금 돌릴 수 있나·적합도 몇 %·룰북·보완 목록"에 전부 답한다 | **완료**(2026-08-03, GAP-13 §7) |
+| S1 | 온보딩 파이프라인 실행기 추출(`artifacts/onboarding-pipeline.ts`) — catan.ts 러너 6단계의 게임 중립화, E1과 동일 수법·검증법(기존 러너 2개 리팩터 후 필드 일치) | **완료**(2026-08-03, GAP-13 §6) |
+| S2 | 스캐폴드 생성기 — GameProfile 기반 아키타입 판정(perfect-info/hidden-info/multi-step/content-heavy, 조각 합성형) + `TODO(onboard)` 마커 골격 + S1 호출형 러너 자동 생성 | **완료**(2026-08-03, GAP-13 §8) |
+| S3 | 단일 CLI `npm run onboard` + `runs/<gameId>/onboarding-state.json` 상태 머신 — 인자 없이 치면 현재 스테이지·게이트 수치·다음 프롬프트 출력 | **완료**(2026-08-03, GAP-13 §9) |
+| S4 | `docs/ONBOARDING-PLAYBOOK.md` — 스테이지별 복붙 프롬프트+통과 수치, CLI와 상호 참조 | **완료**(2026-08-03) |
+| S5 | README "내 게임에 적용하기" 교체 — `npm run onboard` 여정 중심, "기존 봇 필수" 과장 정정 | **완료**(2026-08-03) |
+| S-E | 종단 판정 실험 — 이 설계를 모르는 신선한 에이전트가 플레이북만으로 신규 미니 게임 1종을 완주하는지 실측 | 미착수(다음 단계) |
 
 ## 진행 중 — GAP-12: 루프포지 자체 인프라 성숙도 (2026-07-30/31, `docs/GAP-ANALYSIS-12.md`, 사용자 지시)
 

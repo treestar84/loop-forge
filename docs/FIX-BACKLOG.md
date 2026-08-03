@@ -12,6 +12,7 @@
 
 | ID | 항목 | 상태 |
 |---|---|---|
+| S0 | 진단 스테이지(v2 신설) — P-Score 산식(`onboarding/readiness-estimate.ts`) + 룰북 렌더러(`artifacts/rulebook.ts`) + 판정 3단계(불가능/구현 필요/실행 가능)·불가능 사유서. 첫 실행이 "구현 더 해야 하나·지금 돌릴 수 있나·적합도 몇 %·룰북·보완 목록"에 전부 답한다 | 미착수 |
 | S1 | 온보딩 파이프라인 실행기 추출(`artifacts/onboarding-pipeline.ts`) — catan.ts 러너 6단계의 게임 중립화, E1과 동일 수법·검증법(기존 러너 2개 리팩터 후 필드 일치) | 미착수 |
 | S2 | 스캐폴드 생성기 — GameProfile 기반 아키타입 판정(perfect-info/hidden-info/multi-step/content-heavy, 조각 합성형) + `TODO(onboard)` 마커 골격 + S1 호출형 러너 자동 생성 | 미착수(S1 선행) |
 | S3 | 단일 CLI `npm run onboard` + `runs/<gameId>/onboarding-state.json` 상태 머신 — 인자 없이 치면 현재 스테이지·게이트 수치·다음 프롬프트 출력 | 미착수(S1·S2 선행) |

@@ -356,3 +356,98 @@ onboarding을 import할 수 없다는 계층 규칙**(dependency-rules.test.ts)�
 통과(신규 파일 2개가 24개 테스트 추가, 나머지는 기존 회귀 없음 확인). 무거운
 실행(자기대국·웨이브 등) 없음 — 이 Phase는 순수 함수 계산과 문자열 렌더링만
 다룬다.
+
+## 8. S2 실행 기록 (Phase B, 2026-08-03)
+
+Phase B(S2 스캐폴드 생성기)를 구현했다.
+
+**`src/onboarding/scaffold.ts` (신설)**: 파일 쓰기 없이 문자열만 반환하는
+순수 함수 모듈 — 이유는 파일 자체의 doc comment에 기록했다(요약: `onboarding/`
+계층은 순수해야 하고, 실제 `writeFileSync`는 아직 없는 S3 CLI가 앱 경계에서
+호출해야 한다는 요구사항 그대로. `artifacts/rulebook.ts`(S0)가 이미 같은
+이유로 문자열만 반환한 선례를 그대로 따름).
+
+- `deriveArchetypes(profile)`: `GameProfile` → 아키타입 집합 + 판정 근거
+  문자열(아키타입당 1개). perfect-info/hidden-info는 `hiddenInformation`
+  배열의 존재 여부로 갈리는 **배타적** 판정(§3 S2 표 그대로), multi-step-turn과
+  content-heavy는 **근사(heuristic) 판정** — `GameProfile`에 "한 턴 복수
+  결정"이나 "카드 인벤토리 규모"를 위한 전용 필드가 없어서, 각각
+  `decisionPoints.length >= 2`와 `knownIssues.length > 0`을 근사 신호로
+  쓴다. 두 근사 판정 모두 반환되는 판정 근거 문자열 끝에 "오판정 가능성 —
+  실제로 다르면 수동으로 제외하라"는 문구를 명시해, §5 리스크("아키타입
+  오판정 가능성")를 판정 결과 자체에 정직하게 노출한다. 아키타입은 배타가
+  아니라 조합된다(예: 도미니언류는 hidden-info+multi-step-turn 둘 다).
+- `G_CONVERT_CHECKLIST`: `docs/ONBOARDING-GUIDE.md` §2의 체크리스트를 파일
+  등장 순서대로 번호를 붙인 13개 항목 배열(문서는 "12항목"이라 서술하지만
+  실제로 세어보면 13개 불릿이다 — 실측대로 13개로 구현하고 이 문서에
+  정직하게 기록). 생성되는 모든 `TODO(onboard)` 마커는 이 목록의 id 하나를
+  참조하며, `todo(id, note)` 헬퍼가 존재하지 않는 id를 넘기면 즉시 throw해
+  마커-체크리스트 드리프트를 스캐폴드 생성 시점에 차단한다.
+- `renderAdapterScaffold(profile, determination)`: `src/reference/<gameId>.ts`
+  골격 소스 문자열. `GameAdapter`의 모든 필수 멤버(spec, createInitialState,
+  currentDecision, getObservation, getLegalChoices, applyChoice, getOutcome,
+  encodeChoice, baselines, strategySurface)가 타입은 맞고 본문은
+  `throw new Error('TODO(onboard): §2-<n> — ...')`인 스텁으로 존재한다.
+  아키타입별 조각: hidden-info면 `hiddenInfoProbe` 스텁(§2-9) + 결정화 훅
+  주석(ONBOARDING-GUIDE §9), multi-step-turn이면 턴 내부 상태 필드 패턴
+  주석(§2-10, 스플랜더 `takenColors` 모델), content-heavy면
+  `contentInventory`/`exercisedContent` 선언 주석(ONBOARDING-GUIDE §5.7).
+  헤더 doc comment에 `deriveArchetypes`의 판정 근거 문자열을 그대로 박아
+  넣어 "스캐폴드 출력에 판정 근거 명시" 요구사항을 만족한다.
+- `renderRunnerScaffold(profile)`: `src/reference/runners/<gameId>.ts`
+  골격 소스 문자열 — `catan.ts` 러너의 웨이브 A 구간(conformance →
+  `runOnboardingPipeline` 호출)만 남기고 그 파일의 M4 필드믹스 웨이브 B(게임
+  특화 로직)는 제외했다. `TODO(onboard)` 마커를 전혀 쓰지 않는다 — 이
+  파일의 미채움 지점(시드 개수·clamp 범위·SPRT 파라미터)은 G-Convert
+  체크리스트 항목이 아니라 웨이브 튜닝 수치이므로, §2 마커 의미론과 섞지
+  않고 평범한 주석으로만 안내한다(파일 자체의 doc comment에 이유 기록).
+
+**실전에서 잡힌 실제 버그 1건**: 첫 렌더링에서 hidden-info 아키타입의
+import 절을 `import type { ..., type HiddenInfoProbe, type Rng } from
+'../contract/types';`로 생성했는데, 이는 TS2206
+("The 'type' modifier cannot be used on a named import when 'import type'
+is used on its import statement")로 즉시 컴파일 실패했다 — 구조 검증
+테스트(24개)는 전부 통과했지만 실제 `tsc` 실행에서만 드러난 결함으로,
+"구조 검증이 tsc 전체 실행을 완전히 대체하지 못한다"는 §8 자체 검증
+설계의 한계를 실증한 사례다. `import type { ... }` 문 전체가 이미 타입
+전용이므로 멤버에 `type` 접두사를 중복하면 안 된다는 규칙에 따라
+`, HiddenInfoProbe, Rng`로 고쳐 해소했다.
+
+**검증**:
+
+1. **자기 검증 테스트** — `src/onboarding/__tests__/scaffold.test.ts`
+   (24개 테스트, 전부 구조 검증 — 이유: 4아키타입 × 매 테스트런마다 전체
+   프로젝트 `tsc --noEmit`을 반복 실행하면 이미 46초대인 `npm test`
+   총시간에 회귀 다이제스트급 비용을 매 실행마다 얹는 셈이라
+   `docs/TROUBLESHOOTING.md` §12의 "무거운 회귀 테스트를 조용히 누적시키지
+   말라" 원칙과 충돌한다. 대신 구조 검증(필수 멤버 존재·TODO 마커
+   형식·import 경로 허용목록)으로 대체하고, 실제 컴파일 검증은 아래 2번처럼
+   **자동 스위트 밖에서 1회** 수동으로 수행했다):
+   ① `deriveArchetypes`가 §3 S2 표대로 판정하는지(완전정보→perfect-info,
+   은닉정보→hidden-info이고 서로 배타적, 2+ 결정지점→multi-step-turn,
+   knownIssues 존재→content-heavy, 세 아키타입 동시 조합도 검증).
+   ② 생성된 어댑터 골격의 모든 `TODO(onboard)` 마커가 예외 없이
+   `TODO(onboard): §2-<n> — ...` 형식이고 `G_CONVERT_CHECKLIST`의 실제
+   id를 참조하는지(4아키타입 각각). ③ 필수 멤버 존재·import 경로 허용목록
+   (`../contract/types`/`../kernel/rng`만)·아키타입별 조각(hiddenInfoProbe/
+   턴내부상태주석/contentInventory주석)·헤더의 판정 근거 문자열 포함 여부.
+   ④ 러너 골격이 `runOnboardingPipeline`을 호출하고(직접 6단계를 재구현하지
+   않음) `scoreAdapter`+`evaluateWaveReadiness`를 파이프라인보다 먼저
+   호출하며, TODO 마커가 전혀 없고, 코드 라인 수가 40줄 안팎(70줄 이하)인지.
+2. **실전 검증(저장소 밖 신규 가상 게임, 자동 스위트 밖에서 1회 수동 실행)**:
+   ① `connect-four-e2e-tmp`(완전정보, 4×4류 단순 게임 프로필) — perfect-info
+   단독 판정, 생성된 어댑터+러너를 `src/reference/`에 임시로 써넣고
+   `npx tsc --noEmit` 0에러 확인 후 즉시 삭제. ② `card-duel-e2e-tmp`(은닉
+   손패+멀티스텝 턴+대형 카드풀 프로필) — hidden-info+multi-step-turn+
+   content-heavy 세 아키타입 동시 판정(조합이 실제로 작동함을 실증), 같은
+   방식으로 `tsc --noEmit` 0에러 확인 후 삭제. 두 실전 검증 모두 위 버그를
+   고친 뒤 재실행해 통과했고, 삭제 후 `git status`로 저장소에 아무 잔여물도
+   남지 않았음을 재확인했다.
+
+`npm run typecheck` 0에러. `npm test` 67개 스위트 895개 테스트 전체 통과
+(신규 파일 2개가 24개 테스트를 추가, 기존 회귀 없음). 전체 시간은 46.1초
+(Phase A′ 종료 시점 기준 재측정) → 49.5초로 +3.4초(약 7%) 증가 — 무거운
+회귀 테스트를 추가하지 않았으므로 `docs/TROUBLESHOOTING.md` §12의 "두 배
+이상"과는 거리가 멀지만, 정직하게 실측치를 기록한다. 무거운 자기대국·웨이브
+실행 없음(scaffold.ts는 순수 문자열 렌더링만, 실전 검증의 `tsc` 실행은
+자동 스위트 바깥에서 수동으로 1회씩만 수행).

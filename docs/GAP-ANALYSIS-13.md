@@ -451,3 +451,114 @@ is used on its import statement")로 즉시 컴파일 실패했다 — 구조 �
 이상"과는 거리가 멀지만, 정직하게 실측치를 기록한다. 무거운 자기대국·웨이브
 실행 없음(scaffold.ts는 순수 문자열 렌더링만, 실전 검증의 `tsc` 실행은
 자동 스위트 바깥에서 수동으로 1회씩만 수행).
+
+## 9. S3 실행 기록 (Phase C, 2026-08-03)
+
+Phase C(S3 상태 머신 + 단일 CLI)를 구현했다. 선행 Phase A/A′/B(S1 파이프라인,
+S0 진단 계층, S2 스캐폴드)는 전부 배선만 하고 새로 만들지 않았다.
+
+**`src/onboarding/onboarding-state.ts` (신설, 순수 계층)**: `runs/<gameId>/
+onboarding-state.json`의 상태 머신을 파일 I/O·시계 없이 순수 함수로 구현.
+`OnboardingState`(`{gameId, stage, gates:{g0..g4}, verdict, score:{kind:'P'|
+'C', value}, updatedAt, nextAction}`)와 4개의 `apply*` 전이 함수:
+
+- `applyDiagnosis(gameId, estimate, updatedAt)`: `estimateReadiness`의 P1
+  게이트 결과를 그대로 G0으로 사영(§2.5의 P1 게이트와 G0 범위 게이트가 동일
+  질문지임을 재확인)하고, 이 함수에 도달했다는 사실 자체가 `parseGameProfile`
+  검증을 통과했음을 함의하므로 G1은 게이트 실패가 아닌 한 자동으로 통과 처리.
+- `applyScaffold(prev, todoCount, tscPassed, updatedAt)`: G1 미통과 시 throw
+  (게이트 전이 규칙). G2 = `todoCount===0 && tscPassed`.
+- `applyScore(prev, todoCount, tscPassed, overallScore, nonParityBlockingAxisCount,
+  updatedAt)`: **설계 중 발견한 조정 1건** — 처음에는 "G3은 G2 통과를
+  전제한다"로 구현했으나, `ONBOARDING-GUIDE.md` §3.1이 명시하는 "채점→수정→
+  재채점 반복 루프"가 G-Convert **도중에** 반복 실행되는 것이 실제 설계
+  의도임을 실전 E2E(§9 하단)에서 재확인하면서, G2 통과를 전제 조건(throw)이
+  아니라 **매 `score` 호출마다 호출자가 새로 측정한 `todoCount`/`tscPassed`로
+  G2 자체를 재계산**하는 방식으로 바꿨다(G1만 전제 조건으로 남김). 이렇게 해야
+  "스캐폴드 직후(G2 미통과) 채점 → blocker 확인 → TODO 채움 → 재채점 → 이번엔
+  G2도 통과"라는 문서가 서술하는 실제 반복이 CLI로 가능해진다.
+- `applyWave(prev, waveRan, updatedAt)`: G3 미통과 시 throw. G4는 웨이브가
+  "실행됐는지"만 보고 판정 verdict와는 무관(§2 표의 "실패 verdict도 온보딩
+  성공"을 그대로 반영).
+- `countOnboardTodoMarkers(sourceText)`: `TODO(onboard): §<n>-<m> — ...` 형식
+  마커를 세는 순수 정규식 함수. `onboarding/scaffold.ts`의 `todo()` 헬퍼가
+  내는 형식과 1:1.
+- `renderStatusReport(state)`: `status`/무인자 실행이 출력하는 콘솔 리포트
+  (스테이지·게이트 5개 상태·P/C-Score 라벨·다음 행동)를 순수 문자열로 조립.
+
+**`src/reference/runners/onboard-cli.ts` (신설, 앱 경계)**: `npm run onboard`
+의 단일 진입점. 서브커맨드별 동작:
+
+- 인자 = 경로 또는 gameId(진단): 소스 트리 스캔(파일 수·확장자 히스토그램으로
+  주 언어 추정) → `runs/<gameId>/profile.json` 존재 확인 → 없으면 프로필
+  작성 프롬프트(ONBOARDING-GUIDE §1 체크리스트 + GameProfile 스키마 필드
+  설명 전문)를 조립해, `claude` CLI가 PATH에 있고 `--no-agent`가 없으면
+  `claude -p`로 자동 실행 시도(응답에서 JSON 객체를 추출해 `parseGameProfile`
+  검증까지 최대 2회 재시도, 실패한 오류를 다음 프롬프트에 피드백) → 성공하면
+  `profile.json`으로 저장, 실패/미설치 시 프롬프트를 콘솔에 출력하고 종료 →
+  있으면 `parseGameProfile`로 검증 → `estimateReadiness` → `renderRulebook`을
+  `runs/<gameId>/RULEBOOK.md`로 저장 → 판정 3단계 첫 줄 + P/C-Score 라벨 +
+  보완 목록 상위 3개 + 다음 행동을 콘솔에 출력, `applyDiagnosis`로 상태 갱신.
+- `scaffold <gameId>`: 프로필을 읽어 `deriveArchetypes` → `renderAdapterScaffold`/
+  `renderRunnerScaffold` 생성 → 어댑터/러너 파일이 이미 있으면 덮어쓰지 않고
+  거부(exit 1) → 없으면 파일 생성 → `countOnboardTodoMarkers`로 마커 목록
+  출력 → `npx tsc --noEmit` 실행 → `applyScaffold`로 상태 갱신.
+- `score <gameId>`: 어댑터 파일을 `require()`로 동적 로드(export명은
+  `${camelCase(gameId)}Adapter}` 관례, `scaffold.ts`의 명명과 동일) →
+  G2를 그 시점에 재측정(TODO 마커+tsc) → `scoreAdapter` 실행. **실전 E2E에서
+  발견한 결함 1건**: 완전 미구현 스캐폴드(모든 body가 `throw`)에 대해
+  `scoreAdapter`를 그대로 호출하면 `score.ts`의 C1 표본 추출 루프가 baseline의
+  throw를 그대로 전파해 CLI 전체가 raw stack trace로 죽는다(무구현 어댑터에
+  대한 채점기 자체의 기존 동작 — 이 작업 범위에서 `score.ts`를 고치지 않고,
+  CLI가 그 예외를 잡아 "TODO를 먼저 채우라"는 안내로 치환하고 상태를 blocker
+  8개(축 개수) 상당의 미달로 기록하도록 처리). 정상 실행되면 축별 점수·blocker·
+  remediation을 출력하고 `applyScore`로 G3/verdict/C-Score 갱신.
+- `status <gameId>` / 인자 없음: `onboarding-state.json`을 읽어
+  `renderStatusReport` 출력. 인자 없을 때는 `runs/*/onboarding-state.json`이
+  정확히 1개면 그 게임으로 자동 특정, 0개/2개 이상이면 특정 불가 안내.
+- `wave <gameId>`: G3 미통과면 안내 후 중단. 통과 시 `npx ts-node
+  src/reference/runners/<gameId>.ts` 실행 명령만 출력(무거운 자기대국이므로
+  CLI가 직접 spawn하지 않음)하고 `applyWave(prev, true, ...)`로 G4를 통과
+  처리 — "실행 안내까지만"이라는 이 작업의 검증 범위 제한을 그대로 반영한
+  구현 결정.
+
+**`package.json`**: `"onboard": "ts-node src/reference/runners/onboard-cli.ts"`
+스크립트 추가.
+
+**테스트**: `src/onboarding/__tests__/onboarding-state.test.ts`(19개) — 4개
+전이 함수 각각의 정상 경로 + 게이트 전이 규칙(G1 미통과 시 `applyScaffold`/
+`applyScore` throw, G3 미통과 시 `applyWave` throw, `applyScore`는 G2 미통과
+상태에서도 예외 없이 실행되며 그 호출이 G2를 재계산함) + `countOnboardTodoMarkers`
+의 형식 매칭(정상/§번호 없는 변형 미매칭) + `renderStatusReport`의 P/C-Score
+라벨 전환. CLI 본체는 앱 경계라 자동 스위트에 포함하지 않음(§4 표의 원래
+설계 그대로).
+
+**수동 E2E(자동 스위트 밖, 1회 수동 실행 후 삭제)**: 가상 게임
+`e2e-test-game`(완전정보 2인, document-only 참조 구현)으로 진단→scaffold→
+score→status→wave 전체 흐름을 실행해 확인했다:
+
+1. 진단: `profile.json` 존재 확인 → `estimateReadiness` P-Score 90%(P7
+   참조 구현 완전성 10점 감점만) → `RULEBOOK.md` 생성 → 상태
+   `{stage:'diagnosed', gates:{g0:pass,g1:pass,g2:pending,...}, score:{kind:'P',value:90}}`.
+2. scaffold: perfect-info 단독 판정 → 어댑터/러너 생성 → TODO 마커 17개 →
+   `tsc --noEmit` 0에러(스텁이 전부 `throw`라 타입은 맞음) → G2 = fail(TODO
+   17개 > 0) — 위 §9 서술대로 정상.
+3. score: G2 재측정(TODO 17개, tsc 통과) → `scoreAdapter` 호출 시 무구현
+   `randomBaseline`이 즉시 throw → CLI가 이를 잡아 안내 출력 + blocker
+   8개 상당으로 G3=fail 기록(위 발견한 결함 처리 그대로 동작 확인).
+4. status: 위 상태를 `renderStatusReport`로 정확히 재현(G0/G1 통과,
+   G2/G3 미달, C-Score 0%로 라벨 전환 — score를 한 번이라도 호출하면
+   P-Score가 영구히 C-Score로 대체된다는 §2.5 규칙 그대로).
+5. wave: G3 미통과이므로 안내만 출력하고 중단(웨이브 미실행 확인).
+6. scaffold 재실행 시 기존 파일이 있어 거부(exit 1) 확인.
+
+생성물(`runs/e2e-test-game/`, `src/reference/e2e-test-game.ts`,
+`src/reference/runners/e2e-test-game.ts`)은 확인 후 전부 삭제했다 — 삭제
+후 `git status`로 저장소에 잔여물이 없음을 재확인.
+
+`npm run typecheck` 0에러. `npm test` 68개 스위트 916개 테스트 전체 통과
+(신규 파일 1개가 19개 테스트 추가, 기존 회귀 없음). 전체 시간 47.8초 —
+Phase B 종료 시점(49.5초)보다 오히려 짧게 측정됨(측정 변동 범위 내, 무거운
+테스트를 추가하지 않았으므로 예상된 범위). 자동 스위트에는 무거운 자기대국·
+웨이브 실행이 전혀 없다(onboarding-state.ts는 순수 함수, 수동 E2E의 `tsc`
+실행 2회와 `scoreAdapter` 1회 호출만 스위트 바깥에서 수동으로 수행).

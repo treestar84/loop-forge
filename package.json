@@ -11,7 +11,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "demo": "ts-node src/reference/demo.ts"
+    "demo": "ts-node src/reference/demo.ts",
+    "onboard": "ts-node src/reference/runners/onboard-cli.ts"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

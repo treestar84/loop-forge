@@ -9,6 +9,7 @@ import {
   applyScaffold,
   applyScore,
   applyWave,
+  computeEffectiveCScore,
   countOnboardTodoMarkers,
   renderStatusReport,
   type OnboardingState,
@@ -174,12 +175,12 @@ describe('countOnboardTodoMarkers', () => {
 });
 
 describe('renderStatusReport', () => {
-  it('labels a pre-adapter score as 추정(P-Score) and a post-scoring score as 실측(C-Score)', () => {
+  it('labels a pre-adapter score as 추정(P-Score) and a post-scoring score as 실측(C-Score, C7 제외)', () => {
     const preAdapter = diagnosed('sample', 80);
     expect(renderStatusReport(preAdapter)).toContain('추정(P-Score)');
 
     const postAdapter = applyScore(applyScaffold(preAdapter, 0, true, T1), 0, true, 80, 0, T2);
-    expect(renderStatusReport(postAdapter)).toContain('실측(C-Score)');
+    expect(renderStatusReport(postAdapter)).toContain('실측(C-Score, C7 제외)');
   });
 
   it('includes every gate id and the next action text', () => {
@@ -189,5 +190,66 @@ describe('renderStatusReport', () => {
       expect(report).toContain(id);
     }
     expect(report).toContain(state.nextAction);
+  });
+});
+
+describe('computeEffectiveCScore (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #1)', () => {
+  // The exact scenario the fresh Phase E agent hit on connect-four: C0..C6
+  // all score 100, C7-parity has a blocker because no replay fixtures were
+  // captured yet (a normal, non-blocking state) — the screen showed
+  // "적합도(실측, C-Score): 0%" while the same report's gate decision was
+  // already "proceed to wave". overallScore (Math.min across every axis
+  // including C7) would be 0 here; the effective score must be 100.
+  const connectFourAxes = [
+    { axis: 'C0-contract', score: 100, blockers: [] },
+    { axis: 'C1-determinism', score: 100, blockers: [] },
+    { axis: 'C2-integrity', score: 100, blockers: [] },
+    { axis: 'C3-hidden-info', score: 100, blockers: [] },
+    { axis: 'C4-throughput', score: 100, blockers: [] },
+    { axis: 'C5-baselines', score: 100, blockers: [] },
+    { axis: 'C6-strategy-surface', score: 100, blockers: [] },
+    { axis: 'C7-parity', score: 0, blockers: [{ code: 'C7_NO_FIXTURES' }] },
+  ];
+
+  it('takes the minimum over C0..C6 only, ignoring the C7 blocker', () => {
+    const { value } = computeEffectiveCScore(connectFourAxes);
+    expect(value).toBe(100);
+  });
+
+  it('returns a C7 status note explaining the missing-fixtures cap without blocking onboarding', () => {
+    const { c7Note } = computeEffectiveCScore(connectFourAxes);
+    expect(c7Note).not.toBeNull();
+    expect(c7Note).toContain('원본 리플레이');
+    expect(c7Note).toContain('막지 않음');
+  });
+
+  it('returns null c7Note when C7 itself is fully passing (nothing to call out)', () => {
+    const allPassing = connectFourAxes.map((axis) =>
+      axis.axis === 'C7-parity' ? { axis: 'C7-parity', score: 100, blockers: [] } : axis,
+    );
+    expect(computeEffectiveCScore(allPassing).c7Note).toBeNull();
+  });
+
+  it('falls back to the min of every axis when C7-parity is absent from the report', () => {
+    const withoutC7 = connectFourAxes.filter((axis) => axis.axis !== 'C7-parity');
+    const { value, c7Note } = computeEffectiveCScore(withoutC7);
+    expect(value).toBe(100);
+    expect(c7Note).toBeNull();
+  });
+
+  it('applyScore + renderStatusReport surface the C7-excluded 100% score, the "C7 제외" label, and the warning line — never a contradictory 0%', () => {
+    const { value, c7Note } = computeEffectiveCScore(connectFourAxes);
+    const prev = applyScaffold(diagnosed('connect-four-clone'), 0, true, T1);
+    const state = applyScore(prev, 0, true, value, 0, T2, c7Note);
+
+    expect(state.gates.g3).toBe('pass');
+    expect(state.verdict).toBe('ready');
+    expect(state.score).toEqual({ kind: 'C', value: 100 });
+    expect(state.c7Note).toBe(c7Note);
+
+    const report = renderStatusReport(state);
+    expect(report).toContain('100% (실측(C-Score, C7 제외))');
+    expect(report).not.toContain('적합도: 0%');
+    expect(report).toContain(c7Note as string);
   });
 });

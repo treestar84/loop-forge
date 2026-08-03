@@ -282,6 +282,10 @@ ${determination.reasons.map((r) => ` *   - ${r}`).join('\n')}
  * Next steps: fill in every TODO(onboard) marker below, then run
  * \`grep -rn "TODO(onboard)" src/reference/${profile.gameId}.ts\` until it is
  * empty and \`npm run typecheck\` passes (G2 게이트, docs/GAP-ANALYSIS-13.md §2).
+ *
+ * 각 멤버(GameAdapter/BotFactory 등)의 정확한 시그니처·의미의 정본은
+ * \`src/contract/types.ts\`입니다 — TODO(onboard)를 채우기 전에 먼저 그 파일을
+ * 읽어보세요.
  */
 
 import type {
@@ -432,14 +436,26 @@ export function renderRunnerScaffold(profile: GameProfile): string {
  * Every file under reference/runners/ is an app boundary
  * (src/__tests__/dependency-rules.test.ts's APP_BOUNDARY_PREFIXES) — the one
  * place allowed to call \`new Date().toISOString()\` for this game.
+ *
+ * The conformance report is persisted via \`RunStore\` (kind: 'conformance',
+ * same pattern as the hand-written runners, e.g. reference/runners/gomoku.ts)
+ * — without this, runs/${gameId}/summary.md's "온보딩 상태" section stays
+ * stuck at "아직 온보딩 채점 안 됨" forever, because that section reads its
+ * status back from \`RunStore.listRuns()\`, not from this process's own
+ * console output (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #4). \`saveRun\`
+ * throws on a runId that already exists (append-only evidence) — expected
+ * from the second run onward, so it's swallowed.
  */
 
 import { join } from 'node:path';
 
 import { scoreAdapter } from '../../onboarding/score';
+import { renderReportMarkdown } from '../../onboarding/report';
 import { evaluateWaveReadiness } from '../../onboarding/wave-readiness';
 import { runOnboardingPipeline } from '../../artifacts/onboarding-pipeline';
 import { computeSourceDigest } from '../../artifacts/source-digest';
+import { computeComparabilityKey, RunStore } from '../../artifacts/run-store';
+import { canonicalJson, sha256Digest } from '../../kernel/digest';
 import type { AnyBotFactory, AnyGameAdapter } from '../../contract/types';
 import { ${camel}Adapter } from '../${gameId}';
 
@@ -451,14 +467,25 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function saveConformanceRun(runStore: RunStore, adapter: AnyGameAdapter, conformance: ReturnType<typeof scoreAdapter>): void {
+  const comparabilityKey = computeComparabilityKey({ gameId: adapter.spec.gameId, specDigest: sha256Digest(canonicalJson(adapter.spec)), baselineVersion: 'n/a', opponentId: 'n/a', seedBankIds: [] });
+  try {
+    runStore.saveRun({ gameId: GAME_ID, runId: 'conformance', kind: 'conformance', recordedAt: now(), comparabilityKey, payload: conformance, markdown: renderReportMarkdown(conformance) });
+  } catch {
+    // already recorded on a prior run — append-only, ignore.
+  }
+}
+
 function main(): void {
   const rootDir = join(__dirname, '..', '..', '..');
   const adapter = ${camel}Adapter as unknown as AnyGameAdapter;
+  const runStore = new RunStore(rootDir);
 
   console.log(\`=== ${gameId} runner (rootDir=\${rootDir}) ===\`);
 
   const conformance = scoreAdapter(adapter);
   console.log(\`   score=\${conformance.overallScore} ready=\${conformance.ready}\`);
+  saveConformanceRun(runStore, adapter, conformance);
   const readiness = evaluateWaveReadiness(conformance);
   if (!readiness.proceed) {
     console.log('conformance has non-parity blockers — stopping before wave execution.');
@@ -473,28 +500,17 @@ function main(): void {
     sourceDigest: computeSourceDigest(SOURCE_FILES),
     noiseFloor: {
       baselineFactory: ${camel}Adapter.baselines.heuristic as unknown as AnyBotFactory,
-      identitySeeds,
-      botSeedBase: 600_000,
-      bootstrap: { iterations: 2000, confidenceLevel: 0.95, seed: 42 },
-      targetEffect: 0.05,
-      zeroStdDevFallbackBlocks: 5,
-      clamp: { min: 5, max: 20 },
+      identitySeeds, botSeedBase: 600_000, bootstrap: { iterations: 2000, confidenceLevel: 0.95, seed: 42 },
+      targetEffect: 0.05, zeroStdDevFallbackBlocks: 5, clamp: { min: 5, max: 20 },
     },
     baseline: {
       v1Notes: '순정 heuristic 기준선 (플래그 없음).',
-      anchors: [
-        { anchorId: 'anchor-random', kind: 'random' },
-        { anchorId: 'anchor-heuristic', kind: 'heuristic' },
-      ],
+      anchors: [{ anchorId: 'anchor-random', kind: 'random' }, { anchorId: 'anchor-heuristic', kind: 'heuristic' }],
     },
     wave: {
-      waveId: WAVE_ID,
+      waveId: WAVE_ID, opponent: 'heuristic', smokeMinBlocks: 5,
       bankIds: { smoke: '${gameId}-runner-smoke', prune: '${gameId}-runner-prune', holdout: '${gameId}-runner-holdout' },
-      opponent: 'heuristic',
-      smokeSprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
-      smokeMinBlocks: 5,
-      screenProbeSeeds: [1, 2, 3],
-      screenProbeBotSeedBase: 100,
+      smokeSprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 }, screenProbeSeeds: [1, 2, 3], screenProbeBotSeedBase: 100,
     },
     promotionNotePrefix: \`웨이브 \${WAVE_ID}에서 채택된 플래그 승격: \`,
     recordedAt: now(),

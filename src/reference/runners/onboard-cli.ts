@@ -12,7 +12,7 @@
  *   npm run onboard -- scaffold <gameId>       S2 adapter/runner skeleton
  *   npm run onboard -- score <gameId>          G-Score conformance loop
  *   npm run onboard -- status <gameId>         read onboarding-state.json
- *   npm run onboard -- wave <gameId>           G4 wave guidance
+ *   npm run onboard -- wave <gameId>           G4 first-wave execution
  *   npm run onboard                            same as status, auto-detected
  *
  * All state-machine logic (gate transitions, report text, TODO-marker
@@ -36,11 +36,19 @@ import {
   applyScaffold,
   applyScore,
   applyWave,
+  computeEffectiveCScore,
   countOnboardTodoMarkers,
   renderStatusReport,
   type OnboardingState,
 } from '../../onboarding/onboarding-state';
 import type { AnyGameAdapter } from '../../contract/types';
+
+/** `src/contract/types.ts` is the source of truth for every `GameAdapter`
+ * member's exact signature/semantics — printed alongside scaffold output so
+ * a coding agent filling TODO(onboard) markers doesn't have to go find it
+ * on its own (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #3). */
+const CONTRACT_TYPES_POINTER =
+  '각 멤버의 정확한 시그니처·의미의 정본은 src/contract/types.ts입니다 — TODO(onboard)를 채우기 전에 먼저 읽어보세요.';
 
 function now(): string {
   return new Date().toISOString();
@@ -367,6 +375,7 @@ function runScaffold(gameId: string): void {
   for (const marker of markers) {
     console.log(`  - ${marker}`);
   }
+  console.log(`\n${CONTRACT_TYPES_POINTER}`);
 
   console.log('\ntsc --noEmit 실행 중...');
   let tscPassed = false;
@@ -473,9 +482,22 @@ function runScore(gameId: string): void {
     }
   }
 
-  const state = applyScore(prevState, todoCount, tscPassed, conformance.overallScore, readiness.blockingAxes.length, now());
+  // conformance.overallScore is Math.min across every axis including
+  // C7-parity — a game with C0..C6 all at 100 but no captured replay
+  // fixtures yet (normal, non-blocking: evaluateWaveReadiness already
+  // excludes C7 from blockingAxes) would otherwise display/store "0%" while
+  // this same command reports the wave gate as passed. computeEffectiveCScore
+  // takes the minimum over C0..C6 only for what gets shown/saved, plus a
+  // separate one-line C7 status note (docs/GAP-ANALYSIS-13.md §9 Phase E
+  // 결함 #1).
+  const { value: effectiveScore, c7Note } = computeEffectiveCScore(conformance.axes);
+
+  const state = applyScore(prevState, todoCount, tscPassed, effectiveScore, readiness.blockingAxes.length, now(), c7Note);
   saveState(state);
-  console.log(`\n적합도(실측, C-Score): ${conformance.overallScore}%`);
+  console.log(`\n적합도(실측 C-Score, C7 제외): ${effectiveScore}%`);
+  if (c7Note !== null) {
+    console.log(c7Note);
+  }
   console.log(`다음 행동: ${state.nextAction}`);
 }
 
@@ -488,6 +510,15 @@ function runStatus(gameId: string): void {
   console.log(renderStatusReport(state));
 }
 
+/**
+ * S3 wave execution (docs/GAP-ANALYSIS-13.md §1: "첫 웨이브 자동 발주" — this
+ * used to only print the `npx ts-node <runner>` command and mark g4 passed
+ * unconditionally, which didn't match that design line and could record a
+ * wave that never actually ran, or hide a runner crash (docs/GAP-ANALYSIS-13.md
+ * §9 Phase E 결함 #2). Now it spawns the generated runner as a real child
+ * process, streams its stdout/stderr live (`stdio: 'inherit'`), and derives
+ * g4 from the runner's own exit code.
+ */
 function runWaveGuidance(gameId: string): void {
   const state = requireState(gameId);
   if (state.gates.g3 !== 'pass') {
@@ -496,11 +527,22 @@ function runWaveGuidance(gameId: string): void {
     return;
   }
   const runnerPath = runnerFilePath(gameId);
-  console.log(`G3 통과 — 첫 웨이브를 실행할 수 있습니다.`);
-  console.log(`실행: npx ts-node ${runnerPath}`);
-  console.log('(무거운 자기대국이므로 이 CLI가 자동으로 실행하지는 않습니다 — 위 명령을 직접 실행하세요.)');
+  console.log(`G3 통과 — 첫 웨이브를 실행합니다: npx ts-node ${runnerPath}`);
+  console.log('(무거운 자기대국입니다 — 러너 출력을 아래에 그대로 스트리밍합니다.)\n');
 
-  const updated = applyWave(state, true, now());
+  const result = spawnSync('npx', ['ts-node', runnerPath], { cwd: rootDir(), stdio: 'inherit' });
+  const waveRan = result.status === 0;
+
+  console.log('');
+  if (!waveRan) {
+    console.log(
+      `러너가 실패했습니다(exit code: ${result.status ?? 'signal ' + String(result.signal)}) — 위 출력에서 원인을 확인하고 수정한 뒤 다시 실행하세요.`,
+    );
+  } else {
+    console.log('러너가 정상 종료했습니다(exit code 0).');
+  }
+
+  const updated = applyWave(state, waveRan, now());
   saveState(updated);
   console.log(`\n다음 행동: ${updated.nextAction}`);
 }

@@ -50,6 +50,12 @@ export interface OnboardingState {
   readonly gates: OnboardingGates;
   readonly verdict: OnboardingVerdict;
   readonly score: OnboardingScore | null;
+  /** One-line status of the C7-parity axis as of the last `score` call, or
+   * `null` before scoring (or once scoring found nothing worth calling out).
+   * C7 never blocks onboarding (`evaluateWaveReadiness` excludes it from
+   * `blockingAxes`), so this is informational only — never a gate
+   * (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #1). */
+  readonly c7Note: string | null;
   readonly updatedAt: string;
   readonly nextAction: string;
 }
@@ -60,6 +66,49 @@ export interface OnboardingState {
 export interface DiagnosisEstimateShape {
   readonly verdict: 'impossible' | 'estimate';
   readonly totalScore?: number;
+}
+
+/** Minimal duck-typed shape of `AxisResult` (onboarding/report.ts) needed by
+ * `computeEffectiveCScore` below — same shape-narrowing precedent as
+ * `DiagnosisEstimateShape` above, so this module still imports nothing from
+ * a sibling onboarding file. */
+export interface AxisScoreLike {
+  readonly axis: string;
+  readonly score: number;
+  readonly blockers: readonly { readonly code: string }[];
+}
+
+/**
+ * Computes the "표시/저장용 C-Score" the CLI should show and persist
+ * (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #1). `ConformanceReport.overallScore`
+ * is `Math.min` across *every* axis including C7-parity, so a game whose
+ * C0..C6 axes are all 100 but has zero captured replay fixtures — a normal,
+ * non-blocking state; `evaluateWaveReadiness` already excludes C7 from what
+ * blocks onboarding — displayed as "0%", flatly contradicting the very same
+ * report's "다음 행동: wave 실행" verdict. This function instead takes the
+ * minimum across only C0..C6 ("C7 제외") as the number to show/store, plus a
+ * separate one-line note describing C7's actual state. The gate/verdict
+ * logic in `evaluateWaveReadiness` is untouched — this only changes what
+ * number gets displayed and saved.
+ */
+export function computeEffectiveCScore(axes: readonly AxisScoreLike[]): {
+  readonly value: number;
+  readonly c7Note: string | null;
+} {
+  const nonParityAxes = axes.filter((axis) => axis.axis !== 'C7-parity');
+  const value = nonParityAxes.length === 0 ? 0 : Math.min(...nonParityAxes.map((axis) => axis.score));
+
+  const c7 = axes.find((axis) => axis.axis === 'C7-parity');
+  let c7Note: string | null = null;
+  if (c7 !== undefined) {
+    const hasNoFixtures = c7.blockers.some((blocker) => blocker.code === 'C7_NO_FIXTURES');
+    if (hasNoFixtures) {
+      c7Note = 'C7 정합성: 원본 리플레이 미제공 — 60점 캡/미측정, 온보딩을 막지 않음';
+    } else if (c7.score < 100 || c7.blockers.length > 0) {
+      c7Note = `C7 정합성: 원본 리플레이 부분 확인(${c7.score}점, self-play만으로는 60점 캡) — 온보딩을 막지 않음`;
+    }
+  }
+  return { value, c7Note };
 }
 
 class GateTransitionError extends Error {}
@@ -106,6 +155,7 @@ function finalize(
   gates: OnboardingGates,
   verdict: OnboardingVerdict,
   score: OnboardingScore | null,
+  c7Note: string | null,
   updatedAt: string,
 ): OnboardingState {
   const stage = stageFromGates(gates);
@@ -115,6 +165,7 @@ function finalize(
     gates,
     verdict,
     score,
+    c7Note,
     updatedAt,
     nextAction: describeNextAction(gameId, stage, gates),
   };
@@ -135,11 +186,11 @@ export function applyDiagnosis(
 ): OnboardingState {
   if (estimate.verdict === 'impossible') {
     const gates: OnboardingGates = { g0: 'fail', g1: 'pending', g2: 'pending', g3: 'pending', g4: 'pending' };
-    return finalize(gameId, gates, 'impossible', null, updatedAt);
+    return finalize(gameId, gates, 'impossible', null, null, updatedAt);
   }
   const gates: OnboardingGates = { g0: 'pass', g1: 'pass', g2: 'pending', g3: 'pending', g4: 'pending' };
   const score: OnboardingScore = { kind: 'P', value: estimate.totalScore ?? 0 };
-  return finalize(gameId, gates, 'needs-implementation', score, updatedAt);
+  return finalize(gameId, gates, 'needs-implementation', score, null, updatedAt);
 }
 
 /**
@@ -157,7 +208,7 @@ export function applyScaffold(
   requireGate(prev.gates, 'g1', 'applyScaffold');
   const g2: GateStatus = todoCount === 0 && tscPassed ? 'pass' : 'fail';
   const gates: OnboardingGates = { ...prev.gates, g2, g3: g2 === 'pass' ? prev.gates.g3 : 'pending', g4: g2 === 'pass' ? prev.gates.g4 : 'pending' };
-  return finalize(prev.gameId, gates, prev.verdict, prev.score, updatedAt);
+  return finalize(prev.gameId, gates, prev.verdict, prev.score, prev.c7Note, updatedAt);
 }
 
 /**
@@ -173,22 +224,32 @@ export function applyScaffold(
  * stay a pure leaf, so the caller passes the already-computed blocking-axis
  * count). From this point on, `score.kind` is always 'C' (실측) — it
  * permanently replaces the 'P' (추정) score set by `applyDiagnosis`.
+ *
+ * `effectiveScore` is expected to already be the "C7 제외" value — the
+ * caller computes it via `computeEffectiveCScore(conformance.axes)` rather
+ * than passing `conformance.overallScore` directly, because the latter is
+ * `Math.min` across every axis including C7-parity and would otherwise
+ * display/store e.g. "0%" for a game whose C0..C6 are all 100 but has no
+ * captured replay fixtures yet — a normal, non-blocking state
+ * (docs/GAP-ANALYSIS-13.md §9 Phase E 결함 #1). `c7Note` is that same call's
+ * one-line C7 status, stored verbatim so `renderStatusReport` can surface it.
  */
 export function applyScore(
   prev: OnboardingState,
   todoCount: number,
   tscPassed: boolean,
-  overallScore: number,
+  effectiveScore: number,
   nonParityBlockingAxisCount: number,
   updatedAt: string,
+  c7Note: string | null = null,
 ): OnboardingState {
   requireGate(prev.gates, 'g1', 'applyScore');
   const g2: GateStatus = todoCount === 0 && tscPassed ? 'pass' : 'fail';
   const g3: GateStatus = nonParityBlockingAxisCount === 0 ? 'pass' : 'fail';
   const gates: OnboardingGates = { ...prev.gates, g2, g3, g4: g3 === 'pass' ? prev.gates.g4 : 'pending' };
   const verdict: OnboardingVerdict = g3 === 'pass' ? 'ready' : 'needs-implementation';
-  const score: OnboardingScore = { kind: 'C', value: overallScore };
-  return finalize(prev.gameId, gates, verdict, score, updatedAt);
+  const score: OnboardingScore = { kind: 'C', value: effectiveScore };
+  return finalize(prev.gameId, gates, verdict, score, c7Note, updatedAt);
 }
 
 /**
@@ -200,7 +261,7 @@ export function applyScore(
 export function applyWave(prev: OnboardingState, waveRan: boolean, updatedAt: string): OnboardingState {
   requireGate(prev.gates, 'g3', 'applyWave');
   const gates: OnboardingGates = { ...prev.gates, g4: waveRan ? 'pass' : 'fail' };
-  return finalize(prev.gameId, gates, prev.verdict, prev.score, updatedAt);
+  return finalize(prev.gameId, gates, prev.verdict, prev.score, prev.c7Note, updatedAt);
 }
 
 /** Regex the task calls out explicitly ("G2 판정(TODO 마커 grep)") — extracted
@@ -239,10 +300,13 @@ export function renderStatusReport(state: OnboardingState): string {
   lines.push(`스테이지: ${state.stage}`);
   lines.push(`판정: ${state.verdict}`);
   if (state.score) {
-    const label = state.score.kind === 'P' ? '추정(P-Score)' : '실측(C-Score)';
+    const label = state.score.kind === 'P' ? '추정(P-Score)' : '실측(C-Score, C7 제외)';
     lines.push(`적합도: ${state.score.value}% (${label})`);
   } else {
     lines.push('적합도: (아직 산출되지 않음)');
+  }
+  if (state.c7Note !== null) {
+    lines.push(state.c7Note);
   }
   lines.push('');
   lines.push('게이트 현황:');

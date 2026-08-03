@@ -24,16 +24,10 @@ import { renderReportMarkdown } from '../../onboarding/report';
 import { evaluateWaveReadiness } from '../../onboarding/wave-readiness';
 import { computeComparabilityKey, RunStore } from '../../artifacts/run-store';
 import { canonicalJson, sha256Digest } from '../../kernel/digest';
-import {
-  loadOrCreateLedger,
-  loadOrCreateRegistry,
-  saveLedger,
-  saveRegistry,
-} from '../../artifacts/game-state';
+import { saveLedger, saveRegistry } from '../../artifacts/game-state';
 import { extractNearMissCandidates, type AdoptionEntry } from '../../artifacts/adoption-ledger';
 import { renderGameSummaryMarkdown } from '../../artifacts/game-summary';
-import { measureNoiseFloor } from '../../loop/calibrate';
-import { recommendBlockCount } from '../../kernel/paired-stats';
+import { runOnboardingPipeline } from '../../artifacts/onboarding-pipeline';
 import { eraseAdapter } from '../../loop/erase';
 import { withStrategyFlags } from '../../loop/compose';
 import { mctsBotFactory, type MctsConfig } from '../../search/mcts';
@@ -149,217 +143,82 @@ function main(): void {
     console.log(`   ⚠ ${warning}`);
   }
 
-  console.log('1.5) 캘리브레이션 — noise floor 기반 블록 수 산정');
-  const identitySeeds = Array.from({ length: 100 }, (_, i) => 700_000 + i);
-  const noiseFloor = measureNoiseFloor(adapter, gomokuAdapter.baselines.heuristic, identitySeeds, 600_000, {
-    iterations: 2000,
-    confidenceLevel: 0.95,
-    seed: 42,
-  });
-  // heuristic 봇이 결정론적이면(오목 heuristic이 그렇다) identity self-play의
-  // winFraction 분산이 정확히 0이 되어 recommendBlockCount가 계산 불가 —
-  // 이 경우 표본 크기 근거를 낼 수 없으므로 클램프 하한(5)으로 대체한다.
-  const recommendedBlocks = noiseFloor.blockStdDev > 0
-    ? recommendBlockCount({ blockStdDev: noiseFloor.blockStdDev, targetEffect: 0.05 })
-    : 5;
-  const clampedBlocks = Math.min(Math.max(recommendedBlocks, 5), 30);
-  console.log(
-    `   캘리브레이션: blockStdDev=${noiseFloor.blockStdDev.toFixed(4)}, 권장 블록수=${recommendedBlocks}(클램프 후 ${clampedBlocks})`,
-  );
-
-  console.log('2) load-or-create registry/ledger from runs/gomoku/');
-  const registry = loadOrCreateRegistry(rootDir, GAME_ID);
-  const ledger = loadOrCreateLedger(rootDir, GAME_ID);
+  console.log('1.5-7) 온보딩 파이프라인 — 소규모 smoke-only 웨이브 (docs/GAP-ANALYSIS-13.md S1)');
   const sourceDigest = computeSourceDigest(SOURCE_FILES);
-  const priorLatest = registry.latest();
-  // Warn-only, not a block (docs/GAP-ANALYSIS-8.md §2 v1 policy): a source
-  // drift since the last registered version means that version's flags may
-  // now reassemble differently than when it was adopted (exactly the P5
-  // mcts-s64 incident above), but stopping the runner here would make every
-  // code fix to search/mcts.ts also block every game's runner —
-  // reproducibility status should stay visible, not gate experimentation.
-  if (priorLatest?.sourceDigest !== undefined && priorLatest.sourceDigest !== sourceDigest) {
+  const identitySeeds = Array.from({ length: 100 }, (_, i) => 700_000 + i);
+  const pipeline = runOnboardingPipeline(adapter, {
+    gameId: GAME_ID,
+    rootDir,
+    adapter,
+    sourceDigest,
+    noiseFloor: {
+      baselineFactory: gomokuAdapter.baselines.heuristic,
+      identitySeeds,
+      botSeedBase: 600_000,
+      bootstrap: { iterations: 2000, confidenceLevel: 0.95, seed: 42 },
+      targetEffect: 0.05,
+      // heuristic 봇이 결정론적이면(오목 heuristic이 그렇다) identity
+      // self-play의 winFraction 분산이 정확히 0이 되어 recommendBlockCount가
+      // 계산 불가 — 이 경우 표본 크기 근거를 낼 수 없으므로 클램프 하한(5)으로
+      // 대체한다.
+      zeroStdDevFallbackBlocks: 5,
+      clamp: { min: 5, max: 30 },
+    },
+    baseline: {
+      v1Notes: '순정 heuristic 기준선 (플래그 없음).',
+      anchors: [
+        { anchorId: 'anchor-random', kind: 'random' },
+        { anchorId: 'anchor-heuristic', kind: 'heuristic' },
+      ],
+    },
+    wave: {
+      waveId: 'runner-wave',
+      bankIds: { smoke: 'gomoku-runner-smoke', prune: 'gomoku-runner-prune', holdout: 'gomoku-runner-holdout' },
+      opponent: 'heuristic',
+      smokeSprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
+      smokeMinBlocks: 5,
+      screenProbeSeeds: [1, 2, 3],
+      screenProbeBotSeedBase: 100,
+    },
+    promotionNotePrefix: '웨이브 runner-wave에서 채택된 플래그 승격: ',
+    recordedAt: now(),
+  });
+
+  if (pipeline.sourceDrift?.drifted) {
     console.log(
-      `   ⚠ source drift detected: registry latest (${priorLatest.version}) was registered with sourceDigest=${priorLatest.sourceDigest}, current source=${sourceDigest} — this version's flags may now reassemble differently than when it was adopted (see artifacts/source-digest.ts).`,
+      `   ⚠ source drift detected: registry latest (${pipeline.sourceDrift.priorVersion}) was registered with sourceDigest=${pipeline.sourceDrift.priorSourceDigest}, current source=${pipeline.sourceDrift.currentSourceDigest} — this version's flags may now reassemble differently than when it was adopted (see artifacts/source-digest.ts).`,
     );
-  } else if (priorLatest !== undefined && priorLatest.sourceDigest === undefined) {
-    console.log(`   registry latest (${priorLatest.version}) predates sourceDigest tracking — no drift check possible`);
+  } else if (pipeline.sourceDrift !== undefined && pipeline.sourceDrift.priorSourceDigest === undefined) {
+    console.log(`   registry latest (${pipeline.sourceDrift.priorVersion}) predates sourceDigest tracking — no drift check possible`);
   }
-
-  console.log('3) baseline v1 + anchors (register only if missing)');
-  if (registry.get('v1') === undefined) {
-    registry.register({
-      version: 'v1',
-      flags: [],
-      parent: null,
-      createdAt: now(),
-      sourceWaveId: null,
-      notes: '순정 heuristic 기준선 (플래그 없음).',
-      sourceDigest,
-    });
-    console.log('   registered v1');
-  } else {
-    console.log('   v1 already registered — skipped');
-  }
-  for (const anchorId of ['anchor-random', 'anchor-heuristic'] as const) {
-    if (registry.getAnchor(anchorId) === undefined) {
-      registry.registerAnchor({ anchorId, kind: anchorId === 'anchor-random' ? 'random' : 'heuristic' });
-      console.log(`   registered anchor ${anchorId}`);
-    } else {
-      console.log(`   anchor ${anchorId} already frozen — skipped`);
-    }
-  }
-  const v1 = registry.get('v1');
-  if (v1 === undefined) {
-    throw new Error('gomoku runner: v1 baseline missing after registration step');
-  }
-
-  console.log('4) small smoke-only wave over strategySurface flags');
+  console.log(
+    `   캘리브레이션(${identitySeeds.length} seeds): blockStdDev=${pipeline.noiseFloor.blockStdDev.toFixed(4)}, 권장 블록수=${pipeline.recommendedBlocks}(클램프 후 ${pipeline.clampedBlocks})`,
+  );
   const flags = gomokuAdapter.strategySurface.map((spec) => spec.flag);
   console.log(`   candidates: ${flags.join(', ')}`);
-
-  const smokeMaxBlocks = clampedBlocks * 3;
-  const waveLedger = new SeedLedger();
-  const reservedAt = now();
-  waveLedger.reserve({
-    bankId: 'gomoku-runner-smoke',
-    range: { start: 1, end: smokeMaxBlocks },
-    purpose: 'smoke',
-    reservedAt,
-  });
-  waveLedger.reserve({
-    bankId: 'gomoku-runner-prune',
-    range: { start: 1000, end: 999 + clampedBlocks },
-    purpose: 'prune',
-    reservedAt,
-  });
-  waveLedger.reserve({
-    bankId: 'gomoku-runner-holdout',
-    range: { start: 2000, end: 1999 + clampedBlocks },
-    purpose: 'holdout',
-    reservedAt,
-  });
-
-  const waveConfig = assembleWaveConfig(adapter, {
-    waveId: 'runner-wave',
-    candidates: flags.map((flag) => ({ flag })),
-    opponent: 'heuristic',
-    ledger: waveLedger,
-    recordedAt: now(),
-    baselineFlags: v1.flags,
-    baselineVersion: v1.version,
-    tiers: {
-      smoke: {
-        bankId: 'gomoku-runner-smoke',
-        sprt: { p0: 0.5, p1: 0.6, alpha: 0.1, beta: 0.1 },
-        maxBlocks: smokeMaxBlocks,
-        minBlocks: 5,
-      },
-      prune: { bankId: 'gomoku-runner-prune', blocks: clampedBlocks },
-      holdout: { bankId: 'gomoku-runner-holdout', blocks: clampedBlocks },
-    },
-    screenProbe: { seeds: [1, 2, 3], botSeedBase: 100 },
-  });
-
-  const report = runWave(adapter, waveConfig);
-  for (const result of report.results) {
+  for (const result of pipeline.report.results) {
     console.log(`   ${result.flag}: verdict=${result.verdict} tiersPassed=${result.tiersPassed.join('→') || '(none)'}`);
   }
-
-  saveRunIfAbsent(runStore, {
-    gameId: GAME_ID,
-    runId: report.waveId,
-    kind: 'wave',
-    recordedAt: now(),
-    comparabilityKey: report.comparabilityKey,
-    payload: report,
-    markdown: `# Wave Report — ${report.waveId}\n\n${report.results
-      .map((r) => `- ${r.flag}: ${r.verdict} (tiers: ${r.tiersPassed.join('→') || 'none'})`)
-      .join('\n')}\n`,
-  });
-
-  console.log('5) record adoption ledger entry');
-  const entries: AdoptionEntry[] = report.results.map((result) => {
-    const tierStats: AdoptionEntry['tierStats'] = {};
-    for (const tier of ['screen', 'smoke', 'prune', 'holdout'] as const) {
-      const stats = result.stats[tier];
-      if (stats) {
-        tierStats[tier] = {
-          pointWinRate: stats.pointWinRate,
-          pointScoreDiff: stats.pointScoreDiff,
-          blocks: stats.blocks,
-          ...(stats.drawRate !== undefined ? { drawRate: stats.drawRate } : {}),
-          ...(stats.winRateCI !== undefined ? { winRateCI: stats.winRateCI } : {}),
-        };
-      }
-    }
-    const isNoOp = result.tiersPassed.length === 0 && result.stats.smoke === undefined;
-    return {
-      flags: result.flags,
-      verdict: isNoOp ? 'screened-out' : result.verdict,
-      tierStats,
-      ...(isNoOp ? { failureReason: 'behavioral no-op (screened out before any games)' } : {}),
-    };
-  });
-  const adoptionRecord = ledger.add({
-    waveId: report.waveId,
-    recordedAt: now(),
-    comparabilityKey: report.comparabilityKey,
-    baselineVersion: v1.version,
-    opponentId: waveConfig.opponent,
-    entries,
-    nextLoopNotes: [],
-  });
-
-  console.log('5.5) near-miss 후보 추출');
-  const nearMiss = extractNearMissCandidates(adoptionRecord, waveConfig.criteria);
-  if (nearMiss.length === 0) {
+  if (pipeline.nearMiss.length === 0) {
     console.log('   근접실패 후보 없음.');
   } else {
-    for (const candidate of nearMiss) {
+    for (const candidate of pipeline.nearMiss) {
       console.log(
         `   flags=[${candidate.flags.join('+')}] failedAtTier=${candidate.failedAtTier} winRateGap=${candidate.gap.winRateGap.toFixed(4)} scoreDiffGap=${candidate.gap.scoreDiffGap.toFixed(4)}`,
       );
     }
   }
-  writeFileSync(join(rootDir, 'runs', GAME_ID, 'near-miss.json'), JSON.stringify(nearMiss, null, 2));
   console.log(`   저장: runs/${GAME_ID}/near-miss.json`);
-
-  console.log('5.6) 웨이브 채택 플래그 registry 승격');
-  const adoptedFlags = report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
-  if (adoptedFlags.length === 0) {
+  if (pipeline.promotion.promotedVersion === null) {
     console.log('   이번 웨이브에서 채택된 전략 없음 — 승격 대상 없음');
+  } else if (pipeline.promotion.alreadyPromoted) {
+    console.log('   이 웨이브는 이미 승격됨 — 스킵');
   } else {
-    const currentLatest = registry.latest();
-    if (currentLatest === undefined) {
-      throw new Error('gomoku runner: registry has no latest baseline before promotion step');
-    }
-    const lineage = registry.lineage(currentLatest.version);
-    const alreadyPromoted = lineage.some((version) => version.sourceWaveId === report.waveId);
-    if (alreadyPromoted) {
-      console.log('   이 웨이브는 이미 승격됨 — 스킵');
-    } else {
-      const nextVersion = registry.register({
-        version: `v${lineage.length + 1}`,
-        flags: [...currentLatest.flags, ...adoptedFlags],
-        parent: currentLatest.version,
-        createdAt: now(),
-        sourceWaveId: report.waveId,
-        notes: `웨이브 ${report.waveId}에서 채택된 플래그 승격: ${adoptedFlags.join(', ')}`,
-        sourceDigest,
-      });
-      console.log(`   승격: ${nextVersion.version}, flags=[${nextVersion.flags.join(', ')}]`);
-    }
+    console.log(`   승격: ${pipeline.promotion.promotedVersion}, flags=[${pipeline.promotion.adoptedFlags.join(', ')}]`);
   }
-
-  console.log('6) persist registry/ledger');
-  saveRegistry(rootDir, GAME_ID, registry);
-  saveLedger(rootDir, GAME_ID, ledger);
+  const registry = pipeline.registry;
+  const ledger = pipeline.ledger;
   console.log(`   anchors=${registry.listAnchors().length} adoptionRecords=${ledger.all().length}`);
-
-  console.log('7) game-summary 렌더');
-  const summaryMarkdown = renderGameSummaryMarkdown(rootDir, GAME_ID, { latestWaveCriteria: waveConfig.criteria });
-  writeFileSync(join(rootDir, 'runs', GAME_ID, 'summary.md'), summaryMarkdown);
   console.log(`   게임 요약: runs/${GAME_ID}/summary.md`);
 
   console.log('8) MCTS 후보 웨이브 (mcts-wave-1)');

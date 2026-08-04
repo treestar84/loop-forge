@@ -1159,6 +1159,105 @@ const advanceSoldier: StrategyFlagSpec<JanggiObservation, JanggiChoice> = {
   },
 };
 
+/**
+ * Strategy flag: evaluation-function style (GAP-ANALYSIS-12 §7 / A8). Unlike
+ * `captureHighestValue`/`preferCheck`/`advanceSoldier` above — each of which
+ * checks for one tactical pattern and *delegates entirely to base* when that
+ * pattern isn't on offer, so it has no opinion at all in the (common) case
+ * where its one trick doesn't apply — this flag scores every legal move on
+ * every ply and always plays the highest-scoring one; the base bot is
+ * consulted only to break ties among moves that score exactly equal.
+ *
+ * score(move) =
+ *     2.0 * capturedValue   (PIECE_VALUE of a captured piece, 0 if none)
+ *   - 1.5 * riskPenalty     (PIECE_VALUE of the moved piece if its
+ *                            destination is attacked after the move, else 0)
+ *   + 0.3 * mobilityDelta   (approximated — see below)
+ *   + 1.0 * checkBonus      (1 if the move leaves the opponent in check)
+ *
+ * Weights are an initial calibration (design brief allows a small sweep,
+ * not an axis redesign — ADR-0009 stays intact). Ties broken by the lowest
+ * `encodeChoice` key, matching the other flags' deterministic convention.
+ *
+ * mobilityDelta approximation (design brief explicitly allows this — "이동한
+ * 기물과 그 주변만 재계산" — when the exact form is too slow): the brief's
+ * exact form ("이동 후 내 기물들의 합법수 총합 − 이동 전 합법수 총합",
+ * i.e. `legalMovesFor(next, self).length - legalMovesFor(board, self).length`)
+ * calls the full-board legal-move generator — O(own pieces × board) with
+ * check-safety filtering — once per *candidate* move, not once per ply, so
+ * one `decide()` call costs O(legal.length²) in the worst case. Measured
+ * (scratchpad/janggi-a8-bench.ts, 5 seeded self-play games capped at 60
+ * plies): ~10.9x heuristic's per-game time, over the brief's 5x throughput
+ * ceiling. This flag instead approximates mobility with just the *moved*
+ * piece's own pseudo-legal (`rawMoves`, no check-safety filtering) reachable-
+ * square count from its old square vs. its new square — O(1) work per
+ * candidate, capturing "did relocating this piece open or close its own
+ * lines" without re-scanning every other piece on the board. Re-measured
+ * with this approximation: ~1.6x heuristic's time, comfortably under the
+ * ceiling.
+ */
+const janggiPieceSafetyMobility: StrategyFlagSpec<JanggiObservation, JanggiChoice> = {
+  flag: 'janggiPieceSafetyMobility',
+  description:
+    'Scores every legal move via 2.0*capturedValue - 1.5*riskPenalty + 0.3*mobilityDelta + 1.0*checkBonus and plays the best-scoring one; base bot only breaks ties.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'janggiPieceSafetyMobility'),
+        decide(decisionPoint, observation, legal) {
+          const board = observation.board;
+          const self = observation.self;
+          const opponent = otherPlayer(self);
+          let bestScore = -Infinity;
+          let candidates: JanggiChoice[] = [];
+          for (const move of legal) {
+            const captured = move.to === move.from ? 0 : (board[move.to] as Cell);
+            const capturedValue = captured === 0 ? 0 : (PIECE_VALUE[pieceType(captured)] as number);
+            const next = applyMove(board, move);
+            const movingType = pieceType(board[move.from] as Cell);
+            const riskPenalty = isSquareAttacked(next, move.to, opponent)
+              ? (PIECE_VALUE[movingType] as number)
+              : 0;
+            // Approximated mobilityDelta — see the flag's module-level doc
+            // comment for why the exact full-board form is too slow. This
+            // measures only the moved piece's own pseudo-legal reachable
+            // squares before vs. after relocating.
+            const mobilityBefore = rawMoves(board, move.from).length;
+            const mobilityAfter = move.to === move.from ? mobilityBefore : rawMoves(next, move.to).length;
+            const mobilityDelta = mobilityAfter - mobilityBefore;
+            const checkBonus = isPlayerInCheck(next, opponent) ? 1 : 0;
+            const score = 2.0 * capturedValue - 1.5 * riskPenalty + 0.3 * mobilityDelta + 1.0 * checkBonus;
+            if (score > bestScore) {
+              bestScore = score;
+              candidates = [move];
+            } else if (score === bestScore) {
+              candidates.push(move);
+            }
+          }
+          if (candidates.length === 1) {
+            return candidates[0] as JanggiChoice;
+          }
+          const baseChoice = bot.decide(decisionPoint, observation, legal);
+          const baseKey = encodeChoice(baseChoice);
+          const tieMatch = candidates.find((move) => encodeChoice(move) === baseKey);
+          if (tieMatch) return tieMatch;
+          let lowest = candidates[0] as JanggiChoice;
+          let lowestKey = encodeChoice(lowest);
+          for (const move of candidates) {
+            const key = encodeChoice(move);
+            if (key < lowestKey) {
+              lowest = move;
+              lowestKey = key;
+            }
+          }
+          return lowest;
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by actually running this adapter's own
 // random-vs-random self-play (see src/reference/__tests__/janggi.test.ts for
@@ -1290,7 +1389,7 @@ export const janggiAdapter: GameAdapter<JanggiState, JanggiObservation, JanggiCh
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [captureHighestValue, preferCheck, advanceSoldier],
+  strategySurface: [captureHighestValue, preferCheck, advanceSoldier, janggiPieceSafetyMobility],
 };
 
 export { ARRANGEMENTS, isPlayerInCheck, legalMovesFor, applyMove };

@@ -1041,3 +1041,116 @@ registry.json`에 `external-mid-l1`/`external-opus-l2`만 존재, L3 관련 항�
 시사한다(20개 고정 새 풀, 턴당 4종 행동). ADR-0015가 예견한 두 분기(통과·
 불통과) 중 불통과 쪽으로 확정됐다는 것 자체가 정직한 결과다 — 게이트를
 다시 완화하지 않는다.
+
+## 장기 A8 첫 채택 시도 (2026-08-04 실측, E2-B 그룹 1/3)
+
+**배경**: 장기는 채택 후보 0개(registry v1뿐)로 GAP-11 편입 게임 중 유일하게
+아무 웨이브도 통과한 적이 없는 게임이었다. 기존 3개 전략 플래그
+(`captureHighestValue`·`preferCheck`·`advanceSoldier`, `src/reference/janggi.ts`
+~1064~1160줄, `runs/janggi/ledger.json` 확인)는 전부 smoke에서 failed —
+셋 다 "한 가지 전술만 보고 나머지는 base(heuristic)에 위임"하는 단일 규칙형
+오버라이드라, 그 전술이 안 맞는 국면(대부분의 수)에서는 heuristic보다 정보가
+없다. MCTS도 이미 두 차례(mcts-wave-1, mcts-wave-2) 시도돼 예산 축은 소진
+(GAP-ANALYSIS-12.md §7, ADR-0009). 이번 카드는 그 진단이 지목한 처치:
+**단일 전술 오버라이드가 아니라 매 수마다 legal 전부를 스코어링하는
+평가함수형 플래그** `janggiPieceSafetyMobility`.
+
+### 산식
+
+```
+score(move) =
+    2.0 × capturedValue(move)   // 포획 이득 (PIECE_VALUE)
+  − 1.5 × riskPenalty(move)     // 이동 후 목적지가 상대에게 잡히면
+                                 //   (isSquareAttacked) 이동한 기물의
+                                 //   PIECE_VALUE만큼 감점
+  + 0.3 × mobilityDelta(move)   // 기동성 변화 — 근사 적용(아래)
+  + 1.0 × [checkBonus]          // 이동 후 상대가 장군이면 1, 아니면 0
+```
+
+- `riskPenalty`/`checkBonus`는 브리프 원안 그대로(`isSquareAttacked`,
+  `isPlayerInCheck` 재사용).
+- `mobilityDelta` 근사 채택: 브리프 원안(`legalMovesFor(next, self).length −
+  legalMovesFor(board, self).length`, 즉 전체 자기 기물의 체크 필터링 포함
+  합법수 총합 차이)은 후보 하나당 전체 보드 재스캔이 필요해 `decide()` 1회당
+  O(후보수²) — `scratchpad/janggi-a8-bench.ts`로 5개 시드 self-play(60수
+  캡)를 실측한 결과 heuristic 대비 **10.91배** (브리프가 정한 "5배 이상이면
+  근사" 기준 초과). **이동한 기물 자신의 `rawMoves`(체크 필터링 없는 유사
+  합법수) 개수를 이동 전/후로만 비교**하는 국소 근사로 낮췄다 — 후보당 O(1),
+  다른 기물의 기동성 변화는 반영하지 않는다. 재측정 결과 **1.66배**로
+  기준 내 진입(코드 주석에 근사 사유·측정치 기록, `src/reference/janggi.ts`
+  janggiPieceSafetyMobility 플래그 doc comment).
+- 가중치는 브리프 원안 그대로 사용(스윕 없이 1차 실측에서 바로 강한 신호가
+  나와 추가 스윕은 불필요했음).
+- 동점 처리: 브리프 지정대로 `encodeChoice` 사전순 최소(다른 플래그들의
+  관례와 동일), base 봇의 선택이 동점 후보에 있으면 그걸 우선.
+
+### C6 재채점 (전략 표면이 실제로 다른 결정을 만드는가)
+
+`scoreAdapter` 재실행 결과: **4/4 strategySurface 플래그가 프로브 시드에서
+행동적으로 구별됨(C6 score=100, blocker 없음)** — 기존 3개 + 신규
+`janggiPieceSafetyMobility` 전부 no-op 아님. (재현: `scratchpad/janggi-a8-c6.ts`)
+
+### 웨이브 실측 (a8-wave-1, 신규 시드 뱅크)
+
+기존 러너(`src/reference/runners/janggi.ts`)의 시드 범위를 grep으로 확인
+(`janggi-runner-*`: 1-90/1000-1029/2000-2029, `janggi-mcts-*`: 8000-10005,
+`janggi-mcts2-*`: 30000-33005, `janggi-benchmark.ts`: 50000-51999 +
+botSeedBase 700001-700003/800000/900000-900099) 후, 겹치지 않는 신규 뱅크로
+발주: `janggi-a8-smoke`(40000-40029, maxBlocks=30, SPRT p0=0.5/p1=0.6/
+α=β=0.1), `janggi-a8-prune`(41000-41009, 10블록), `janggi-a8-holdout`
+(42000-42009, 10블록). regression 티어는 별도로 구성하지 않음 — v1은 채택
+플래그가 0개라 baseline composite가 raw heuristic과 동일해서(다른 janggi
+웨이브들의 규칙과 동일한 이유) smoke/prune/holdout이 이미 v1(=heuristic)
+대비 비교이므로 중복. 상대는 heuristic, `regression=v1` 취지 그대로 유지.
+프레임워크 결함 없이 표준 screen→smoke→prune→holdout 흐름 그대로 실행
+(`scratchpad/janggi-a8-wave.ts`, `assembleWaveConfig`+`runWave` 재사용).
+
+| 티어 | 승률 | scoreDiff | 블록(게임) | drawRate | 통과 |
+|---|---|---|---|---|---|
+| screen | (프로브만, 별도 통계 없음) | — | — | — | ✅ |
+| smoke | **93.3%** | 0.867 | 15 (30게임) | 13.3% | ✅ |
+| prune | **95.0%** | 0.900 | 10 (20게임) | 10.0% | ✅ |
+| holdout | **95.0%** [CI 85.0–100%] | 0.900 | 10 (20게임) | 10.0% | ✅ |
+
+near-miss 후보 없음(바로 채택이라 근접실패 분석 대상 자체가 없음,
+`runs/janggi/a8-near-miss.json` = `[]`).
+
+### 최종 판정: **adopted**
+
+기존 3개 플래그가 전부 smoke 탈락이었던 이 게임에서 첫 채택 성공. 근거:
+단일 전술 오버라이드(예: "포획 최댓값만 본다")는 그 전술이 안 맞는 대다수
+수에서 heuristic에 위임해 봤자 heuristic 자체가 별 차이를 못 만드는 반면,
+평가함수형은 매 수마다 안전도(리스크 페널티)까지 반영해 heuristic이 갖는
+"포획 손익 계산은 하지만 근시안적"이라는 약점(무리한 노출 포획을 종종
+허용)을 체계적으로 교정한다 — 특히 장기처럼 기물 손실이 곧 국면 붕괴로
+이어지는 게임에서 리스크 페널티 항의 기여가 큰 것으로 보인다(가중치
+스윕 없이도 즉시 강한 신호).
+
+`runs/janggi/registry.json`에 v2 등록 완료: `flags: ["janggiPieceSafetyMobility"]`,
+`parent: "v1"`, `sourceWaveId: "a8-wave-1"`. `runs/janggi/ledger.json`에
+`a8-wave-1` adoption record 추가(entries[0].verdict="adopted"). 요약 문서
+(`runs/janggi/summary.md`) 재렌더는 공유 `runs/` 디렉터리를 다른 동시 실행
+에이전트(dominion 라운드)가 갱신 중이던 파일 하나(`runs/dominion/
+challenge-l2/payload.json` 부재)를 스캔하다 ENOENT로 실패 — janggi 자체
+산출물(registry/ledger/near-miss/wave report)은 전부 정상 저장됐고, 요약
+렌더 실패는 janggi 웨이브 결과와 무관한 동시성 문제라 재시도하지 않음
+(다음에 janggi 러너를 다시 돌리면 자동 재생성됨).
+
+### 다음 카드 제안
+
+1. **가중치 정밀화(선택적, 이번 카드 스코프 밖)**: 1차 실측이 이미
+   93~95% 승률로 강하게 통과했으므로 추가 스윕의 ROI가 낮다 — 대신
+   다음 카드는 GAP-ANALYSIS-12.md §7이 지목한 "휴리스틱 자체 개선" 축으로
+   진행(예: `heuristicBaseline`의 `moveScore`에 안전도 항을 강화하거나
+   기물별 위치 가중치 테이블 추가) — v2(evaluation-function 채택)를
+   새 기준선으로 삼아 그 위에 쌓는다.
+2. **mobilityDelta 근사의 정밀 버전 재시도(선택적)**: 지금 근사는 이동한
+   기물 자신의 기동성만 보고 다른 기물이 얻거나 잃는 기동성(예: 통로가
+   열려 전차가 더 많이 움직일 수 있게 됨)은 반영하지 않는다. v2가 이미
+   강하게 채택됐으므로 시급하지 않지만, 다음 라운드에서 여유가 있으면
+   "이동한 기물 + 그 인접 방향 기물들만" 재계산하는 중간 근사로 신호를
+   더 정밀화할 수 있는지 확인해볼 만하다.
+3. **장기도 GAP-11 앵커 래더 편입 검토**: 이번 카드는 브리프 지시대로
+   L1/L2/L3 challenge를 스코프 밖에 뒤 "첫 채택" 자체만 목표로 했다.
+   v2가 나온 지금은 스플랜더·윙스팬처럼 외부 스타일 앵커를 붙여 L1/L2
+   트리거를 시도해볼 준비가 됐다(장기 전용 온보딩 그룹으로 별도 카드화).

@@ -51,10 +51,12 @@
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
+import type { BotFactory } from '../../contract/types';
 import { eraseAdapter } from '../../loop/erase';
 import { runHeadToHead, type HeadToHeadResult } from '../../loop/head-to-head';
+import { evaluateFingerprintGate, type FingerprintGateResult } from '../../loop/fingerprint-gate';
 import { loadOrCreateRegistry, saveRegistry } from '../../artifacts/game-state';
-import { wingspanAdapter } from '../wingspan';
+import { wingspanAdapter, type WingspanChoice, type WingspanObservation } from '../wingspan';
 import { wingspanOpusBot } from '../experiments/wingspan-opus-bot';
 import { wingspanMidBot } from '../experiments/wingspan-mid-bot';
 import { wingspanEngineBot } from '../experiments/wingspan-engine-bot';
@@ -186,13 +188,27 @@ function main(): void {
  *
  *   Gate 1 (L3 > heuristic): runHeadToHead over seeds 1_022_000+.
  *     Passes iff winRateCI.lower > 0.5.
- *   Gate 2 (fingerprint distance from L2): replay heuristic self-play games
- *     over seeds 1_023_000+, and at every decision point ask L3 and L2 what
- *     they would do (the game itself is always advanced by the heuristic, so
- *     both are probed on an identical, style-neutral state distribution).
- *     Passes iff the encoded choices agree on fewer than AGREEMENT_MAX of
- *     those points — an L3 that mostly mirrors L2 is not an independent
- *     judge.
+ *   Gate 2 (fingerprint distance from L2, CALIBRATED per docs/adr/0015):
+ *     replay heuristic self-play games over seeds 1_023_000+, and at every
+ *     decision point ask L3 and L2 what they would do (the game itself is
+ *     always advanced by the heuristic, so both are probed on an identical,
+ *     style-neutral state distribution) -> agreement. Separately, over the
+ *     SAME seeds/decision points, measure the natural agreement floor for
+ *     this game between two obviously-independent bots (plain heuristic vs
+ *     L2) -> floor. `evaluateFingerprintGate(agreement, floor)`
+ *     (../../loop/fingerprint-gate.ts) then applies ADR-0015's two-stage
+ *     verdict: fast-pass if agreement < 70% (reproduces every pre-ADR-0015
+ *     game's decision unchanged), else pass iff the normalized excess
+ *     agreement above the floor, (agreement-floor)/(1-floor), is < 0.5 — "L3
+ *     sits closer to an independent bot pair than to being the same bot as
+ *     L2". This replaced a single fixed 70% threshold after wingspan's first
+ *     L3 candidate (84.0% agreement) failed it despite being designed
+ *     without ever reading wingspan-opus-bot.ts — the game's narrow
+ *     per-turn action space (4 action kinds, ~20 fixed birds) makes even
+ *     independent designs converge, so the threshold needed calibrating
+ *     against wingspan's own floor rather than assumed universal (see
+ *     docs/GAP-11-ROUNDS.md's "윙스팬 L3 재판정" subsection for the floor
+ *     measurement and the excess calculation this round produced).
  *
  * There is deliberately NO win-rate gate against L2: a holdout anchor is
  * defined by style independence, not by being stronger or weaker than the
@@ -205,10 +221,14 @@ function main(): void {
 
 const SEED_BASE_L3_GATE1 = 1_022_000;
 const SEED_BASE_L3_GATE2 = 1_023_000;
-const BOT_SEED_BASE_L3 = { gate1: 1_021_101, gate2: 1_021_102 } as const;
+// floorProbe reuses SEED_BASE_L3_GATE2's game seeds (ADR-0015/brief: "동일
+// 프로토콜, 동일 시드" — the floor and the L3-vs-L2 agreement must be
+// measured over the identical 400 decision points to be comparable), but
+// needs its own bot-seed-base slot so its two bot instances (heuristic, L2)
+// don't collide with l3Gate2's (engine, L2) instances.
+const BOT_SEED_BASE_L3 = { gate1: 1_021_101, gate2: 1_021_102, floorProbe: 1_021_103 } as const;
 const N_L3_GATE1 = 100;
 const N_L3_PROBE = 20;
-const AGREEMENT_MAX = 0.7;
 const STYLE2_L3_ANCHOR_ID = 'external-style2-l3';
 
 interface FingerprintProbe {
@@ -219,11 +239,21 @@ interface FingerprintProbe {
 }
 
 /**
- * Walk heuristic-vs-heuristic games and count how often L3 and L2 would pick
- * the same encoded choice. Only the heuristic's choice is ever applied, so
- * neither probed bot steers the trajectory toward its own comfortable states.
+ * Walk heuristic-vs-heuristic games and count how often `botAFactory` and
+ * `botBFactory` would pick the same encoded choice at each decision point.
+ * Only the heuristic driver's own choice is ever applied to advance the
+ * game, so neither probed bot steers the trajectory toward its own
+ * comfortable states — both are probed on an identical, style-neutral state
+ * distribution. Generalized (per docs/adr/0015) so the same protocol can
+ * measure both l3Gate2's agreement (L3 vs L2) and the calibration floor
+ * (plain heuristic vs L2).
  */
-function probeFingerprintAgreement(probeSeeds: readonly number[], botSeedBase: number): FingerprintProbe {
+function probeFingerprintAgreement(
+  probeSeeds: readonly number[],
+  botSeedBase: number,
+  botAFactory: BotFactory<WingspanObservation, WingspanChoice>,
+  botBFactory: BotFactory<WingspanObservation, WingspanChoice>,
+): FingerprintProbe {
   const heuristic = wingspanAdapter.baselines.heuristic;
   let decisionPoints = 0;
   let agreements = 0;
@@ -231,8 +261,8 @@ function probeFingerprintAgreement(probeSeeds: readonly number[], botSeedBase: n
   for (const seed of probeSeeds) {
     const botSeed = botSeedBase + seed;
     const driver = heuristic(botSeed);
-    const l3 = wingspanEngineBot(botSeed);
-    const l2 = wingspanOpusBot(botSeed);
+    const botA = botAFactory(botSeed);
+    const botB = botBFactory(botSeed);
 
     let state = wingspanAdapter.createInitialState(seed);
     let decision = wingspanAdapter.currentDecision(state);
@@ -241,9 +271,9 @@ function probeFingerprintAgreement(probeSeeds: readonly number[], botSeedBase: n
       const legal = wingspanAdapter.getLegalChoices(state);
 
       decisionPoints += 1;
-      const l3Choice = wingspanAdapter.encodeChoice(l3.decide(decision.decisionPoint, observation, legal));
-      const l2Choice = wingspanAdapter.encodeChoice(l2.decide(decision.decisionPoint, observation, legal));
-      if (l3Choice === l2Choice) agreements += 1;
+      const aChoice = wingspanAdapter.encodeChoice(botA.decide(decision.decisionPoint, observation, legal));
+      const bChoice = wingspanAdapter.encodeChoice(botB.decide(decision.decisionPoint, observation, legal));
+      if (aChoice === bChoice) agreements += 1;
 
       state = wingspanAdapter.applyChoice(state, driver.decide(decision.decisionPoint, observation, legal));
       decision = wingspanAdapter.currentDecision(state);
@@ -277,11 +307,32 @@ function runL3Gate(): void {
     `     winRate=${pct(gate1.candidateWinRate)} CI=${ci(gate1)} blocks=${gate1.blocks} -> ${gate1Pass ? 'PASS' : 'FAIL'} (need CI lower > 0.5)`,
   );
 
-  console.log(`  Gate 2) L3 vs L2 fingerprint distance (heuristic self-play probe, ${N_L3_PROBE} seeds) ...`);
-  const probe = probeFingerprintAgreement(seeds(SEED_BASE_L3_GATE2, N_L3_PROBE), BOT_SEED_BASE_L3.gate2);
-  const gate2Pass = probe.agreementRate < AGREEMENT_MAX;
+  console.log(`  Gate 2) L3 vs L2 fingerprint distance (heuristic self-play probe, ${N_L3_PROBE} seeds, calibrated per docs/adr/0015) ...`);
+  const probe = probeFingerprintAgreement(
+    seeds(SEED_BASE_L3_GATE2, N_L3_PROBE),
+    BOT_SEED_BASE_L3.gate2,
+    wingspanEngineBot,
+    wingspanOpusBot,
+  );
   console.log(
-    `     agreementRate=${pct(probe.agreementRate)} (${probe.agreements}/${probe.decisionPoints} decision points, ${probe.games} games) -> ${gate2Pass ? 'PASS' : 'FAIL'} (need < ${pct(AGREEMENT_MAX)})`,
+    `     agreement(L3,L2)=${pct(probe.agreementRate)} (${probe.agreements}/${probe.decisionPoints} decision points, ${probe.games} games)`,
+  );
+
+  console.log(`  Gate 2 floor) heuristic vs L2 (SAME seeds/decision points as above — this game's natural agreement floor) ...`);
+  const floorProbe = probeFingerprintAgreement(
+    seeds(SEED_BASE_L3_GATE2, N_L3_PROBE),
+    BOT_SEED_BASE_L3.floorProbe,
+    wingspanAdapter.baselines.heuristic,
+    wingspanOpusBot,
+  );
+  console.log(
+    `     agreement(heuristic,L2)=${pct(floorProbe.agreementRate)} (${floorProbe.agreements}/${floorProbe.decisionPoints} decision points, ${floorProbe.games} games)`,
+  );
+
+  const gateResult: FingerprintGateResult = evaluateFingerprintGate(probe.agreementRate, floorProbe.agreementRate);
+  const gate2Pass = gateResult.pass;
+  console.log(
+    `     verdict: ${gateResult.fastPass ? `fast-pass (agreement < 70%)` : `calibrated (excess=${pct(gateResult.excess)}, need < 50%)`} -> ${gate2Pass ? 'PASS' : 'FAIL'}`,
   );
 
   const bothPass = gate1Pass && gate2Pass;
@@ -321,11 +372,17 @@ function runL3Gate(): void {
       criterion: 'winRateCI.lower > 0.5',
     },
     l3Gate2: {
-      ...probe,
+      agreement: probe,
       seedBase: SEED_BASE_L3_GATE2,
       botSeedBase: BOT_SEED_BASE_L3.gate2,
+      floor: {
+        ...floorProbe,
+        botSeedBase: BOT_SEED_BASE_L3.floorProbe,
+        note: 'agreement(heuristic,L2) over the SAME seeds/decision points as agreement(L3,L2) — this game\'s natural agreement floor per docs/adr/0015.',
+      },
+      gate: gateResult,
       pass: gate2Pass,
-      criterion: `agreementRate < ${AGREEMENT_MAX}`,
+      criterion: 'evaluateFingerprintGate(agreement(L3,L2), floor) per docs/adr/0015 — fast-pass if agreement<0.7, else excess=(agreement-floor)/(1-floor)<0.5',
     },
     l3Registered: registered ? [STYLE2_L3_ANCHOR_ID] : [],
     l3Skipped: skipped ? [STYLE2_L3_ANCHOR_ID] : [],

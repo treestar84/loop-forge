@@ -778,6 +778,122 @@ const assassinTargetMostTrusted: StrategyFlagSpec<AvalonObservation, AvalonChoic
   },
 };
 
+/**
+ * Per-seat suspicion score, recomputed fresh from `observation.proposals` /
+ * `observation.missions` on every call (A8 domain redesign card — GAP-12
+ * §7). Unlike the other three strategySurface flags (each a single-decision
+ * override), this accumulates a Bayesian-flavored signal across the whole
+ * game's public history and uses it at two decision points.
+ *
+ * Investigation note (per the design brief): `AvalonObservation` already
+ * carries the full public history needed here — `proposals` includes every
+ * resolved proposal (approved or rejected) with each seat's revealed vote,
+ * and `missions` includes each resolved mission's team and success/fail
+ * outcome (see the type's field comments above). Because an approved
+ * proposal always transitions straight to its mission with no other
+ * proposal in between, `proposals.filter(p => p.approved)` zips 1:1, in
+ * order, with `missions`. So this is a pure function of the observation
+ * already handed to `decide` at each call — no bot-closure state needed;
+ * the "reconstruct from decide() call sequence" fallback the brief
+ * anticipated turned out to be unnecessary.
+ *
+ * Score update per resolved (approved proposal, mission) pair, for every
+ * seat:
+ *   - voted approve on that proposal: mission failed -> +2.0, succeeded -> -0.5
+ *   - voted reject on that proposal (i.e. in the minority, since the
+ *     proposal still passed): mission succeeded -> +0.5 (weak reverse
+ *     signal for having doubted a good team), mission failed -> +0 (the
+ *     doubt was justified, no penalty)
+ *   - was on the mission team: mission failed -> additional +1.5
+ * Starts at 0, unclamped (only relative comparisons are used).
+ */
+function computeSuspicionScores(observation: AvalonObservation): number[] {
+  const scores = [0, 0, 0, 0, 0];
+  const approvedProposals = observation.proposals.filter((p) => p.approved);
+  approvedProposals.forEach((proposal, i) => {
+    const mission = observation.missions[i];
+    if (mission === undefined) return;
+    for (const seat of ALL_SEATS) {
+      const votedApprove = proposal.votes[seat] === true;
+      const current = scores[seat] as number;
+      if (votedApprove) {
+        scores[seat] = current + (mission.success ? -0.5 : 2.0);
+      } else if (mission.success) {
+        scores[seat] = current + 0.5;
+      }
+      if (mission.team.includes(seat) && !mission.success) {
+        scores[seat] = (scores[seat] as number) + 1.5;
+      }
+    }
+  });
+  return scores;
+}
+
+/** True for the two good-aligned roles this flag applies to (merlin, servant). */
+function isGoodRole(role: Role): boolean {
+  return role === 'merlin' || role === 'servant';
+}
+
+/** Strategy flag: effective (GAP-12 §7 A8 card). Good-aligned players (merlin,
+ * servant) track a per-seat suspicion score derived from the public
+ * proposal-vote/mission-outcome history (see computeSuspicionScores above)
+ * and use it at two decision points — evil already knows who's evil, so
+ * this flag is a no-op for evil roles (delegates straight to base):
+ *   - proposeTeam: when leading, includes self plus the lowest-suspicion
+ *     other seats needed to fill the team; if the seats at the selection
+ *     boundary are tied on score, delegates to base instead of guessing.
+ *   - vote: rejects the proposed team when its suspicion-score sum exceeds
+ *     1.5x the game-wide average suspicion times the team size; otherwise
+ *     delegates to base. */
+const avalonSuspicionTracking: StrategyFlagSpec<AvalonObservation, AvalonChoice> = {
+  flag: 'avalonSuspicionTracking',
+  description:
+    'Good-aligned players (merlin, servant) track a per-seat suspicion score from public vote/mission history and use it to pick low-suspicion teams when leading and to reject high-suspicion proposed teams when voting; no-op for evil roles.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'avalonSuspicionTracking'),
+        decide(decisionPoint, observation, legal) {
+          if (isGoodRole(observation.role)) {
+            if (decisionPoint === 'proposeTeam') {
+              const teams = legal as ProposeTeamChoice[];
+              const size = (teams[0] as ProposeTeamChoice).team.length;
+              const neededOthers = size - 1;
+              const scores = computeSuspicionScores(observation);
+              const others = ALL_SEATS.filter((seat) => seat !== observation.self).sort(
+                (a, b) => (scores[a] as number) - (scores[b] as number),
+              );
+              if (neededOthers >= 0 && neededOthers <= others.length) {
+                const boundaryScore = neededOthers > 0 ? scores[others[neededOthers - 1] as PlayerId] : undefined;
+                const nextScore = neededOthers < others.length ? scores[others[neededOthers] as PlayerId] : undefined;
+                const tied = boundaryScore !== undefined && nextScore !== undefined && boundaryScore === nextScore;
+                if (!tied) {
+                  const selected = [observation.self, ...others.slice(0, neededOthers)].sort((a, b) => a - b);
+                  const key = encodeChoice({ kind: 'proposeTeam', team: selected });
+                  const match = teams.find((c) => encodeChoice(c) === key);
+                  if (match) return match;
+                }
+              }
+            } else if (decisionPoint === 'vote' && observation.pendingTeam !== null) {
+              const team = observation.pendingTeam;
+              const scores = computeSuspicionScores(observation);
+              const avg = scores.reduce((sum, s) => sum + s, 0) / ALL_SEATS.length;
+              const teamSum = team.reduce((sum, seat) => sum + (scores[seat] as number), 0);
+              const threshold = avg * team.length * 1.5;
+              if (teamSum > threshold) {
+                const reject = (legal as VoteChoice[]).find((c) => !c.approve);
+                if (reject) return reject;
+              }
+            }
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by actually running this adapter's own
 // random-vs-random self-play (see src/reference/__tests__/avalon.test.ts's
@@ -889,7 +1005,7 @@ export const avalonAdapter: GameAdapter<AvalonState, AvalonObservation, AvalonCh
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [merlinCamouflage, evilDelayedFail, assassinTargetMostTrusted],
+  strategySurface: [merlinCamouflage, evilDelayedFail, assassinTargetMostTrusted, avalonSuspicionTracking],
 };
 
 export { seatsWithRole, combinations };

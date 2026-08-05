@@ -1154,3 +1154,175 @@ challenge-l2/payload.json` 부재)를 스캔하다 ENOENT로 실패 — janggi �
    L1/L2/L3 challenge를 스코프 밖에 뒤 "첫 채택" 자체만 목표로 했다.
    v2가 나온 지금은 스플랜더·윙스팬처럼 외부 스타일 앵커를 붙여 L1/L2
    트리거를 시도해볼 준비가 됐다(장기 전용 온보딩 그룹으로 별도 카드화).
+
+## 아발론 A8 첫 채택 시도
+
+배경: 아발론은 채택 후보 0개(registry v1뿐, 기존 3개 플래그
+merlinCamouflage·evilDelayedFail·assassinTargetMostTrusted 전부
+screened-out/failed). GAP-12 §7이 지목한 다음 카드: 투표 이력 기반 베이지안
+의심도 추적("suspicionTracking") — 은닉정보 게임 전용 A8, 장기의
+평가함수형 성공(단일 전술 오버라이드 → 전 국면 정보 축적형)과 같은 원리를
+숨은 진영 게임에 적용하는 시도. 메인 루프가 작성한 설계 브리프
+(`scratchpad/avalon-a8-first-adoption-design-spec.md`)를 그대로 구현.
+
+### 관찰 재구성 가능 여부 — 브리프가 먼저 확인하라고 지시한 항목
+
+브리프는 "과거 투표/미션 이력이 관찰에 없을 가능성이 높으니 봇 클로저
+상태로 직접 누적하라"를 전제로 깔았지만, `src/reference/avalon.ts`의
+`AvalonObservation` 타입(138~154번 줄)을 먼저 읽어 확인한 결과 **이미
+전부 들어있었다**:
+
+- `proposals: readonly ProposalRecord[]` — 게임 시작부터 지금까지의 모든
+  "이미 종결된"(승인이든 거부든) 제안 전체, 각 제안마다 `votes: readonly
+  boolean[]`(좌석별 공개 투표 결과)와 `approved: boolean`을 포함.
+- `missions: readonly MissionRecord[]` — 종결된 미션마다 `team`, `success`
+  (실패 카드를 누가 냈는지는 영구 비공개지만, 팀 구성과 성공/실패 여부는
+  공개).
+- 상태 기계 불변식 확인: 제안이 승인되면 phase가 곧장 `'mission'`으로
+  넘어가고 그 미션이 끝나야만 다음 제안이 생기므로,
+  `proposals.filter(p => p.approved)`는 항상 `missions`와 정확히 1:1로,
+  순서대로 zip된다(`applyVote`/`applyMissionCard`의 phase 전이 코드로
+  검증).
+
+결론: 브리프가 예상한 "봇 클로저 내부 상태로 직접 누적" 폴백은
+**불필요했다** — `computeSuspicionScores(observation)`을 매 `decide()`
+호출마다 관찰에서 그대로 재계산하는 순수 함수로 구현(상태 없음, 시드별
+봇 인스턴스 클로저에 아무것도 저장하지 않음). 장기 A8과 달리 이 게임은
+"관찰이 이력을 안 준다"는 우려가 실제로는 기우였던 사례.
+
+### 구현 — `avalonSuspicionTracking` (기존 3개 플래그 그대로 유지)
+
+브리프의 산식을 그대로 코드화(`src/reference/avalon.ts`
+`computeSuspicionScores`/`avalonSuspicionTracking`, 약 790~915번 줄):
+
+- 매 (승인된 제안, 그 결과 미션) 쌍마다 전 좌석에 대해:
+  - 그 제안에 찬성(approve) 투표: 미션 실패 시 `+2.0`, 성공 시 `-0.5`.
+  - 그 제안에 반대(reject) 투표(그런데도 다수결로 승인됨): 미션 성공 시
+    `+0.5`(불필요한 의심에 대한 약한 역신호), 실패 시 변화 없음(정당한
+    의심).
+  - 미션 팀에 실제로 있었던 좌석: 실패 시 추가 `+1.5`.
+  - 초기값 0, 클램프 없음(상대 비교만 사용).
+- 선(good) 진영(merlin·servant)에만 적용, 악 진영은 완전 no-op(이미
+  누가 적인지 알므로 의심도 추적이 무의미 — base에 그대로 위임).
+- 팀 제안 시(자신이 리더일 때): 자기 자신은 항상 포함, 나머지는
+  의심도 오름차순으로 필요 인원만큼 선발. 선발 경계에서 동점이 나오면
+  (마지막으로 뽑히는 좌석과 그다음 좌석의 점수가 같으면) base에 위임
+  — 임의로 동점을 깨지 않음.
+- 투표 시: 제안된 팀의 의심도 합이 "전체 평균 의심도 × 팀 인원수 ×
+  1.5"를 초과하면 거부, 아니면 base에 위임.
+
+### C6 재채점
+
+온보딩 재채점(conformance) 결과, C6-strategy-surface가 67점(2/3 플래그
+행동 구별)에서 **75점(3/4 플래그 행동 구별)으로 상승**. 로그:
+
+```
+C6-strategy-surface: score=75
+  note: 3/4 strategySurface flag(s) are behaviorally distinct.
+  note: "assassinTargetMostTrusted" produced no observable behavior change across probe seeds (no-op).
+```
+
+`avalonSuspicionTracking`은 확률 프로브 시드에서 행동 구별에 성공(no-op
+아님) — 기존에 no-op이던 `assassinTargetMostTrusted`는 여전히 no-op으로
+남음(이번 카드의 스코프 밖, 별도 카드 대상). 전체 conformance는 여전히
+60점 그대로(C7-parity가 self-play 재현성 캡 60점에 걸려 있어 이 축이
+병목 — avalonSuspicionTracking과 무관, 원본 게임 리플레이 증거 없음 문제).
+
+### C4 처리량 확인 (5배 한도 점검)
+
+`avalonSuspicionTracking` 대 base(heuristic) 300게임 head-to-head 실측
+(fresh seeds 950000-950299, botSeedBase 960000):
+
+| 구성 | 소요시간 |
+|---|---|
+| base(heuristic vs heuristic) | 77ms |
+| avalonSuspicionTracking vs heuristic | 51ms |
+| 비율 | **0.66x**(오히려 더 빠름, 측정 잡음 범위) |
+
+5배 한도에 전혀 걸리지 않음(장기 A8처럼 근사로 낮출 필요 없음) — 매
+`decide()` 호출마다 최대 5×5 규모의 배열 순회만 하는 O(제안 수) 연산이라
+비용이 사실상 무시할 만한 수준.
+
+### 웨이브 실측 (`scratchpad/avalon-a8-first-adoption-design-spec.md` 절차
+그대로, 신규 러너 `src/reference/runners/avalon-a8.ts`)
+
+기존 avalon 러너들(`avalon.ts`: screenProbe 시드 1-3/botSeedBase 100,
+smoke 뱅크 1-~90, prune 1000-1029, holdout 2000-2029, 캘리브레이션
+identitySeeds 700000-700099/시드 42/600000; `avalon-benchmark.ts`: 시드
+50000-51999/botSeedBase 800001-800003)와 겹치지 않는 신규 뱅크로 발주:
+screenProbe 시드 900001-900003/botSeedBase 900100, 캘리브레이션
+identitySeeds 904000-904099/시드 43/905000, `avalon-a8-smoke`
+(910000-910014, maxBlocks=15, SPRT p0=0.5/p1=0.6/α=β=0.1),
+`avalon-a8-prune`(920000-920004, 5블록), `avalon-a8-holdout`
+(930000-930004, 5블록). regression 티어는 별도 구성 없음 — `regression=v1`
+취지대로 v1(플래그 0개, heuristic과 동일)을 상대로 그대로 비교. 상대는
+heuristic.
+
+캘리브레이션: identity self-play(heuristic vs heuristic, 100 시드)
+meanWinRate=0.2050, blockStdDev=0.0330 → 권장 블록수 4(클램프 후 5) →
+smokeMaxBlocks=15.
+
+| 티어 | 승률(pointWinRate) | scoreDiff | 블록(게임) | drawRate | 통과 |
+|---|---|---|---|---|---|
+| screen | (프로브만, 행동 구별 확인 — 위 C6 참고) | — | — | — | ✅ |
+| smoke | **20.0%** | 0 | 15 (30게임) | 0% | ❌ |
+| prune | (미도달) | — | — | — | — |
+| holdout | (미도달) | — | — | — | — |
+
+smoke 티어에서 SPRT가 15블록(=smokeMaxBlocks 상한) 만에 기각 방향으로
+종결 — `avalonSuspicionTracking`을 켠 후보 봇이 base(heuristic) 상대
+paired 승률 20.0%로, p0=0.5 기준선에 한참 못 미쳐 조기 기각. near-miss
+후보 없음(`runs/avalon/near-miss-a8.json` = `[]`).
+
+### 최종 판정: **failed** (실패, 숫자 그대로 기록)
+
+장기 A8과 달리 이번 첫 시도는 실패했다. 원인 추정(사후 분석, 스코프
+밖의 추가 튜닝은 하지 않음):
+
+1. **팀 제안 로직이 스스로를 배신할 수 있다**: 의심도가 낮은 좌석을
+   골라 팀을 짜는 것 자체는 합리적이지만, 게임 초반(의심도가 전부 0에
+   가까운 구간)에는 사실상 무작위 선택과 다르지 않고, 산식이 "실패한
+   미션에 참가만 해도 벌점"을 주기 때문에 결백한 좌석도 불운하게 실패
+   미션에 여러 번 끼면 의심도가 누적돼 이후 라운드에서 부당하게
+   배제된다 — 특히 멀린 시야가 없는 servant 입장에서는 이 노이즈를
+   구별할 정보가 아예 없다.
+2. **투표 거부 임계값(평균×인원×1.5)이 5인전 소규모 표본에서 너무
+   느슨하거나 너무 빡빡하게 작동할 여지**: 미션이 최대 5번뿐이라
+   의심도가 통계적으로 유의미하게 벌어지기 전에 게임이 끝나는 경우가
+   많다 — 특히 3승만 하면 끝나는 선 진영 입장에서 표본이 절대적으로
+   부족.
+3. base heuristic이 이미 완전정보(멀린) 또는 팀 침투 신호(악 진영)를
+   쓰는 상황에서, 정보가 없는 servant에게만 추가된 근사 신호가 오히려
+   "다음 시작 좌석부터 순서대로" 같은 heuristic의 결정론적 기본 전략보다
+   나쁜 잡음을 만들었을 가능성 — servant는 이 게임에서 원래 정보가
+   없는 역할이라 근사 신호의 신호 대 잡음비가 가장 취약하다.
+
+`runs/avalon/registry.json`은 v1 그대로(승격 없음). `runs/avalon/
+ledger.json`에 `a8-wave-1` adoption record 추가(entries[0].verdict=
+"failed"). 요약 문서(`runs/avalon/summary.md`) 재렌더는 공유 `runs/`
+디렉터리에 존재하는 무관한 손상 파일(`runs/dominion/challenge-l2/
+payload.json` 부재 — 이 세션과 무관하게 이미 그 상태였음, 동시 실행
+중인 다른 게임 에이전트 산출물)을 `RunStore.listRuns()`가 전체
+스캔하다 ENOENT로 실패 — avalon 자체 산출물(registry/ledger/near-miss/
+conformance/wave report)은 전부 정상 저장됐고, 이 실패는 avalon 웨이브
+결과와 무관한 동시성 문제라 재시도하지 않음(장기 A8 카드에서도 동일
+증상 기록됨 — `runs/dominion/challenge-l2/`가 아직 복구되지 않은 채로
+공유 디렉터리에 남아 있는 것으로 보임).
+
+### 다음 카드 제안
+
+1. **팀 제안 로직만 분리 재시도(선택적)**: 이번 실패의 핵심 용의자는
+   투표 거부 임계값(1.5배)의 5인전 소표본 취약성이다 — 팀 제안 로직만
+   남기고 투표 개입은 빼서(base 위임) 별도로 스모크를 돌려보면 두 개입
+   지점 중 어느 쪽이 실제 손실 원인인지 분리할 수 있다.
+2. **참가 벌점(+1.5) 제거 또는 축소 재시도(선택적)**: "실패한 미션에
+   있기만 해도 벌점"이 결백한 좌석을 오염시키는 주범일 가능성이 있다
+   — 참가 벌점 항만 0으로 낮춘 변형을 근접실패 후보로 스모크 재시도.
+3. **악 진영 전용 대칭 카드**: 이번 카드는 브리프 지시대로 선 진영에만
+   적용했다. 악 진영은 이미 서로를 알지만, "선 진영이 얼마나 의심하고
+   있는지"를 투표 패턴에서 역으로 추정해 은신 전략에 반영하는 대칭
+   카드는 아직 시도된 적 없다 — GAP-12 §7의 다음 후보로 남겨둔다.
+4. **assassinTargetMostTrusted no-op 원인 조사**: 이번 재채점에서도
+   여전히 no-op으로 남은 기존 플래그 — A8과 별개로, 왜 프로브 시드에서
+   행동 차이가 관측되지 않는지(제안 이력이 비어있는 초반 프로브 시드라서
+   그런지, 로직 자체 결함인지) 별도로 진단할 가치가 있다.

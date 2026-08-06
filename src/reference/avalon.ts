@@ -894,6 +894,210 @@ const avalonSuspicionTracking: StrategyFlagSpec<AvalonObservation, AvalonChoice>
   },
 };
 
+/**
+ * Score update per resolved (approved proposal, mission) pair, for every
+ * seat — identical to {@link computeSuspicionScores} EXCEPT the mission-team
+ * participation penalty (+1.5 on failure for seats that were actually on
+ * the team) is omitted. Used by `avalonSuspicionVoteOnly` to isolate
+ * hypothesis (1) from the A8 2nd-attempt design brief: does the
+ * participation penalty poison innocent servants who simply got assigned to
+ * a failing team, independent of how they voted?
+ *   - voted approve on that proposal: mission failed -> +2.0, succeeded -> -0.5
+ *   - voted reject on that proposal (in the minority, since it still
+ *     passed): mission succeeded -> +0.5, mission failed -> +0
+ * Starts at 0, unclamped.
+ */
+function computeSuspicionScoresVoteOnly(observation: AvalonObservation): number[] {
+  const scores = [0, 0, 0, 0, 0];
+  const approvedProposals = observation.proposals.filter((p) => p.approved);
+  approvedProposals.forEach((proposal, i) => {
+    const mission = observation.missions[i];
+    if (mission === undefined) return;
+    for (const seat of ALL_SEATS) {
+      const votedApprove = proposal.votes[seat] === true;
+      const current = scores[seat] as number;
+      if (votedApprove) {
+        scores[seat] = current + (mission.success ? -0.5 : 2.0);
+      } else if (mission.success) {
+        scores[seat] = current + 0.5;
+      }
+    }
+  });
+  return scores;
+}
+
+/** True only for servant (excludes merlin) — used by
+ * `avalonSuspicionGoodOnly` to isolate hypothesis (3): is the suspicion
+ * mechanism wasted/harmful on merlin, who already has certain information
+ * about who's evil and gains nothing from a derived signal? */
+function isServantOnly(role: Role): boolean {
+  return role === 'servant';
+}
+
+/** Strategy flag: candidate (A8 2nd-attempt design brief, hypothesis ①
+ * isolation — GAP-11-ROUNDS.md "아발론 A8 첫 채택 시도"). Identical to
+ * `avalonSuspicionTracking` at both decision points (proposeTeam: pick
+ * lowest-suspicion team when leading; vote: reject a proposed team whose
+ * suspicion sum exceeds 1.5x the game-wide average times team size) EXCEPT
+ * the scores come from `computeSuspicionScoresVoteOnly`, which drops the
+ * mission-team participation penalty entirely — only approve/reject-vote
+ * outcomes move a seat's score. If this recovers where the original failed,
+ * hypothesis ① (participation penalty poisons innocent servants) is
+ * supported; if it still fails, ① is not the (sole) cause. */
+const avalonSuspicionVoteOnly: StrategyFlagSpec<AvalonObservation, AvalonChoice> = {
+  flag: 'avalonSuspicionVoteOnly',
+  description:
+    'Same as avalonSuspicionTracking (pick low-suspicion teams when leading, reject high-suspicion proposed teams when voting) but the underlying suspicion score drops the mission-team participation penalty — only approve/reject-vote outcomes move a score. Isolates whether the participation penalty was the cause of the original flag\'s smoke failure.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'avalonSuspicionVoteOnly'),
+        decide(decisionPoint, observation, legal) {
+          if (isGoodRole(observation.role)) {
+            if (decisionPoint === 'proposeTeam') {
+              const teams = legal as ProposeTeamChoice[];
+              const size = (teams[0] as ProposeTeamChoice).team.length;
+              const neededOthers = size - 1;
+              const scores = computeSuspicionScoresVoteOnly(observation);
+              const others = ALL_SEATS.filter((seat) => seat !== observation.self).sort(
+                (a, b) => (scores[a] as number) - (scores[b] as number),
+              );
+              if (neededOthers >= 0 && neededOthers <= others.length) {
+                const boundaryScore = neededOthers > 0 ? scores[others[neededOthers - 1] as PlayerId] : undefined;
+                const nextScore = neededOthers < others.length ? scores[others[neededOthers] as PlayerId] : undefined;
+                const tied = boundaryScore !== undefined && nextScore !== undefined && boundaryScore === nextScore;
+                if (!tied) {
+                  const selected = [observation.self, ...others.slice(0, neededOthers)].sort((a, b) => a - b);
+                  const key = encodeChoice({ kind: 'proposeTeam', team: selected });
+                  const match = teams.find((c) => encodeChoice(c) === key);
+                  if (match) return match;
+                }
+              }
+            } else if (decisionPoint === 'vote' && observation.pendingTeam !== null) {
+              const team = observation.pendingTeam;
+              const scores = computeSuspicionScoresVoteOnly(observation);
+              const avg = scores.reduce((sum, s) => sum + s, 0) / ALL_SEATS.length;
+              const teamSum = team.reduce((sum, seat) => sum + (scores[seat] as number), 0);
+              const threshold = avg * team.length * 1.5;
+              if (teamSum > threshold) {
+                const reject = (legal as VoteChoice[]).find((c) => !c.approve);
+                if (reject) return reject;
+              }
+            }
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
+/** Strategy flag: candidate (A8 2nd-attempt design brief, decision-point
+ * isolation). Uses the full `computeSuspicionScores` (participation penalty
+ * included) but ONLY at the proposeTeam decision point — picks the
+ * lowest-suspicion team when leading, exactly as `avalonSuspicionTracking`
+ * does. The vote decision point is entirely removed: this flag never
+ * overrides a vote, always delegating straight to base. Isolates whether
+ * the vote-rejection heuristic (reject when a proposed team's suspicion sum
+ * exceeds 1.5x the average) was the decision point causing the original
+ * flag's smoke failure, independent of the proposal-side heuristic. */
+const avalonSuspicionProposalOnly: StrategyFlagSpec<AvalonObservation, AvalonChoice> = {
+  flag: 'avalonSuspicionProposalOnly',
+  description:
+    'Like avalonSuspicionTracking but only at the proposeTeam decision point (pick low-suspicion teams when leading); the vote decision point is removed entirely and always delegates to base. Isolates whether the vote-rejection heuristic was the cause of the original flag\'s smoke failure.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'avalonSuspicionProposalOnly'),
+        decide(decisionPoint, observation, legal) {
+          if (isGoodRole(observation.role) && decisionPoint === 'proposeTeam') {
+            const teams = legal as ProposeTeamChoice[];
+            const size = (teams[0] as ProposeTeamChoice).team.length;
+            const neededOthers = size - 1;
+            const scores = computeSuspicionScores(observation);
+            const others = ALL_SEATS.filter((seat) => seat !== observation.self).sort(
+              (a, b) => (scores[a] as number) - (scores[b] as number),
+            );
+            if (neededOthers >= 0 && neededOthers <= others.length) {
+              const boundaryScore = neededOthers > 0 ? scores[others[neededOthers - 1] as PlayerId] : undefined;
+              const nextScore = neededOthers < others.length ? scores[others[neededOthers] as PlayerId] : undefined;
+              const tied = boundaryScore !== undefined && nextScore !== undefined && boundaryScore === nextScore;
+              if (!tied) {
+                const selected = [observation.self, ...others.slice(0, neededOthers)].sort((a, b) => a - b);
+                const key = encodeChoice({ kind: 'proposeTeam', team: selected });
+                const match = teams.find((c) => encodeChoice(c) === key);
+                if (match) return match;
+              }
+            }
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
+/** Strategy flag: candidate (A8 2nd-attempt design brief, hypothesis ③
+ * isolation). Identical to `avalonSuspicionTracking` in every respect
+ * (full `computeSuspicionScores` with participation penalty, both
+ * proposeTeam and vote decision points) EXCEPT the good-role gate is
+ * narrowed from `isGoodRole` (merlin + servant) to `isServantOnly`
+ * (servant alone) — merlin, who already has certain information about who
+ * is evil, no longer runs the suspicion heuristic and always delegates to
+ * base. If this recovers where the original failed, hypothesis ③ (the
+ * mechanism is wasted or actively harmful on merlin, who has no need for a
+ * derived signal) is supported. */
+const avalonSuspicionGoodOnly: StrategyFlagSpec<AvalonObservation, AvalonChoice> = {
+  flag: 'avalonSuspicionGoodOnly',
+  description:
+    'Same as avalonSuspicionTracking (full score with participation penalty, both proposeTeam and vote decision points) but the suspicion heuristic applies to servant only, not merlin — merlin always delegates to base. Isolates whether applying the mechanism to merlin (who already has certain evil-seat information) was the cause of the original flag\'s smoke failure.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'avalonSuspicionGoodOnly'),
+        decide(decisionPoint, observation, legal) {
+          if (isServantOnly(observation.role)) {
+            if (decisionPoint === 'proposeTeam') {
+              const teams = legal as ProposeTeamChoice[];
+              const size = (teams[0] as ProposeTeamChoice).team.length;
+              const neededOthers = size - 1;
+              const scores = computeSuspicionScores(observation);
+              const others = ALL_SEATS.filter((seat) => seat !== observation.self).sort(
+                (a, b) => (scores[a] as number) - (scores[b] as number),
+              );
+              if (neededOthers >= 0 && neededOthers <= others.length) {
+                const boundaryScore = neededOthers > 0 ? scores[others[neededOthers - 1] as PlayerId] : undefined;
+                const nextScore = neededOthers < others.length ? scores[others[neededOthers] as PlayerId] : undefined;
+                const tied = boundaryScore !== undefined && nextScore !== undefined && boundaryScore === nextScore;
+                if (!tied) {
+                  const selected = [observation.self, ...others.slice(0, neededOthers)].sort((a, b) => a - b);
+                  const key = encodeChoice({ kind: 'proposeTeam', team: selected });
+                  const match = teams.find((c) => encodeChoice(c) === key);
+                  if (match) return match;
+                }
+              }
+            } else if (decisionPoint === 'vote' && observation.pendingTeam !== null) {
+              const team = observation.pendingTeam;
+              const scores = computeSuspicionScores(observation);
+              const avg = scores.reduce((sum, s) => sum + s, 0) / ALL_SEATS.length;
+              const teamSum = team.reduce((sum, seat) => sum + (scores[seat] as number), 0);
+              const threshold = avg * team.length * 1.5;
+              if (teamSum > threshold) {
+                const reject = (legal as VoteChoice[]).find((c) => !c.approve);
+                if (reject) return reject;
+              }
+            }
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by actually running this adapter's own
 // random-vs-random self-play (see src/reference/__tests__/avalon.test.ts's
@@ -1005,7 +1209,15 @@ export const avalonAdapter: GameAdapter<AvalonState, AvalonObservation, AvalonCh
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [merlinCamouflage, evilDelayedFail, assassinTargetMostTrusted, avalonSuspicionTracking],
+  strategySurface: [
+    merlinCamouflage,
+    evilDelayedFail,
+    assassinTargetMostTrusted,
+    avalonSuspicionTracking,
+    avalonSuspicionVoteOnly,
+    avalonSuspicionProposalOnly,
+    avalonSuspicionGoodOnly,
+  ],
 };
 
 export { seatsWithRole, combinations };

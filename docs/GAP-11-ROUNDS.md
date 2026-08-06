@@ -1326,3 +1326,118 @@ conformance/wave report)은 전부 정상 저장됐고, 이 실패는 avalon 웨
    여전히 no-op으로 남은 기존 플래그 — A8과 별개로, 왜 프로브 시드에서
    행동 차이가 관측되지 않는지(제안 이력이 비어있는 초반 프로브 시드라서
    그런지, 로직 자체 결함인지) 별도로 진단할 가치가 있다.
+
+## 아발론 A8 2차 시도(원인 분리)
+
+배경: 1차(`avalonSuspicionTracking`) smoke 20.0%로 SPRT 기각(위 절). 사후
+분석에서 세 가설을 세웠다: ① 참가 페널티(+1.5)가 결백한 서번트를
+오염시킴, ② 미션이 최대 5회뿐이라 의심도가 통계적으로 유의미해지기 전에
+게임이 끝남, ③ 이미 정보가 있는 역할(멀린)에는 의심도 신호가 무의미하거나
+해로움. 이번 라운드는 새 설계가 아니라 **1차 메커니즘을 조각내서 어느
+부분이 손실을 일으켰는지 분리**하는 진단형 라운드다(메인 루프가 작성한
+브리프 `scratchpad/avalon-a8-round2-design-spec.md`를 그대로 구현).
+가설 ②(신호 축적 부족)는 이 메커니즘을 더 잘게 쪼개는 방식으로는 직접
+분리 검증이 안 되는 성격이라(다른 형태의 메커니즘이 필요) 이번 3개
+후보 스코프 밖으로 남겨뒀다.
+
+### 구현 — 3개 후보 (`src/reference/avalon.ts`, `avalonSuspicionTracking`은
+그대로 유지)
+
+1. **`avalonSuspicionVoteOnly`**(가설 ① 분리): `computeSuspicionScores`와
+   동일한 산식이되 미션 팀 참가 페널티(+1.5) 항만 제거한
+   `computeSuspicionScoresVoteOnly`를 사용 — 승인/거부 투표 결과 기반
+   점수만 남기고, proposeTeam/vote 두 결정 지점은 1차와 동일하게 유지.
+2. **`avalonSuspicionProposalOnly`**(결정 지점 분리): 팀 제안(리더일 때
+   저의심도 좌석 선발)에는 전체 산식(`computeSuspicionScores`, 참가
+   페널티 포함)을 그대로 쓰지만, 투표 거부 로직은 완전히 제거 —
+   투표 결정은 항상 base에 위임.
+3. **`avalonSuspicionGoodOnly`**(가설 ③ 분리): 1차 전체 로직(전체 산식 +
+   두 결정 지점) 그대로 유지하되, 적용 대상 가드를 `isGoodRole`(멀린+
+   서번트)에서 `isServantOnly`(서번트만)로 좁힘 — 멀린은 항상 base에
+   위임.
+
+세 후보 모두 `strategySurface` 배열에 추가(`merlinCamouflage,
+evilDelayedFail, assassinTargetMostTrusted, avalonSuspicionTracking,
+avalonSuspicionVoteOnly, avalonSuspicionProposalOnly, avalonSuspicionGoodOnly`
+— 총 7개, 1차 플래그 삭제 없음).
+
+### C6 재채점
+
+```
+C6-strategy-surface: score=86
+  note: 6/7 strategySurface flag(s) are behaviorally distinct.
+  note: "assassinTargetMostTrusted" produced no observable behavior change across probe seeds (no-op).
+```
+
+4개 신규 플래그(2차 3개 + 1차 유지분 포함 총 4개 관심 플래그) 전부 이
+C6 프로브(넓은 시드 샘플)에서 행동 구별에 성공 — 여전히 no-op인 것은
+A8과 무관한 기존 `assassinTargetMostTrusted`뿐. typecheck 0에러, 전체
+테스트(69 suites, 943 tests) 통과 확인 완료.
+
+### 웨이브 실측 (신규 러너 `src/reference/runners/avalon-a8-round2.ts`,
+신규 시드 뱅크)
+
+기존 avalon 러너 3개(`avalon.ts`, `avalon-benchmark.ts`, `avalon-a8.ts`,
+1차 문서 상단 참고) 전부와 겹치지 않는 대역으로 발주(grep으로 사전
+확인): screenProbe 시드 950001-950003/botSeedBase 950100, 캘리브레이션
+identitySeeds 954000-954099/시드 44/955000, `avalon-a8-round2-smoke`
+(960000+), `avalon-a8-round2-prune`(970000+), `avalon-a8-round2-holdout`
+(980000+). regression=v1(플래그 0개) 그대로, 상대는 heuristic. 3후보
+동시에 한 웨이브(`a8-wave-2`)로 발주해 무거운 연산을 1회로 묶었다.
+
+캘리브레이션: identity self-play(heuristic vs heuristic, 100 시드)
+meanWinRate=0.2020, blockStdDev=0.0284 → 권장 블록수 3(클램프 후 5) →
+smokeMaxBlocks=15.
+
+| 후보 | screen | smoke 승률 | smoke 블록(게임) | 판정 |
+|---|---|---|---|---|
+| `avalonSuspicionVoteOnly` | ✅ 통과 | **25.3%** | 15 (30게임) | ❌ failed |
+| `avalonSuspicionProposalOnly` | ❌ 이 프로브 3시드에서 행동 무변화(no-op) | (미도달) | — | ❌ failed |
+| `avalonSuspicionGoodOnly` | ✅ 통과 | **24.7%** | 15 (30게임) | ❌ failed |
+
+근접실패 후보 없음(`runs/avalon/near-miss-a8-round2.json` = `[]`).
+
+`avalonSuspicionProposalOnly`가 screen에서 걸린 것은 C6가 사용한 넓은
+프로브(위에서 "행동 구별 성공"으로 확인됨)와는 별개로, 웨이브 자체의
+좁은 3시드 screenProbe(950001-950003)에서 우연히 base와 동일한 선택이
+나온 경우다 — 표본이 3게임뿐이라 흔한 일이며, 메커니즘 결함이 아니라
+표본 크기 문제로 본다(다른 두 후보처럼 smoke까지 갔다면 유사한 20%대
+승률이었을 것으로 추정하나, 실측하지 않은 값을 채워 넣지는 않는다).
+
+### 가설 판정
+
+- **가설 ①(참가 페널티가 결백한 서번트를 오염) — 기각**:
+  `avalonSuspicionVoteOnly`가 참가 페널티를 완전히 제거했는데도 smoke
+  25.3%로 1차(20.0%)와 통계적으로 구별되지 않는 실패 구간에 그대로
+  남았다. 참가 페널티는 1차 실패의 주범이 아니었다.
+- **가설 ③(멀린에게 무의미/해로운 신호) — 기각**: `avalonSuspicionGoodOnly`가
+  멀린을 완전히 제외했는데도 smoke 24.7%로 마찬가지로 실패 구간에
+  남았다. 멀린 적용이 1차 실패의 주범이 아니었다.
+- **결정 지점 분리(`avalonSuspicionProposalOnly`)**: screen 단계에서
+  표본 부족으로 결론 내리기 부적합(위 설명) — 어느 결정 지점이
+  손실 원인인지는 이번 실측으로 분리하지 못했다.
+- **가설 ②(미션 5회뿐이라 신호 축적 부족)**: 설계상 이 라운드로는 직접
+  분리 검증이 불가능해 스코프 밖으로 남겼다(위 배경 절 참고) — 미검증.
+
+### 최종 판정: **failed × 3** (실패, 숫자 그대로 기록 — 채택 없음)
+
+`runs/avalon/registry.json`은 v1 그대로(승격 없음, 4개 신규 플래그 전부
+`failed`). `runs/avalon/ledger.json`에 `a8-wave-2` adoption record 추가.
+`runs/avalon/summary.md` 재렌더는 이번에도 공유 `runs/` 디렉터리의 무관한
+손상 파일(`runs/dominion/challenge-l2/payload.json` 부재 — 1차 카드에서도
+동일 증상 기록됨, 동시 실행 중인 다른 게임 에이전트 산출물)로 인해
+`RunStore.listRuns()` 전체 스캔이 ENOENT로 실패했으나, avalon 자체
+산출물(registry/ledger/near-miss/conformance/wave report)은 전부 정상
+저장됐고 이 실패는 avalon 결과와 무관하므로 재시도하지 않았다.
+
+**결론**: 참가 페널티 제거(①)와 멀린 제외(③) 둘 다 1차의 근본 실패를
+전혀 완화하지 못했다 — 두 가설 모두 명확히 기각됐고, 남은 결정 지점
+분리 후보(`avalonSuspicionProposalOnly`)마저 이 특정 3시드 프로브에서
+행동을 보여주지 못해 추가 정보를 주지 못했다. "투표/미션 이력 기반
+의심도 축적"이라는 메커니즘 축 자체가 — 참가 페널티 유무, 대상 역할
+범위와 무관하게 — 이 게임에서 heuristic 상대 20~25%대 승률(즉 명백한
+악화)을 벗어나지 못한다는 뜻으로 해석한다. **이 메커니즘 축은 소진됐다
+— 다음 카드는 완전히 다른 축이어야 한다**(예: 투표 이력이 아닌 다른
+관찰 신호를 쓰는 접근, 또는 악 진영 전용 대칭 카드처럼 아예 다른 역할
+군을 대상으로 한 카드 — 1차 문서의 "다음 카드 제안" 3번 참고). 억지로
+3차 시도를 예고하지 않는다(ADR-0009 정신).

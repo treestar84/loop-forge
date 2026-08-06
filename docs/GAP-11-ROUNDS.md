@@ -1441,3 +1441,176 @@ smokeMaxBlocks=15.
 관찰 신호를 쓰는 접근, 또는 악 진영 전용 대칭 카드처럼 아예 다른 역할
 군을 대상으로 한 카드 — 1차 문서의 "다음 카드 제안" 3번 참고). 억지로
 3차 시도를 예고하지 않는다(ADR-0009 정신).
+
+## 카탄 A8 첫 채택 시도 (2026-08-06 실측, E2-B 그룹 3/3)
+
+**배경**: 카탄은 채택 후보 0개(registry v1뿐). 기존 3개 전략 플래그
+(`cityUpgradePriority`·`roadExpansionPriority`·`eagerBankTrade`,
+`src/reference/catan.ts` ~1040-1106줄)는 전부 screened-out/failed —
+각각 build 또는 bankTrade 결정지점 하나만 단일 규칙으로 덮어쓰고 나머지는
+heuristic에 위임하는 형태라, 장기 1차·아발론 1차와 같은 계열의 "단일 규칙
+오버라이드" 한계를 그대로 지녔다. GAP-ANALYSIS-12.md §7이 지목한 카드는
+"자원 희소성 가중 거래 평가(부족한 자원일수록 거래 수용 임계 상향)"였다.
+
+### 코드 재확인 결과 (설계 브리프 가정 검증)
+
+`scratchpad/catan-a8-first-adoption-design-spec.md`가 구현 전 재확인을
+요구한 두 가정을 코드로 직접 검증했다:
+
+1. **"플레이어 간 거래 제안이 없다"는 가정 — 확인됨(맞음)**.
+   `CatanChoice`(`src/reference/catan.ts:309-319`)에 거래 제안류 kind가
+   전혀 없고, `legalBankTradeChoices`(~469줄)는 오직 `bankTrade`(4:1
+   고정비율, 포트 없음)와 `endTurn`만 생성한다. 이 파일 최상단 doc
+   comment("Scope reduction")가 player-to-player negotiation을 명시적으로
+   스코프 밖에 뒀다는 것도 재확인됨. 브리프의 재해석 전제가 정확했다.
+2. **"build 결정지점에 buildCity/buildSettlement/buildRoad가 어떻게 묶여
+   있는가" — 브리프 원문과 어긋남, 수정 필요했음**. 브리프는 "즉시 지어질
+   목표가 없으면 endTurn 선택"이라 썼으나, `legalBuildChoices`(~440줄)는
+   `{kind:'toTrade'}` + build 후보들만 반환하고 **`endTurn`을 전혀 포함하지
+   않는다** — `endTurn`은 오직 `legalBankTradeChoices`(bankTrade 결정지점)
+   에만 존재한다. 이 파일의 turn 상태기계 doc comment(51-62줄)도 "build →
+   trade 전환은 단방향, build 서브페이즈는 구매 또는 트레이딩으로 넘어가는
+   것뿐"이라 명시. 구현에서 브리프를 그대로 따르지 않고 **build 결정지점의
+   "짓지 않음" 선택을 `toTrade`로 수정**했다(사유: 코드가 실제로 그렇게
+   생겼음 — `endTurn`을 build에서 고르면 그런 선택 자체가 legal 목록에
+   없어 즉시 오류).
+
+### 산식 (브리프 대비 조정 사항 기록)
+
+`catanScarcityWeightedTrade` — build/bankTrade 두 결정지점을 하나의
+"필요 벡터" 평가로 통일(`src/reference/catan.ts`의
+`catanBuildPriorityTarget`/`computeNeedSurplus`, catanScarcityWeightedTrade
+플래그 doc comment에 전체 근거 기록).
+
+- **우선순위 목표 선택**: 브리프는 "도시>정착지>도로" 우선순위를 그대로
+  쓰라고 했으나, 문자 그대로 적용하면 **정착지가 하나도 없는 플레이어도
+  영원히 도시 비용(밀·3광석)을 목표로 자원을 모으는** 결함이 생긴다(도시로
+  업그레이드할 정착지 자체가 없으니 실제로는 절대 못 지음). 이를 막기 위해
+  **도시는 `observation.buildings`에 자신 소유 미업그레이드 정착지가 하나
+  이상 있을 때만** 목표가 되도록 가드를 추가했고, 없으면 목표는 항상
+  정착지 비용(`SETTLEMENT_COST`)이다. 도로는 가장 저렴하고 항상 즉시
+  달성 가능한 선택이라 필요 벡터의 목표가 되는 경우가 없다(설계상 의도된
+  것 — 이유는 코드 doc comment에 기록).
+- `need[r] = max(0, targetCost[r] − hand[r])`,
+  `surplus[r] = max(0, hand[r] − targetCost[r])` — 목표가 전혀 안 쓰는
+  자원(targetCost[r]=0)은 보유량 전체가 surplus.
+- **'build' 결정**: legal 중 buildCity > buildSettlement > buildRoad
+  순으로 즉시 지을 수 있는 것을 선택. 없으면 `toTrade`(브리프의 "endTurn"
+  대신 — 위 코드 재확인 결과).
+- **'bankTrade' 결정**: legal `bankTrade` 후보 중 `surplus[give]>0`이고
+  `need[get]>0`인 것만 남기고, 남은 것 중 `need[get]`이 가장 큰 것을
+  선택. 없으면 `endTurn`(무의미한 거래를 하지 않는 것이 eagerBankTrade
+  대비 핵심 차별점).
+- **알려진 단순화(브리프 문구 그대로 유지, 수정하지 않음)**: `surplus[give]
+  > 0` 조건은 실제 거래가 4장을 소모하는데도 `>= 4`가 아니라 `>0`만
+  요구한다 — surplus가 1~3인 경우 목표에 필요한 예비분을 일부 갉아먹을
+  수 있는 알려진 결함이나, 브리프의 산식을 문자 그대로 구현했고 임의로
+  더 엄격하게 바꾸지 않았다(향후 카드의 정밀화 후보로 코드 doc comment에
+  기록).
+
+### C6 재채점 (행동 구별 확인)
+
+`scoreAdapter` 재실행(`npx ts-node src/reference/runners/catan-a8.ts` 1단계)
+결과:
+
+```
+C6-strategy-surface: score=75
+  note: 3/4 strategySurface flag(s) are behaviorally distinct.
+  note: "cityUpgradePriority" produced no observable behavior change across probe seeds (no-op).
+```
+
+신규 `catanScarcityWeightedTrade`는 이 프로브에서 행동 구별에 성공(no-op
+아님) — no-op으로 남은 것은 이번 카드와 무관한 기존 `cityUpgradePriority`
+뿐(이전 라운드부터의 기존 결함, 이번 카드 스코프 밖). typecheck 0에러,
+전체 테스트(69 suites, 943 tests) 통과 확인 완료.
+
+### C4 처리량 확인 (5배 한도 점검)
+
+`catanScarcityWeightedTrade` 대 base(heuristic) 20게임 head-to-head 실측
+(fresh seeds 916000-916019, botSeedBase 916100/916200):
+
+| 구성 | 소요시간 |
+|---|---|
+| base(heuristic vs heuristic) | 91ms |
+| catanScarcityWeightedTrade vs heuristic | 90ms |
+| 비율 | **0.99x**(측정 잡음 범위, 5배 한도 전혀 안 걸림) |
+
+근사 불필요 — `decide()` 1회당 자원 5종 배열 순회 + bankTrade 후보(최대
+20개) 스캔뿐인 O(1) 연산이라 비용이 무시할 만한 수준.
+
+### 웨이브 실측 (신규 러너 `src/reference/runners/catan-a8.ts`, 신규 시드 뱅크)
+
+기존 catan 러너 2개(`catan.ts`, `catan-benchmark.ts`) 전부와 겹치지 않는
+대역으로 발주(grep으로 사전 확인 — `catan.ts`: screenProbe 시드 1-3/
+botSeedBase 100, 캘리브레이션 identitySeeds 700000-700059/botSeedBase
+600000, wave-B smoke~1-45/prune 1000+/holdout 2000+, fieldMix 시드
+900000-900002; `catan-benchmark.ts`: 시드 50000-51999/botSeedBase
+800001-800003): screenProbe 시드 911001-911003/botSeedBase 911100,
+캘리브레이션 identitySeeds 914000-914099/시드 44/915000, 처리량 체크 시드
+916000-916019, `catan-a8-smoke`(920000+), `catan-a8-prune`(930000+),
+`catan-a8-holdout`(940000+). regression=v1(플래그 0개) 그대로, 상대는
+heuristic.
+
+캘리브레이션: identity self-play(heuristic vs heuristic, 100 시드)
+meanWinRate=0.2500, blockStdDev=0.0000(완전히 결정론적 — 매 시드 seat0이
+항상 동일 결과) → 권장 블록수 5(클램프 후 5) → smokeMaxBlocks=15.
+
+| 티어 | 승률 | scoreDiff | 블록(게임) | drawRate | 통과 |
+|---|---|---|---|---|---|
+| screen | (프로브 3시드에서 행동 구별 확인) | — | — | — | ✅ |
+| smoke | **4.5%** | -2.121 | 11 (SPRT 조기 종료, 22게임) | 0% | ❌ failed |
+| prune | (미도달) | — | — | — | — |
+| holdout | (미도달) | — | — | — | — |
+
+근접실패 후보 없음(`runs/catan/near-miss-a8.json` = `[]`).
+
+### 최종 판정: **failed**
+
+`runs/catan/registry.json`은 v1 그대로(승격 없음). `runs/catan/ledger.json`에
+`a8-wave-1` adoption record 추가(entries[0].verdict="failed"). smoke
+22게임에서 승률 4.5%·scoreDiff -2.121로 SPRT가 매우 빠르게(11블록,
+smokeMaxBlocks=15의 73%만 소비) H1(p1=0.6)을 기각하고 실패 쪽으로
+조기 종료했다 — 근소한 차이가 아니라 heuristic보다 명백히 나쁜 성과.
+
+`runs/catan/summary.md` 재렌더는 이번에도 공유 `runs/` 디렉터리의 무관한
+손상 파일(`runs/dominion/challenge-l2/payload.json` 부재 — 장기 A8·아발론
+A8 2차 카드에서도 동일 증상 기록됨, 동시 실행 중인 다른 게임 에이전트
+산출물)로 인해 `RunStore.listRuns()` 전체 스캔이 ENOENT로 실패했으나, catan
+자체 산출물(registry/ledger/near-miss/conformance/wave report)은 전부
+정상 저장됐고 이 실패는 catan 결과와 무관하므로 재시도하지 않았다.
+
+**해석**: 왜 실패했는가에 대한 사후 추정(실측하지 않은 값은 채우지 않되,
+산식의 구조적 약점은 기록) — 이 필요 벡터 산식은 목표를 "도시 또는
+정착지" 단 하나로만 좁히고, 그 목표에 정확히 맞는 거래만 허용한다.
+heuristic 베이스(정착지>도시>도로>toTrade, bankTrade는 항상 endTurn)는
+아예 거래를 하지 않지만 건설 우선순위 자체는 이미 합리적이다. 이 플래그는
+build 우선순위를 도시>정착지>도로로 "재정렬"만 했을 뿐 heuristic의
+정착지>도시>도로보다 낫다는 근거가 없고(오히려 초반 확장을 늦출 수 있음),
+동시에 bankTrade를 "가끔이라도 실행"하는 자체가 4장을 내주고 1장만 받는
+불리한 교환(4:1)을 감수하는 행위라 — need/surplus 필터가 아무리 정교해도
+"무역 자체가 순손실"이라는 이 게임 특유의 구조를 이기지 못했을 가능성이
+높다. eagerBankTrade가 실패한 것과 같은 근본 축(4:1 은행 거래는 필터를
+정교화해도 여전히 손해 거래)일 가능성이 있으나, 이번 실측만으로 build
+우선순위 변경분과 bankTrade 필터링분 중 어느 쪽이 손실의 주범인지는
+분리하지 못했다(분리하려면 avalonSuspicionVoteOnly류의 2차 카드가 필요).
+
+### 다음 카드 제안
+
+1. **결정지점 분리 재시도(2차 카드, 선택적)**: 이번 카드가 build와
+   bankTrade를 하나의 평가로 묶은 것이 원인 분리를 막았다 — 아발론 A8
+   2차의 전례처럼, "build 우선순위만 바꾸고 bankTrade는 항상 heuristic에
+   위임"과 "build는 heuristic 그대로 두고 bankTrade 필터만 적용" 두
+   변형으로 쪼개면 어느 쪽이 손실의 주범인지 분리 가능.
+2. **4:1 은행 거래 자체를 재검토**: eagerBankTrade(1차)와
+   catanScarcityWeightedTrade(이번 카드) 둘 다 "언제 거래할지"를 다르게
+   골랐을 뿐인데 둘 다 실패했다 — 이 게임에서 4:1 거래를 아예 안 하는
+   heuristic이 이미 최선일 가능성을 검토할 필요가 있다. 다음 카드를
+   더 투입하기 전에, "거래를 전혀 하지 않는" 조건과 "필요 벡터 기반
+   거래"를 나란히 비교하는 대신 아예 다른 축(예: 초기 배치 알고리즘
+   개선, 도둑 이동 로직 개선처럼 거래와 무관한 결정지점)으로 옮기는 것도
+   고려할 만하다.
+3. **장기·스플랜더처럼 "휴리스틱 자체 개선" 축으로 전환**: 도로·건설
+   우선순위를 규칙 오버라이드가 아니라 보드 상태(생산 확률·연결성)를
+   반영하는 평가함수로 다시 설계하는 편이, 거래 축을 계속 파는 것보다
+   ROI가 높을 가능성이 있다(장기 A8이 "단일 규칙 오버라이드 → 평가함수형"
+   전환으로 성공한 것과 같은 처치 방향).

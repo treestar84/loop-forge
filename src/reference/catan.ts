@@ -1105,6 +1105,139 @@ const eagerBankTrade: StrategyFlagSpec<CatanObservation, CatanChoice> = {
   },
 };
 
+/**
+ * Strategy flag: effective. `catanScarcityWeightedTrade` — the A8
+ * domain-redesign card (docs/GAP-ANALYSIS-12.md §7,
+ * scratchpad/catan-a8-first-adoption-design-spec.md). Unifies the 'build'
+ * and 'bankTrade' decision points behind a single "need vector" evaluation
+ * instead of overriding either one with a fixed rule (cityUpgradePriority/
+ * roadExpansionPriority/eagerBankTrade are each a single-rule override — all
+ * three screened-out/failed; this flag scores against build-target resource
+ * cost instead).
+ *
+ * Reinterpretation from the original card intent (verified against the code
+ * before implementing, per the design brief's instruction): the original
+ * "부족 자원일수록 거래를 적극적으로 받아들인다" card assumed a
+ * player-to-player trade-offer mechanism. `legalBankTradeChoices` (line
+ * ~469) proves this adapter has none — bank trades are a fixed 4:1 ratio,
+ * no ports, no peer offers (see this file's top doc comment, "Scope
+ * reduction"). Reinterpreted for the bank-trade context: "only give away
+ * genuine surplus, only ask for genuine need" — this directly targets
+ * eagerBankTrade's flaw (it trades toward any *currently-empty* resource
+ * regardless of whether that resource is actually needed for anything, and
+ * gives away resources that might be needed elsewhere).
+ *
+ * Also corrects a decision-point-shape assumption in the original brief: the
+ * brief said "no immediate build -> choose endTurn", but `legalBuildChoices`
+ * (line ~440) never includes `endTurn` — only `legalBankTradeChoices` (line
+ * ~469) does. The 'build' decision's only non-build option is `toTrade`
+ * (moves to the bank-trade sub-phase); `endTurn` only exists inside
+ * 'bankTrade'. This flag uses `toTrade` in the 'build' branch accordingly.
+ *
+ * "Need vector" (`computeNeedSurplus`, pure, recomputed every decision — no
+ * persisted state across calls):
+ *   - Priority build target order is city > settlement > road (matching the
+ *     cityUpgradePriority/roadExpansionPriority convention), with one
+ *     adjustment from the brief's literal wording, recorded here because it
+ *     changes behavior: city is only the target when the player actually
+ *     owns an upgradeable settlement (`catanBuildPriorityTarget` checks
+ *     `observation.buildings` for one owned by `self` with
+ *     `type: 'settlement'`) — coveting CITY_COST's wheat/ore forever with no
+ *     settlement to upgrade would be a strictly worse heuristic than falling
+ *     back to the settlement target. When no upgradeable settlement exists,
+ *     the target is always `SETTLEMENT_COST` — road is deliberately never
+ *     the need-vector target (it's the cheapest, always-attainable-soonest
+ *     option, so accumulating resource preference for it specifically has no
+ *     value). MAX_CITIES/MAX_SETTLEMENTS caps are intentionally ignored in
+ *     target *selection* (an edge case late in the game); the actual
+ *     buildCity/buildSettlement legality (and thus the immediate-build check
+ *     below) already enforces those caps via `legal`.
+ *   - `need[r] = max(0, targetCost[r] - hand[r])`,
+ *     `surplus[r] = max(0, hand[r] - targetCost[r])` (a resource the target
+ *     doesn't use at all, i.e. `targetCost[r] === 0`, is entirely surplus).
+ *
+ * 'build' decision: buildCity > buildSettlement > buildRoad, whichever is
+ * legal first (same priority order as the need-vector target, so a target
+ * that becomes affordable is built immediately rather than held for a
+ * "better" trade). If none are legal, `toTrade`.
+ *
+ * 'bankTrade' decision: among legal `bankTrade` choices, keep only those
+ * where `surplus[give] > 0` AND `need[get] > 0`; among survivors, pick the
+ * one with the largest `need[get]` (ties broken by encounter order, which
+ * follows `legalBankTradeChoices`'s fixed RESOURCES-array iteration order —
+ * deterministic). If no choice survives the filter, `endTurn` — no trade,
+ * unlike eagerBankTrade which always finds *some* deficient resource to
+ * chase. Note (recorded, not "fixed", per the brief's literal formula): the
+ * `surplus[give] > 0` check does not require `surplus[give] >= 4` even
+ * though a bank trade always moves exactly 4 units of `give` — a hand with,
+ * say, 1 unit of surplus wood still qualifies, which can eat 3 units of
+ * would-be-reserved wood. This is the brief's literal condition, kept as
+ * specified; a stricter `>= 4` gate is a candidate refinement for a future
+ * card, not implemented here.
+ */
+function catanBuildPriorityTarget(observation: CatanObservation): Readonly<Record<Resource, number>> {
+  const hasUpgradeableSettlement = observation.buildings.some(
+    (b) => b !== null && b.owner === observation.self && b.type === 'settlement',
+  );
+  return hasUpgradeableSettlement ? CITY_COST : SETTLEMENT_COST;
+}
+
+function computeNeedSurplus(
+  hand: ResHand,
+  targetCost: Readonly<Record<Resource, number>>,
+): { readonly need: Record<Resource, number>; readonly surplus: Record<Resource, number> } {
+  const need = freshHand();
+  const surplus = freshHand();
+  for (const r of RESOURCES) {
+    need[r] = Math.max(0, targetCost[r] - hand[r]);
+    surplus[r] = Math.max(0, hand[r] - targetCost[r]);
+  }
+  return { need, surplus };
+}
+
+const catanScarcityWeightedTrade: StrategyFlagSpec<CatanObservation, CatanChoice> = {
+  flag: 'catanScarcityWeightedTrade',
+  description:
+    'Unifies build and bankTrade behind one need-vector evaluation: builds city>settlement>road when immediately legal; otherwise on bankTrade, only trades surplus (unneeded-by-target) resources for a resource the current priority build target actually needs, and does not trade at all if no such trade exists.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'catanScarcityWeightedTrade'),
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'build') {
+            const city = legal.find((c) => c.kind === 'buildCity');
+            if (city) return city;
+            const settlement = legal.find((c) => c.kind === 'buildSettlement');
+            if (settlement) return settlement;
+            const road = legal.find((c) => c.kind === 'buildRoad');
+            if (road) return road;
+            return legal.find((c) => c.kind === 'toTrade') as CatanChoice;
+          }
+          if (decisionPoint === 'bankTrade') {
+            const targetCost = catanBuildPriorityTarget(observation);
+            const { need, surplus } = computeNeedSurplus(observation.ownHand, targetCost);
+            const tradeChoices = legal.filter(
+              (c): c is Extract<CatanChoice, { kind: 'bankTrade' }> => c.kind === 'bankTrade',
+            );
+            let best: Extract<CatanChoice, { kind: 'bankTrade' }> | undefined;
+            let bestNeed = 0;
+            for (const c of tradeChoices) {
+              if (surplus[c.give] > 0 && need[c.get] > 0 && need[c.get] > bestNeed) {
+                best = c;
+                bestNeed = need[c.get];
+              }
+            }
+            if (best) return best;
+            return legal.find((c) => c.kind === 'endTurn') as CatanChoice;
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by running this adapter's own random-vs-random
 // self-play (see src/reference/__tests__/catan.test.ts's generation note). No
@@ -1366,7 +1499,7 @@ export const catanAdapter: GameAdapter<CatanState, CatanObservation, CatanChoice
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [cityUpgradePriority, roadExpansionPriority, eagerBankTrade],
+  strategySurface: [cityUpgradePriority, roadExpansionPriority, eagerBankTrade, catanScarcityWeightedTrade],
 };
 
 export {

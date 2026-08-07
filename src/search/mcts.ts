@@ -229,6 +229,83 @@ export interface MctsConfig {
 }
 
 /**
+ * Static diagnostics for the optional MCTS controls. `errors` denotes a
+ * configuration the current runtime explicitly rejects; `warnings` denotes a
+ * legal configuration whose precedence, implicit dependency, or no-op effect
+ * deserves an intentional caller decision. This function is pure: it neither
+ * calls a factory/evaluator/schedule nor inspects an adapter, so adapter- and
+ * schedule-result-dependent checks remain the responsibility of the caller
+ * that has those values.
+ */
+export interface MctsOptionsValidation {
+  readonly errors: readonly string[];
+  readonly warnings: readonly string[];
+}
+
+/**
+ * MctsConfig optional-field combination contract. IS-MCTS consumes this same
+ * config, but only the rollout/prior fields affect it; root tactical controls
+ * are intentionally MCTS-root-only.
+ *
+ * | Field(s) | Contract / precedence |
+ * | --- | --- |
+ * | `rolloutPolicy` | `'random'` is the default; `'heuristic'` uses the adapter heuristic in rollouts. |
+ * | `rolloutFactory` + `rolloutPolicy` | Valid and intentional: `rolloutFactory` wins for every rollout. |
+ * | `tacticalDepth` | MCTS-root-only precheck; independent of `rootOverride`. |
+ * | `tacticalBranchCap` | Used only at `tacticalDepth: 2`; it is otherwise ignored, so validation warns. |
+ * | `rootOverride` | MCTS-root-only; after an immediate-win check and before the depth-2 safety net. |
+ * | `priorWeight` | Activates a prior only when positive. With no direct evaluator it defaults to `priorSource: 'choiceEvaluator'`; the search then requires the adapter evaluator. |
+ * | `priorSource` | v1 accepts only `'choiceEvaluator'`; it has no effect while neither a positive fixed weight nor a schedule can activate a prior. |
+ * | `priorEvaluator` | Takes precedence over `priorSource`/adapter evaluator, but likewise has no effect without an active fixed or scheduled weight. |
+ * | `priorWeightSchedule` | Replaces the fixed weight per bot decision. By itself it can still activate the implicit `choiceEvaluator` path; its returned values cannot be checked without executing user code. |
+ *
+ * The validator is deliberately not called by `mctsSearch` or `ismctsSearch`:
+ * the established searches retain their runtime behavior, including their
+ * adapter-specific fail-fast check and schedule resolution. Runners may opt in
+ * at configuration assembly time.
+ */
+export function validateMctsOptions(config: MctsConfig): MctsOptionsValidation {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const hasFixedActivePrior = priorIsActive(config);
+  const hasSchedule = config.priorWeightSchedule !== undefined;
+  const hasPotentiallyActivePrior = hasFixedActivePrior || hasSchedule;
+
+  // MctsConfig's TypeScript union makes this unreachable for normally typed
+  // callers, but JSON/config-file input can still reach the runtime guard in
+  // requireChoiceEvaluator. Keep this pure contract aligned with that guard.
+  if (config.priorSource !== undefined && config.priorSource !== 'choiceEvaluator') {
+    errors.push(`unknown priorSource "${String(config.priorSource)}"; v1 supports only 'choiceEvaluator'`);
+  }
+
+  if (config.tacticalBranchCap !== undefined && (config.tacticalDepth ?? 0) < 2) {
+    warnings.push('tacticalBranchCap is ignored unless tacticalDepth is 2');
+  }
+
+  if (hasFixedActivePrior && config.priorSource === undefined && config.priorEvaluator === undefined) {
+    warnings.push(
+      "priorWeight uses the implicit priorSource 'choiceEvaluator'; mctsSearch/ismctsSearch will throw if the adapter lacks choiceEvaluator",
+    );
+  }
+
+  if (hasSchedule && config.priorSource === undefined && config.priorEvaluator === undefined) {
+    warnings.push(
+      "priorWeightSchedule may activate the implicit priorSource 'choiceEvaluator'; its returned weights and adapter availability are runtime-dependent",
+    );
+  }
+
+  if (!hasPotentiallyActivePrior && config.priorSource !== undefined) {
+    warnings.push('priorSource is ignored because priorWeight is not positive and priorWeightSchedule is unset');
+  }
+
+  if (!hasPotentiallyActivePrior && config.priorEvaluator !== undefined) {
+    warnings.push('priorEvaluator is ignored because priorWeight is not positive and priorWeightSchedule is unset');
+  }
+
+  return { errors, warnings };
+}
+
+/**
  * Resolve `config.priorWeightSchedule` (this file's `MctsConfig` doc comment)
  * against `decisionIndex` into an effective per-call config: when
  * `priorWeightSchedule` is set, returns a shallow copy with `priorWeight`

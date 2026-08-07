@@ -8,7 +8,7 @@
 import type { AnyBotFactory, GameAdapter, GameSpec, PlayerId } from '../../contract/types';
 import { createRng } from '../../kernel/rng';
 import { eraseAdapter } from '../../loop/erase';
-import { applyPriorWeightSchedule, mctsBotFactory, mctsSearch, type MctsConfig } from '../mcts';
+import { applyPriorWeightSchedule, mctsBotFactory, mctsSearch, validateMctsOptions, type MctsConfig } from '../mcts';
 
 // ---------------------------------------------------------------------------
 // Fixture: a 2-ply tactical toy game. Player 0 picks 'a' | 'b' | 'c'; player 1
@@ -1017,5 +1017,64 @@ describe('applyPriorWeightSchedule / priorWeightSchedule (docs/GAP-ANALYSIS-11.m
     bot.decide('p0', observation, legal);
     bot.decide('p0', observation, legal);
     expect(seenIndices).toEqual([0, 1, 2]);
+  });
+});
+
+describe('validateMctsOptions (docs/FIX-BACKLOG.md E5 option-combination contract)', () => {
+  const BASE_CONFIG: MctsConfig = { simulations: 20, uctC: 1.4, rolloutCount: 1, label: 'options' };
+  const DIRECT_EVALUATOR: NonNullable<MctsConfig['priorEvaluator']> = () => [0];
+
+  it('accepts a baseline config with no optional controls', () => {
+    expect(validateMctsOptions(BASE_CONFIG)).toEqual({ errors: [], warnings: [] });
+  });
+
+  it('accepts an explicit adapter prior source with an active prior weight', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, priorWeight: 8, priorSource: 'choiceEvaluator' })).toEqual({
+      errors: [],
+      warnings: [],
+    });
+  });
+
+  it('accepts rolloutFactory plus rolloutPolicy because the documented factory precedence is intentional', () => {
+    const rolloutFactory: AnyBotFactory = () => ({ id: 'rollout', decide: () => 'choice' });
+    expect(validateMctsOptions({ ...BASE_CONFIG, rolloutPolicy: 'heuristic', rolloutFactory })).toEqual({
+      errors: [],
+      warnings: [],
+    });
+  });
+
+  it('warns that a weight without an explicit source/evaluator uses the runtime implicit choiceEvaluator source', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, priorWeight: 8 }).warnings).toEqual([
+      "priorWeight uses the implicit priorSource 'choiceEvaluator'; mctsSearch/ismctsSearch will throw if the adapter lacks choiceEvaluator",
+    ]);
+  });
+
+  it('rejects an unknown priorSource even when it entered through untyped configuration', () => {
+    const config = { ...BASE_CONFIG, priorSource: 'other' } as unknown as MctsConfig;
+    expect(validateMctsOptions(config).errors).toEqual(["unknown priorSource \"other\"; v1 supports only 'choiceEvaluator'"]);
+  });
+
+  it('warns that a standalone schedule depends on its runtime values and the implicit adapter evaluator', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, priorWeightSchedule: () => 8 }).warnings).toEqual([
+      "priorWeightSchedule may activate the implicit priorSource 'choiceEvaluator'; its returned weights and adapter availability are runtime-dependent",
+    ]);
+  });
+
+  it('warns when tacticalBranchCap is configured for a tactical depth where it is ignored', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, tacticalDepth: 1, tacticalBranchCap: 10 }).warnings).toEqual([
+      'tacticalBranchCap is ignored unless tacticalDepth is 2',
+    ]);
+  });
+
+  it('warns when priorSource is inert without a fixed positive weight or schedule', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, priorSource: 'choiceEvaluator' }).warnings).toEqual([
+      'priorSource is ignored because priorWeight is not positive and priorWeightSchedule is unset',
+    ]);
+  });
+
+  it('warns when priorEvaluator is inert without a fixed positive weight or schedule', () => {
+    expect(validateMctsOptions({ ...BASE_CONFIG, priorEvaluator: DIRECT_EVALUATOR }).warnings).toEqual([
+      'priorEvaluator is ignored because priorWeight is not positive and priorWeightSchedule is unset',
+    ]);
   });
 });

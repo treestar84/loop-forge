@@ -109,6 +109,31 @@ describe('BaselineRegistry — versions', () => {
     expect(restored.get('v1')?.sourceDigest).toBeUndefined();
   });
 
+  it('round-trips optional noOpWaveIds and still loads a registry without them', () => {
+    const registry = new BaselineRegistry();
+    registry.register(v1());
+    registry.recordNoOpWave('v1', 'wave-no-op');
+    const restored = BaselineRegistry.fromJSON(JSON.parse(JSON.stringify(registry.toJSON())));
+    expect(restored.get('v1')?.noOpWaveIds).toEqual(['wave-no-op']);
+
+    const oldShape = BaselineRegistry.fromJSON({
+      versionOrder: ['v1'],
+      versions: [v1()],
+      anchorOrder: [],
+      anchors: [],
+    });
+    expect(oldShape.get('v1')?.noOpWaveIds).toBeUndefined();
+  });
+
+  it('records a no-op wave idempotently and rejects unknown versions', () => {
+    const registry = new BaselineRegistry();
+    registry.register(v1());
+    registry.recordNoOpWave('v1', 'wave-no-op');
+    registry.recordNoOpWave('v1', 'wave-no-op');
+    expect(registry.get('v1')?.noOpWaveIds).toEqual(['wave-no-op']);
+    expect(() => registry.recordNoOpWave('v99', 'wave-no-op')).toThrow(/unknown baseline version/);
+  });
+
   it('fromJSON rejects malformed input', () => {
     expect(() => BaselineRegistry.fromJSON(null)).toThrow();
     expect(() => BaselineRegistry.fromJSON({})).toThrow();

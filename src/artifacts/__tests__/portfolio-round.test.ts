@@ -9,8 +9,16 @@
  * scripts under reference/runners/, not here.
  */
 
-import { selectAdvancingFlags, buildPromotionPool, computeBucketOutcomes, type ChallengeTable } from '../portfolio-round';
+import {
+  selectAdvancingFlags,
+  buildPromotionPool,
+  computeBucketOutcomes,
+  finalizePromotion,
+  flagsUnchanged,
+  type ChallengeTable,
+} from '../portfolio-round';
 import { BUCKET_ORDER } from '../portfolio';
+import { BaselineRegistry } from '../baseline-registry';
 
 describe('selectAdvancingFlags', () => {
   it('advances the top K by agreement rate descending', () => {
@@ -85,6 +93,55 @@ describe('buildPromotionPool', () => {
     expect(pool).toEqual([{ flag: 'mystery' }]);
     expect('assembly' in pool[0]!).toBe(false);
     expect('challengeScore' in pool[0]!).toBe(false);
+  });
+});
+
+describe('promotion no-op handling (FIX-BACKLOG E6)', () => {
+  function registryWithV1(): BaselineRegistry {
+    const registry = new BaselineRegistry();
+    registry.register({
+      version: 'v1',
+      flags: ['champion'],
+      parent: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      sourceWaveId: null,
+      notes: 'baseline',
+    });
+    return registry;
+  }
+
+  it('does not register a new version when assembled flags equal the parent, and records the wave', () => {
+    const registry = registryWithV1();
+    const result = finalizePromotion({
+      registry,
+      latestVersion: 'v1',
+      latestVersionFlags: ['champion'],
+      waveId: 'wave-no-op',
+      nextVersion: { version: 'v2', flags: ['champion'], parent: 'v1', createdAt: '2026-01-02T00:00:00.000Z', notes: 'attempt' },
+    });
+    expect(result).toEqual({ promotedVersion: 'v1', noOp: true });
+    expect(registry.latest()?.version).toBe('v1');
+    expect(registry.get('v1')?.noOpWaveIds).toEqual(['wave-no-op']);
+    expect(registry.get('v2')).toBeUndefined();
+  });
+
+  it('registers a normal new version when assembled flags differ from the parent', () => {
+    const registry = registryWithV1();
+    const result = finalizePromotion({
+      registry,
+      latestVersion: 'v1',
+      latestVersionFlags: ['champion'],
+      waveId: 'wave-change',
+      nextVersion: { version: 'v2', flags: ['new-champion'], parent: 'v1', createdAt: '2026-01-02T00:00:00.000Z', notes: 'attempt' },
+    });
+    expect(result).toEqual({ promotedVersion: 'v2', noOp: false });
+    expect(registry.get('v2')).toMatchObject({ flags: ['new-champion'], parent: 'v1', sourceWaveId: 'wave-change' });
+    expect(registry.get('v1')?.noOpWaveIds).toBeUndefined();
+  });
+
+  it('treats flag permutations as changes because application order is meaningful', () => {
+    expect(flagsUnchanged(['a', 'b'], ['b', 'a'])).toBe(false);
+    expect(flagsUnchanged(['a', 'b'], ['a', 'b'])).toBe(true);
   });
 });
 

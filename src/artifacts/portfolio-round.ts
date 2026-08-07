@@ -188,6 +188,8 @@ export interface RunPortfolioRoundResult {
   readonly challenge: ChallengeTable;
   readonly adoption: {
     readonly promotedVersion: string | null;
+    /** True when assembly retained the parent flags, so no new version was registered. */
+    readonly noOp: boolean;
     readonly adoptedFlags: readonly string[];
     readonly assembleFlagsResult: AssembleFlagsResult | null;
   };
@@ -419,6 +421,38 @@ export function buildPromotionPool(input: {
   return pool;
 }
 
+/** Exact, order-sensitive flag comparison. Application order changes the
+ * composed bot, so permutations are promotion changes rather than no-ops. */
+export function flagsUnchanged(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((flag, index) => flag === b[index]);
+}
+
+/** Final registry action after a promotion pool has been assembled. Exported
+ * to keep the no-op branch directly testable without running games. */
+export function finalizePromotion(input: {
+  readonly registry: BaselineRegistry;
+  readonly latestVersion: string;
+  readonly latestVersionFlags: readonly string[];
+  readonly waveId: string;
+  readonly nextVersion: {
+    readonly version: string;
+    readonly flags: readonly string[];
+    readonly parent: string;
+    readonly createdAt: string;
+    readonly notes: string;
+  };
+}): { readonly promotedVersion: string; readonly noOp: boolean } {
+  if (flagsUnchanged(input.nextVersion.flags, input.latestVersionFlags)) {
+    input.registry.recordNoOpWave(input.latestVersion, input.waveId);
+    return { promotedVersion: input.latestVersion, noOp: true };
+  }
+  const registered = input.registry.register({
+    ...input.nextVersion,
+    sourceWaveId: input.waveId,
+  });
+  return { promotedVersion: registered.version, noOp: false };
+}
+
 /** Step 3: assemble the promotion candidate pool (surviving lineage flags +
  * this round's adopted flags, excluding anything in `excludeFromLineage`),
  * validate with composeBotChecked, and register the new version. */
@@ -430,19 +464,19 @@ function runPromotion(
   latestVersion: string,
   promotion: RoundPromotionOptions,
   recordedAt: string,
-): { promotedVersion: string | null; adoptedFlags: readonly string[]; assembleResult: AssembleFlagsResult | null } {
+): { promotedVersion: string | null; noOp: boolean; adoptedFlags: readonly string[]; assembleResult: AssembleFlagsResult | null } {
   const adoptedFlags = report.results.filter((r) => r.verdict === 'adopted').flatMap((r) => r.flags);
   const surfaceByFlag = new Map(adapter.strategySurface.map((spec) => [spec.flag, spec]));
   const baselineChallengeScore = primaryAnchorId !== undefined ? challengeTable[primaryAnchorId]?.['baseline']?.winRate : undefined;
 
   if (adoptedFlags.length === 0) {
-    return { promotedVersion: null, adoptedFlags, assembleResult: null };
+    return { promotedVersion: null, noOp: false, adoptedFlags, assembleResult: null };
   }
 
   const lineage = promotion.registry.lineage(latestVersion);
   const alreadyPromoted = lineage.find((version) => version.sourceWaveId === report.waveId);
   if (alreadyPromoted) {
-    return { promotedVersion: alreadyPromoted.version, adoptedFlags, assembleResult: null };
+    return { promotedVersion: alreadyPromoted.version, noOp: false, adoptedFlags, assembleResult: null };
   }
 
   const pool = buildPromotionPool({
@@ -455,20 +489,33 @@ function runPromotion(
   });
 
   const assembleResult = assembleFlags(pool);
+  const promotionInput = {
+    registry: promotion.registry,
+    latestVersion,
+    latestVersionFlags: promotion.latestVersionFlags,
+    waveId: report.waveId,
+    nextVersion: {
+      version: `v${lineage.length + 1}`,
+      flags: assembleResult.flags,
+      parent: latestVersion,
+      createdAt: recordedAt,
+      notes:
+        `${promotion.notesPrefix}assembleFlags(ADR-0014)로 승격: pool=[${pool.map((c) => c.flag).join(', ')}], ` +
+        `excluded=[${assembleResult.excluded.map((e) => e.flag).join(', ') || '(없음)'}].`,
+    },
+  };
+
+  // Check immediately after assembly: a no-op needs no composition recheck,
+  // because it retains this already-registered version's exact flags.
+  if (flagsUnchanged(assembleResult.flags, promotion.latestVersionFlags)) {
+    const noOpPromotion = finalizePromotion(promotionInput);
+    return { promotedVersion: noOpPromotion.promotedVersion, noOp: true, adoptedFlags, assembleResult };
+  }
+
   composeBotChecked(adapter, assembleResult.flags);
+  const nextVersion = finalizePromotion(promotionInput);
 
-  const nextVersion = promotion.registry.register({
-    version: `v${lineage.length + 1}`,
-    flags: assembleResult.flags,
-    parent: latestVersion,
-    createdAt: recordedAt,
-    sourceWaveId: report.waveId,
-    notes:
-      `${promotion.notesPrefix}assembleFlags(ADR-0014)로 승격: pool=[${pool.map((c) => c.flag).join(', ')}], ` +
-      `excluded=[${assembleResult.excluded.map((e) => e.flag).join(', ') || '(없음)'}].`,
-  });
-
-  return { promotedVersion: nextVersion.version, adoptedFlags, assembleResult };
+  return { promotedVersion: nextVersion.promotedVersion, noOp: nextVersion.noOp, adoptedFlags, assembleResult };
 }
 
 /** Step 4: per-bucket candidate/adopted counts and mean challenge delta vs
@@ -523,7 +570,7 @@ export function runPortfolioRound(input: RunPortfolioRoundInput): RunPortfolioRo
   const challengeTable = buildChallengeTable(report);
   const primaryAnchorId = input.challenge.anchors[input.challenge.anchors.length - 1]?.anchorId;
 
-  const { promotedVersion, adoptedFlags, assembleResult } = runPromotion(
+  const { promotedVersion, noOp, adoptedFlags, assembleResult } = runPromotion(
     input.adapter,
     report,
     challengeTable,
@@ -546,6 +593,7 @@ export function runPortfolioRound(input: RunPortfolioRoundInput): RunPortfolioRo
     challenge: challengeTable,
     adoption: {
       promotedVersion,
+      noOp,
       adoptedFlags,
       assembleFlagsResult: assembleResult,
     },
@@ -575,6 +623,7 @@ export function runPortfolioRound(input: RunPortfolioRoundInput): RunPortfolioRo
     challenge: challengeTable,
     adoption: {
       promotedVersion,
+      noOp,
       adoptedFlags,
       assembleFlags: assembleResult ? { flags: assembleResult.flags, excluded: assembleResult.excluded } : null,
     },

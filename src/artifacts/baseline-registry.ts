@@ -23,6 +23,12 @@ export interface BaselineVersion {
   readonly sourceWaveId: string | null;
   readonly notes: string;
   /**
+   * Wave IDs whose promotion attempt produced flags identical to this
+   * version's own flags (no-op promotion, FIX-BACKLOG E6) — recorded here
+   * instead of registering a new version.
+   */
+  readonly noOpWaveIds?: readonly string[];
+  /**
    * Optional source closure digest (source-digest.ts's `computeSourceDigest`)
    * of the files that decided this version's flags' behavior at
    * registration time. Approximation only — a source-file-level closure, not
@@ -67,6 +73,7 @@ function cloneBaselineVersion(version: BaselineVersion): BaselineVersion {
     sourceWaveId: version.sourceWaveId,
     notes: version.notes,
     ...(version.sourceDigest !== undefined ? { sourceDigest: version.sourceDigest } : {}),
+    ...(version.noOpWaveIds !== undefined ? { noOpWaveIds: [...version.noOpWaveIds] } : {}),
   };
 }
 
@@ -116,6 +123,27 @@ export class BaselineRegistry {
       return undefined;
     }
     return this.get(lastVersion);
+  }
+
+  /**
+   * Records a wave whose assembled flags left an existing version unchanged.
+   * This is deliberately idempotent so a retried promotion cannot duplicate
+   * its wave ID or create a synthetic version (FIX-BACKLOG E6).
+   */
+  recordNoOpWave(version: string, waveId: string): BaselineVersion {
+    const found = this.versions.get(version);
+    if (!found) {
+      throw new Error(`BaselineRegistry: unknown baseline version "${version}"`);
+    }
+    if (found.noOpWaveIds?.includes(waveId)) {
+      return cloneBaselineVersion(found);
+    }
+    const updated: BaselineVersion = {
+      ...cloneBaselineVersion(found),
+      noOpWaveIds: [...(found.noOpWaveIds ?? []), waveId],
+    };
+    this.versions.set(version, updated);
+    return cloneBaselineVersion(updated);
   }
 
   /** Ancestors-to-self chain (oldest first, ending at `version`). */
@@ -274,6 +302,7 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
   const sourceWaveId = record['sourceWaveId'];
   const notes = record['notes'];
   const sourceDigest = record['sourceDigest'];
+  const noOpWaveIds = record['noOpWaveIds'];
 
   if (typeof version !== 'string' || version.length === 0) {
     throw new Error('BaselineRegistry.fromJSON: version must be a non-empty string');
@@ -296,6 +325,9 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
   if (sourceDigest !== undefined && typeof sourceDigest !== 'string') {
     throw new Error(`BaselineRegistry.fromJSON: version "${version}" sourceDigest must be a string when present`);
   }
+  if (noOpWaveIds !== undefined && (!Array.isArray(noOpWaveIds) || !noOpWaveIds.every((waveId) => typeof waveId === 'string'))) {
+    throw new Error(`BaselineRegistry.fromJSON: version "${version}" noOpWaveIds must be a string array when present`);
+  }
   return {
     version,
     flags: [...(flags as string[])],
@@ -304,6 +336,7 @@ function parseBaselineVersion(value: unknown): BaselineVersion {
     sourceWaveId,
     notes,
     ...(sourceDigest !== undefined ? { sourceDigest } : {}),
+    ...(noOpWaveIds !== undefined ? { noOpWaveIds: [...noOpWaveIds] } : {}),
   };
 }
 

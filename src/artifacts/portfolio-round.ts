@@ -523,13 +523,23 @@ function runPromotion(
 export function computeBucketOutcomes(
   candidates: readonly RoundCandidateSpec[],
   verdictByFlag: ReadonlyMap<string, FinalVerdict>,
+  assembleResult: AssembleFlagsResult | null,
   challengeTable: ChallengeTable,
   primaryAnchorId: string | undefined,
   roundBaselineWinRate: number,
 ): readonly BucketOutcome[] {
+  // `assembleResult.flags` includes the prior lineage decorators as well as
+  // this round's survivors. `candidates` plus `verdictByFlag` scopes this
+  // count to the current round, so only an explicit exclusion can disqualify
+  // a wave-adopted candidate. If assembly never ran, retain the legacy wave
+  // verdict-only behavior because there is no final comparison to inspect.
+  const excludedFlags = assembleResult === null ? undefined : new Set(assembleResult.excluded.map(({ flag }) => flag));
+
   return BUCKET_ORDER.map((bucket) => {
     const bucketCandidates = candidates.filter((candidate) => candidate.bucket === bucket);
-    const adopted = bucketCandidates.filter((candidate) => verdictByFlag.get(candidate.flag) === 'adopted').length;
+    const adopted = bucketCandidates.filter(
+      (candidate) => verdictByFlag.get(candidate.flag) === 'adopted' && !excludedFlags?.has(candidate.flag),
+    ).length;
 
     const deltas = bucketCandidates
       .map((candidate) => (primaryAnchorId !== undefined ? challengeTable[primaryAnchorId]?.[candidate.flag]?.winRate : undefined))
@@ -582,7 +592,7 @@ export function runPortfolioRound(input: RunPortfolioRoundInput): RunPortfolioRo
 
   const verdictByFlag = new Map(report.results.map((result) => [result.flag, result.verdict]));
   const roundBaselineWinRate = (primaryAnchorId !== undefined ? challengeTable[primaryAnchorId]?.['baseline']?.winRate : undefined) ?? 0.5;
-  const bucketOutcomes = computeBucketOutcomes(input.candidates, verdictByFlag, challengeTable, primaryAnchorId, roundBaselineWinRate);
+  const bucketOutcomes = computeBucketOutcomes(input.candidates, verdictByFlag, assembleResult, challengeTable, primaryAnchorId, roundBaselineWinRate);
 
   const nextAllocation = reallocate(input.bucketAllocation.current, bucketOutcomes);
   savePortfolioState(input.rootDir, input.gameId, nextAllocation);

@@ -159,12 +159,12 @@ describe('computeBucketOutcomes', () => {
     },
   };
 
-  it('counts adopted candidates per bucket and averages challengeDelta vs the round baseline', () => {
+  it('counts wave-adopted candidates that survive assembleFlags and averages challengeDelta vs the round baseline', () => {
     const verdictByFlag = new Map([
       ['b1a', 'adopted' as const],
       ['b1b', 'near-miss' as const],
     ]);
-    const outcomes = computeBucketOutcomes(candidates, verdictByFlag, challengeTable, 'L2', 0.5);
+    const outcomes = computeBucketOutcomes(candidates, verdictByFlag, { flags: ['prior-decorator', 'b1a'], excluded: [] }, challengeTable, 'L2', 0.5);
     const b1 = outcomes.find((o) => o.bucket === 'B1-exploit');
     expect(b1).toEqual({ bucket: 'B1-exploit', candidates: 2, adopted: 1, challengeDelta: (0.6 - 0.5 + (0.4 - 0.5)) / 2 });
 
@@ -173,15 +173,54 @@ describe('computeBucketOutcomes', () => {
     expect(b3).toEqual({ bucket: 'B3-deep', candidates: 1, adopted: 0, challengeDelta: 0 });
   });
 
+  it('does not count a wave-adopted candidate excluded by assembleFlags', () => {
+    const outcomes = computeBucketOutcomes(
+      candidates,
+      new Map([['b1a', 'adopted' as const]]),
+      { flags: ['prior-terminal'], excluded: [{ flag: 'b1a', reason: 'better terminal retained' }] },
+      challengeTable,
+      'L2',
+      0.5,
+    );
+    expect(outcomes.find((outcome) => outcome.bucket === 'B1-exploit')?.adopted).toBe(0);
+  });
+
+  it('falls back to wave verdicts when assembleFlags did not run', () => {
+    const outcomes = computeBucketOutcomes(
+      candidates,
+      new Map([['b1a', 'adopted' as const]]),
+      null,
+      challengeTable,
+      'L2',
+      0.5,
+    );
+    expect(outcomes.find((outcome) => outcome.bucket === 'B1-exploit')?.adopted).toBe(1);
+  });
+
+  it('reproduces Hearthstone round 2: B1 w2 passes the wave but loses assembly to v3 w4', () => {
+    const outcomes = computeBucketOutcomes(
+      [{ flag: 'ismcts-s128-tempo-w2', bucket: 'B1-exploit' as const }],
+      new Map([['ismcts-s128-tempo-w2', 'adopted' as const]]),
+      {
+        flags: ['ismcts-s128-tempo-w4'],
+        excluded: [{ flag: 'ismcts-s128-tempo-w2', reason: 'w4 challenge score is higher' }],
+      },
+      challengeTable,
+      'L2',
+      0.5,
+    );
+    expect(outcomes.find((outcome) => outcome.bucket === 'B1-exploit')).toMatchObject({ candidates: 1, adopted: 0 });
+  });
+
   it('covers every bucket in BUCKET_ORDER even when a bucket has zero candidates this round', () => {
-    const outcomes = computeBucketOutcomes(candidates, new Map(), challengeTable, 'L2', 0.5);
+    const outcomes = computeBucketOutcomes(candidates, new Map(), null, challengeTable, 'L2', 0.5);
     expect(outcomes.map((o) => o.bucket)).toEqual(BUCKET_ORDER);
     const untouched = outcomes.find((o) => o.bucket === 'B5-imitate');
     expect(untouched).toEqual({ bucket: 'B5-imitate', candidates: 0, adopted: 0, challengeDelta: 0 });
   });
 
   it('falls back to challengeDelta 0 when primaryAnchorId is undefined (no challenge anchors configured)', () => {
-    const outcomes = computeBucketOutcomes(candidates, new Map(), challengeTable, undefined, 0.5);
+    const outcomes = computeBucketOutcomes(candidates, new Map(), null, challengeTable, undefined, 0.5);
     expect(outcomes.every((o) => o.challengeDelta === 0)).toBe(true);
   });
 });

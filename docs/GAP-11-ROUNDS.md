@@ -2015,3 +2015,121 @@ robber) 개선이 모두 20~25% 구간에 수렴한다는 것은, 카탄 4인전
 - 카탄 채택 후보 0개 상태가 3라운드 연속 지속 — ADR-0009의 "같은 축
   억지 재시도 금지" 정신을 이어, 4차 카드 전에 반드시 메인 루프가 이
   수렴 신호를 재검토할 것.
+
+## 카탄 promotionMinWinRate FFA 보정 및 재판정
+
+카탄이 3라운드 연속(거래·건설·로버, 완전히 다른 세 결정지점) 전부 smoke
+단계에서 실패한 것을 3차 라운드는 "좌석 편향(bias=0.485)" 탓으로 추정했다.
+**이 추정은 틀렸다.** `src/loop/paired-match.ts`의 `runPairedBlock`이 이미
+`adapter.spec.seatingPlan`의 4개 회전 전부를 평균해서 좌석 위치 효과를
+완전히 상쇄한다(같은 메커니즘이 `measureNoiseFloor`를 항등 자기대국에서
+정확히 0.2500·표준편차 0.0000으로 만드는 이유이기도 하다 — 이건 실제 좌석
+편향이 없다는 뜻이 아니라, 회전 평균 방법론 자체가 이 편향을 통계적으로
+완전히 지운다는 뜻이다). smoke/prune/holdout/regression 전부
+`runPairedBlock`을 쓰므로(`src/loop/wave-runner.ts` 373·410줄), 카탄 후보들의
+실측 승률은 **이미 좌석 편향이 제거된 수치**였다.
+
+**진짜 원인**: `src/kernel/blueprint.ts`의 `deriveBlueprint`가
+`promotionMinWinRate: DEFAULT_CRITERIA.minWinRate`(`kernel/gates.ts`, 고정값
+0.53)를 플레이어 수와 무관하게 그대로 반환하고 있었다. 이 0.53은 2인 게임의
+`identityCenter`(=0.5)를 전제로 "동률보다 +0.03 우세"를 뜻하도록 설계된
+값인데, 카탄은 `playerCount=4`라 `identityCenter=0.25`인데도 여전히 0.53을
+요구받고 있었다 — 공정한 몫(0.25)의 2배 이상을 요구한 셈이다. 저장소 전체에서
+`playerCount`가 2가 아닌 게임은 카탄(4)과 아발론(5)뿐이고, 이 두 게임만
+정확히 "여러 축을 다 시도해도 계속 실패" 패턴을 보였다는 것이 이 진단을
+강하게 뒷받침한다.
+
+### 수정 내용
+
+`src/kernel/blueprint.ts`의 `promotionMinWinRate`를
+
+```ts
+promotionMinWinRate: classification.identityCenter + (DEFAULT_CRITERIA.minWinRate - 0.5),
+```
+
+로 교체(`DEFAULT_CRITERIA.minWinRate - 0.5` = 0.03을 그대로 계산식으로 써서
+2인 게임에서 기존 0.53을 byte-identical로 보존). 결과:
+- 2인 게임(identityCenter=0.5): 0.5+0.03=**0.53**(기존과 완전히 동일 —
+  회귀 없음, 이미 채택된 게임들의 registry/ledger 어떤 것도 재계산되지
+  않으므로 과거 판정에 영향 없음).
+- 카탄(identityCenter=0.25): **0.28**.
+- 아발론(identityCenter=0.2): **0.23**(이번 위임 범위 밖, 재판정하지 않음).
+
+`src/kernel/__tests__/blueprint.test.ts`에 2인 게임(변화 없음 확인)·FFA
+게임(0.28 스케일링 확인) 두 케이스를 추가. `npx tsc --noEmit` 0에러,
+`npm test` 전체 통과(**69 suites / 966 tests**, 기존 964개 + 신규 2개,
+회귀 없음 — 특히 기존 `blueprint.test.ts`의 2인 게임 케이스가 0.53을
+그대로 유지함을 확인).
+
+### 재판정 — `src/reference/runners/catan-a8-rejudge.ts` (신규 러너)
+
+기존 3개 카드(`catanScarcityWeightedTrade`, `catanPipWeightedBuild`,
+`catanProductionDenialRobber`)를 **새로 설계하지 않고 그대로 재사용**해서
+보정된 기준(minWinRate 자동 0.28, smoke SPRT p0=identityCenter=0.25,
+p1=0.35)으로 하나의 웨이브에 동시 후보로 등록해 재판정. regression=v1
+(flags=[]), opponent=heuristic. 완전히 새 시드 뱅크(1,000,000대, 기존
+catan*.ts 전체 grep으로 겹치지 않음 확인 — round3까지 최대 998,019 사용).
+screen→smoke→prune→holdout 전부 진행.
+
+실행 로그(발췌):
+
+```
+=== catan-a8-rejudge runner ===
+identityCenter=0.25 (playerCount=4)
+criteria: minWinRate=0.28 minScoreDiff=5
+catanScarcityWeightedTrade: verdict=failed tiersPassed=screen
+  smoke: winRate=0.033 scoreDiff=-2.017 blocks=15
+catanPipWeightedBuild: verdict=near-miss tiersPassed=screen→smoke
+  smoke: winRate=0.333 scoreDiff=0.456 blocks=15
+  prune: winRate=0.350 scoreDiff=0.517 blocks=5
+catanProductionDenialRobber: verdict=near-miss tiersPassed=screen→smoke
+  smoke: winRate=0.283 scoreDiff=0.072 blocks=15
+  prune: winRate=0.300 scoreDiff=0.383 blocks=5
+```
+
+| 후보 | smoke 승률 | smoke scoreDiff | prune 승률 | prune scoreDiff | 최종 판정 |
+|---|---|---|---|---|---|
+| catanScarcityWeightedTrade | 3.3% | -2.017 | (미도달) | (미도달) | **failed** |
+| catanPipWeightedBuild | 33.3% | 0.456 | 35.0% | 0.517 | **near-miss** |
+| catanProductionDenialRobber | 28.3% | 0.072 | 30.0% | 0.383 | **near-miss** |
+
+`runs/catan/registry.json`은 `v1` 그대로(승격 없음, 셋 다 holdout에
+도달하지 못함 — near-miss는 adopted가 아니다). `runs/catan/near-miss-a8-rejudge.json`에
+2개 근접실패 후보 기록.
+
+### 해석 — 결과를 있는 그대로
+
+**진단은 맞았지만, 셋 다 여전히 미채택이다.** 보정 전에는 3개 전부
+`failed`(minWinRate 0.53에 승률 자체가 크게 못 미침)였는데, 보정 후에는
+2개(`catanPipWeightedBuild`, `catanProductionDenialRobber`)가 smoke를
+통과해 prune까지 진출했고 승률(0.30~0.35)은 새 minWinRate(0.28) 기준을
+넘는다 — 즉 이 두 카드는 "heuristic보다 나쁘다"가 아니라 "공정한 몫보다는
+낫지만 +0.03 마진에 딱 걸쳐 있었다"는 것이 맞았다. 다만 prune 단계에서
+**minScoreDiff(기본값 5, 미보정 cross-game 상수)**에 막혔다 —
+scoreDiff가 0.383~0.517로 5에 크게 못 미친다. 이 minScoreDiff=5는
+`assembleWaveConfig`에 calibration을 넘기지 않아 `DEFAULT_CRITERIA.minScoreDiff`
+그대로 적용된 것으로, 카탄의 점수 스케일(승점 10점 만점, 세션당 몇 점 차이가
+정상적인 승부인지)과 무관한 값이다 — P6(`recommendedMinScoreDiff`)가 이미
+이 문제를 다른 게임들에서 해결한 바로 그 축인데, 이번 재판정 러너는 브리프
+지시대로 기존 3개 카드를 그대로 재사용하는 순수 재측정만 목적으로 했으므로
+calibration 배선은 이번 스코프 밖으로 남겨둔다(다음 라운드 후보).
+`catanScarcityWeightedTrade`(거래 카드)는 minWinRate 보정과 무관하게 여전히
+smoke에서 명백히 진다(3.3%, scoreDiff 음수) — 이 카드 자체는 여전히
+heuristic보다 나쁜 전략이라는 판단은 보정 전후 동일하다.
+
+**좌석 편향 가설은 이번 실측으로도 재확인상 특별한 반증/입증 근거를 추가로
+얻지 못했다** — `runPairedBlock`이 이미 그 효과를 상쇄한다는 코드 사실은
+변하지 않으며, 이번 재판정의 목적은 그 가설을 재검증하는 것이 아니라 순전히
+임계값 결함을 고치는 것이었다.
+
+### 다음 카드 제안 (메인 루프 판단용, 이 카드 안에서 재시도하지 않음)
+
+- `catanPipWeightedBuild`/`catanProductionDenialRobber` 둘 다 near-miss로
+  prune의 scoreDiff 게이트에 막혔다 — 다음 시도는 P6 스타일로
+  `measureNoiseFloor`의 `scoreDiffStdDev`를 계산해 `assembleWaveConfig`에
+  calibration으로 넘겨 카탄에 맞는 `recommendedMinScoreDiff`를 유도하는
+  것이 가장 직접적인 다음 단계일 수 있다(단, 이번 위임 범위 밖).
+- 아발론(playerCount=5, identityCenter=0.2)도 같은 결함의 영향을 받았을
+  가능성이 있으나, 아발론 A8 2차 라운드는 원인 분리 3후보를 동시에 테스트한
+  복잡한 구조라 별도 설계 브리프가 필요하다 — 이번 위임 범위 밖, 다음 트랙
+  후보로만 기록.

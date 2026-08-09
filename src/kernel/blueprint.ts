@@ -130,7 +130,12 @@ export function deriveBlueprint(
   }
 
   return {
-    promotionMinWinRate: DEFAULT_CRITERIA.minWinRate,
+    // FFA(3인 이상) 게임의 identityCenter로 스케일: 2인 게임(identityCenter=0.5)은
+    // DEFAULT_CRITERIA.minWinRate(0.53) 그대로 byte-identical 보존되고, FFA
+    // 게임은 공정한 몫(identityCenter) 기준으로 +0.03 우세를 요구하도록 이동한다
+    // (docs/FIX-BACKLOG.md E11 — 카탄 playerCount=4가 identityCenter=0.25인데도
+    // 2인 게임 전제 0.53을 그대로 요구받던 결함).
+    promotionMinWinRate: classification.identityCenter + (DEFAULT_CRITERIA.minWinRate - 0.5),
     promotionMinScoreDiff:
       classification.scoreStructure === 'win-loss-only' ? 0 : DEFAULT_CRITERIA.minScoreDiff,
     sprtNullHypothesis: classification.identityCenter,

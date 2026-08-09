@@ -57,6 +57,28 @@ describe('deriveBlueprint', () => {
   });
 });
 
+// docs/FIX-BACKLOG.md E11: promotionMinWinRate must scale with
+// classification.identityCenter instead of always returning the 2-player
+// DEFAULT_CRITERIA.minWinRate (0.53) — a fixed constant that assumes
+// identityCenter=0.5 regardless of playerCount, which demanded more than
+// double the fair share (0.53 vs identityCenter=0.25) from 4-player catan.
+describe('deriveBlueprint promotionMinWinRate (E11 — FFA identityCenter scaling)', () => {
+  it('two-player game (identityCenter=0.5): stays byte-identical at 0.53 (no regression)', () => {
+    const classification = classifyGame(miniTrickAdapter.spec);
+    const blueprint = deriveBlueprint(classification);
+    expect(classification.identityCenter).toBeCloseTo(0.5);
+    expect(blueprint.promotionMinWinRate).toBe(0.53);
+  });
+
+  it('FFA game (playerCount=4, identityCenter=0.25): scales to 0.28', () => {
+    const ffaSpec = { ...splendorAdapter.spec, playerCount: 4, maxDecisionsPerGame: 190 };
+    const classification = classifyGame(ffaSpec);
+    const blueprint = deriveBlueprint(classification);
+    expect(classification.identityCenter).toBeCloseTo(0.25);
+    expect(blueprint.promotionMinWinRate).toBeCloseTo(0.28);
+  });
+});
+
 // P6 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-8.md §2): recommendedMinScoreDiff
 // derivation branches.
 describe('deriveBlueprint recommendedMinScoreDiff (P6)', () => {

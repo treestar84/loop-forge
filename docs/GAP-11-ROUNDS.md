@@ -1923,3 +1923,95 @@ build/bankTrade를 완전히 분리해 실측함. 아직 안 한 것:
   문제인지를 먼저 진단하는 방향을 고려할 만하다.
 - 이번 카드 하나에서 파라미터를 바꿔가며 재시도하지 않는다(ADR-0009
   준하는 신중함) — 다음 판단은 메인 루프가 한다.
+
+## 카탄 A8 3차 시도(로버 결정지점)
+
+1·2차와 완전히 다른 결정지점 `moveRobberAndSteal`을 겨냥한 세 번째 카드
+`catanProductionDenialRobber`(scratchpad/catan-a8-round3-design-spec.md).
+1차 `catanScarcityWeightedTrade`(bankTrade, smoke 6.3%)와 2차
+`catanPipWeightedBuild`(build, smoke 25.0%)는 둘 다 build/bankTrade만
+건드렸고, 2차 문서의 "다음 카드 제안"이 정확히 로버 이동 로직을 지목했다.
+
+코드로 확인한 heuristic의 실제 결함(`heuristicPick`의 `moveRobberAndSteal`
+분기): 로버를 옮길 헥스의 생산 가치(pip)를 전혀 평가하지 않고 "리더를
+타겟하는 legal 중 아무거나"만 고르며, 자기 소유 건물이 걸린 헥스에 로버를
+놓아 자기 생산까지 막는 자해 가능성을 전혀 걸러내지 않는다
+(`legalRobberChoices`가 `victims`를 상대 건물로만 채우기 때문에 자기
+헥스를 고르는 `target: null` 선택이 legal에 그대로 남는다).
+
+`catanProductionDenialRobber`는 legal한 `{hex, target}` 후보마다
+`denialScore = selfTouchesHex ? -hexValue : hexValue`(hexValue=pipCount)를
+계산해 자해 회피 + 고생산 헥스 우선 차단으로 최댓값 후보군을 좁히고,
+2단계 tie-break(target 존재 우선 → 리더 우선)로 하나를 고른다.
+`moveRobberAndSteal`에만 개입하고 build/bankTrade 등 다른 모든 결정은
+base(heuristic)에 위임 — 1·2차와 완전히 직교.
+
+### 검증 결과
+
+- `npx tsc --noEmit`: 0에러.
+- `npm test`: 69 suites / 964 tests 전부 통과(회귀 없음).
+- **C6(전략 표면 구별)**: 전체 6개 flag 중 5/6 behaviorally distinct
+  (`cityUpgradePriority`만 no-op) — `catanProductionDenialRobber`는
+  no-op에 걸리지 않고 구별되는 flag로 확인됨. v1 baseline 부트스트랩
+  러너(`catan.ts`)가 신규 flag를 자동 픽업해 자체 시드 대역에서도
+  wave A(단일 상대) smoke winRate=21.7%, wave B(fieldMix) smoke
+  winRate=35.0%로 heuristic과 명백히 다른 행동을 보였다(대역이 달라
+  round3 웨이브 수치와 직접 비교 불가 — comparabilityKey 다름, 방향성
+  참고용).
+- **C4(처리량, 5배 한도)**: fresh seeds 990000-990019, 20게임
+  head-to-head. base(heuristic vs heuristic)=92ms,
+  `catanProductionDenialRobber` vs heuristic=87ms → 비율 0.95x
+  (5배 한도 통과, 오히려 base보다 근소하게 빠름 — 후보 수가 헥스당
+  최대 몇 개뿐이라 예상대로 오버헤드 무시할 수준).
+- **웨이브 실행**(`catan-a8-round3.ts`, regression=v1, opponent=heuristic,
+  신규 시드 대역 990000+·991000+·992000+·993000+·994000+/996000+/998000
+  — 기존 catan*.ts 전체를 grep해 round2의 holdout 980000+20 이내와 겹치지
+  않음을 확인 후 선정):
+
+| 티어 | 승률 | scoreDiff | 블록(게임) | drawRate | 통과 |
+|---|---|---|---|---|---|
+| screen | (프로브 3시드에서 행동 구별 확인) | — | — | — | ✅ |
+| smoke | **20.0%** | 0.028 | 15 | 0% | ❌ failed |
+| prune | (미도달) | — | — | — | — |
+| holdout | (미도달) | — | — | — | — |
+
+근접실패 후보 없음(`runs/catan/near-miss-a8-round3.json` = `[]`).
+`runs/catan/ledger.json`에 `a8-wave-3` adoption record 추가
+(entries[0].verdict="failed").
+
+### 최종 판정: **failed**
+
+`runs/catan/registry.json`은 v1 그대로(승격 없음). smoke 15블록에서 승률
+20.0%·scoreDiff +0.028로 minWinRate(0.53) 기준에 크게 미달 — 1차(6.3%)보다는
+낫고 2차(25.0%)와 비슷한 수준이지만 여전히 heuristic에 명백히 진다. draw가
+0%로 오히려 1·2차보다 승패가 뚜렷하게 갈렸다(1차 20%, 2차 40% draw였던 것과
+대비) — robber 개입이 게임을 더 결정적으로 만들지만 그 결정이
+`catanProductionDenialRobber` 쪽에 유리하게 작용하지 않았다는 뜻으로 읽힌다.
+
+**해석**: 이번 결과는 2차 문서가 제기한 가설("build 좌표 선택이 아니라
+다른 결정지점(로버 이동) 또는 좌석 편향이 원인")에서 로버 이동 축을
+반증한다 — 완전히 새로운 결정지점을, heuristic이 전혀 평가 안 하던
+축(헥스 가치·자해 방지)까지 개선해 넣었음에도 승률이 20.0%로 1·2차와
+비슷한 범위에 머물렀다. 세 번의 서로 다른 결정지점(bankTrade, build,
+robber) 개선이 모두 20~25% 구간에 수렴한다는 것은, 카탄 4인전 heuristic
+열세의 원인이 개별 결정지점의 국소적 품질이 아니라 더 구조적인 요인일
+가능성을 시사한다 — 유력한 후보는 C5가 반복 측정한 좌석 편향
+(`seatWinRates=[0.595, 0.170, 0.115, 0.110]`, bias=0.485, 1·2·3차 모두
+동일 수치로 재현됨: heuristic vs heuristic identity self-play는 결정론적
+좌석 순서 우위를 그대로 드러낸다). 4인전 구조 자체에서 오는 좌석 순서
+효과가 개별 전략 카드로는 극복 불가능한 상한을 만들고 있을 가능성이 있다.
+
+### 다음 카드 제안 (메인 루프 판단용, 이 카드 안에서 재시도하지 않음)
+
+- 세 축(거래·건설·로버) 모두 20~25% 구간에서 실패했다는 수렴 신호를
+  근거로, 다음은 개별 결정지점 카드가 아니라 **좌석 편향(bias=0.485)
+  자체의 진단**을 먼저 시도할 가치가 있다 — 예를 들어 좌석 순서를
+  무작위화하거나 순서 효과를 상쇄하는 처치가 있는지, 혹은 4인전이라는
+  플레이어 수 자체가 이 프레임워크의 다른 게임들과 달리 heuristic
+  우위의 구조적 원인인지 확인.
+- discard 선택(아직 손대지 않은 마지막 미개선 결정지점)도 후보로
+  남아있으나, 세 결정지점의 수렴 패턴을 볼 때 우선순위는 좌석 편향
+  진단이 더 높다고 판단됨(메인 루프 최종 결정 사항).
+- 카탄 채택 후보 0개 상태가 3라운드 연속 지속 — ADR-0009의 "같은 축
+  억지 재시도 금지" 정신을 이어, 4차 카드 전에 반드시 메인 루프가 이
+  수렴 신호를 재검토할 것.

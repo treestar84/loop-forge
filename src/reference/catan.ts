@@ -1354,6 +1354,99 @@ const catanPipWeightedBuild: StrategyFlagSpec<CatanObservation, CatanChoice> = {
   },
 };
 
+/**
+ * Strategy flag: effective. `catanProductionDenialRobber` — the A8 round-3
+ * card (docs/GAP-11-ROUNDS.md "카탄 A8 3차 시도(로버 결정지점)",
+ * scratchpad/catan-a8-round3-design-spec.md). The two prior A8 cards
+ * (`catanScarcityWeightedTrade`, `catanPipWeightedBuild`) both touched the
+ * `build`/`bankTrade` decisions and both screened out — this card targets a
+ * completely different, previously untouched decision point instead:
+ * `moveRobberAndSteal`. It never overrides any other decision point,
+ * delegating everything else straight to `bot.decide(...)`, keeping it
+ * orthogonal to both prior cards.
+ *
+ * `heuristicPick`'s own `moveRobberAndSteal` branch has two real gaps this
+ * card fixes:
+ *   1. It never evaluates the hex being blocked at all — it only checks
+ *      whether a legal choice happens to target the current leader, and
+ *      picks the first such choice (or the first legal choice overall)
+ *      with no regard for how productive that hex is.
+ *   2. It never guards against blocking a hex the active player's own
+ *      buildings touch — `legalRobberChoices` only populates `victims` from
+ *      *opponents'* buildings, so a self-touching hex with `target: null`
+ *      survives into `legal` untouched, and heuristic can walk straight
+ *      into self-sabotage.
+ *
+ * This card scores every legal `{hex, target}` candidate by
+ * `denialScore = selfTouchesHex ? -hexValue : hexValue` (hexValue is the
+ * already-exported `pipCount` of that hex's dice number), penalizing
+ * self-touching hexes so blocking one's own production is never preferred
+ * over blocking an opponent's, then narrows to the candidates sharing the
+ * max `denialScore`. Ties are broken in two steps, preserving
+ * `heuristicPick`'s "go after the leader" intuition: candidates with a
+ * non-null `target` are preferred over `target === null` (denying a hex is
+ * only half the point — stealing a card when possible is free upside), and
+ * within that group the candidate whose `target` has the highest
+ * `observation.scores[target]` wins (excluding `observation.active`, i.e.
+ * self, from leader consideration — matching `heuristicPick`'s own loop,
+ * kept here as a second safety net since `legalRobberChoices` already never
+ * offers self as a target). Remaining ties keep the first-encountered
+ * candidate in `legal`'s order.
+ */
+function hexValueOf(observation: CatanObservation, hex: number): number {
+  return pipCount(observation.tiles[hex]?.number ?? null);
+}
+
+function selfTouchesHex(observation: CatanObservation, hex: number): boolean {
+  return (HEX_VERTICES[hex] as number[]).some(
+    (v) => observation.buildings[v]?.owner === observation.self,
+  );
+}
+
+const catanProductionDenialRobber: StrategyFlagSpec<CatanObservation, CatanChoice> = {
+  flag: 'catanProductionDenialRobber',
+  description:
+    'On the moveRobberAndSteal decision, scores each legal {hex, target} candidate by denialScore = selfTouchesHex ? -hexValue : hexValue (hexValue via pipCount), avoiding self-sabotage and preferring high-production hexes to block; ties prefer a non-null target, then the highest-scoring target (leader), then legal order. Never touches build/bankTrade or any other decision point.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'catanProductionDenialRobber'),
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'moveRobberAndSteal') {
+            const candidates = legal as Extract<CatanChoice, { kind: 'moveRobberAndSteal' }>[];
+            let bestDenial = -Infinity;
+            for (const c of candidates) {
+              const hexValue = hexValueOf(observation, c.hex);
+              const denialScore = selfTouchesHex(observation, c.hex) ? -hexValue : hexValue;
+              if (denialScore > bestDenial) bestDenial = denialScore;
+            }
+            const topDenial = candidates.filter((c) => {
+              const hexValue = hexValueOf(observation, c.hex);
+              const denialScore = selfTouchesHex(observation, c.hex) ? -hexValue : hexValue;
+              return denialScore === bestDenial;
+            });
+            const withTarget = topDenial.filter((c) => c.target !== null);
+            const pool = withTarget.length > 0 ? withTarget : topDenial;
+            let best = pool[0] as Extract<CatanChoice, { kind: 'moveRobberAndSteal' }>;
+            let bestLeaderScore = -1;
+            for (const c of pool) {
+              if (c.target === null || c.target === observation.active) continue;
+              const score = observation.scores[c.target] as number;
+              if (score > bestLeaderScore) {
+                bestLeaderScore = score;
+                best = c;
+              }
+            }
+            return best;
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by running this adapter's own random-vs-random
 // self-play (see src/reference/__tests__/catan.test.ts's generation note). No
@@ -1621,6 +1714,7 @@ export const catanAdapter: GameAdapter<CatanState, CatanObservation, CatanChoice
     eagerBankTrade,
     catanScarcityWeightedTrade,
     catanPipWeightedBuild,
+    catanProductionDenialRobber,
   ],
 };
 

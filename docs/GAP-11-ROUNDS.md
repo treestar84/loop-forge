@@ -1783,3 +1783,143 @@ CI 하한만 0.5 문턱에서 걸리면, 새 설계를 시도하기 전에 먼�
 라운드에서 메인 루프가 새 후보 설계 여부를 판단한다.
 
 산출물: `runs/hearthstone/v4-large-confirm.json`.
+
+## 카탄 A8 2차 시도(건설/거래 분리)
+
+**배경**: 카탄 A8 첫 채택 시도(위 절)가 실패로 끝나며 "다음 카드 제안" 3개를
+남겼다 — 1번(결정지점 분리로 원인 분리), 2번(4:1 은행 거래 자체가 순손실일
+가능성 검토), 3번(규칙 오버라이드 대신 보드 상태 기반 평가함수로 전환).
+이번 카드 `catanPipWeightedBuild`는 1번과 3번을 동시에 반영한다: **bankTrade
+결정에는 전혀 개입하지 않고**(base(heuristic)에 그대로 위임 — heuristic
+베이스는 절대 거래하지 않으므로 이 후보도 절대 거래하지 않는다), build
+결정에서 **"어떤 유형을 지을지" 우선순위는 heuristic과 완전히 동일하게
+유지**(정착지>도시>도로>toTrade — 바꾸지 않음), **"같은 유형 안에서 어느
+좌표를 고를지"만** `heuristicPick`의 `buildInitial` 분기가 이미 쓰고 있는
+"인접 헥스 pip 합" 평가함수(`pipCount`, 이번에 export 추가)를 재사용해
+교체했다.
+
+### 구현 (`src/reference/catan.ts`)
+
+- `isFreeForSettlement(observation, v)`: 내부 `isVertexFreeForSettlement`
+  (state 기반, 385-391줄)와 로직이 정확히 같은 observation 기반 재구현 —
+  `StrategyFlagSpec.apply`의 `decide`가 observation만 받기 때문
+  (`catanScarcityWeightedTrade`도 같은 이유로 observation만 사용, 관례 일치).
+- `pipScore(observation, vertex)`: `VERTEX_HEXES[vertex]`의 각 헥스 번호에
+  `pipCount`를 적용해 합산 — `heuristicPick`의 `buildInitial` 채점 로직과
+  바이트 단위로 동일한 산식(같은 `pipCount` 함수를 재사용해서 호출).
+- **settlement/city 그룹**: legal 후보를 kind로 필터한 뒤 `pipScore`가
+  최댓값인 것을 선택(동점이면 먼저 나온 것 — 결정론 유지). city 그룹은
+  실전에서 후보가 1~2개뿐인 경우가 많아 대부분 무변화일 수 있음을 doc
+  comment에 기록.
+- **road 그룹**: 각 edge의 두 끝점 vertex에 대해 "그 vertex가 지금
+  정착지를 지을 수 있는 자리(`isFreeForSettlement`)라면 `pipScore`, 아니면
+  0"을 계산해 두 값 중 큰 쪽을 그 edge의 점수로 삼고, 점수가 최대인 edge를
+  선택. 둘 다 0이면 첫 번째 후보(heuristic의 "아무 도로나"와 동일한
+  폴백). doc comment에 "1홉 근시안 평가 — 도로 2개를 이어야 닿는 고가치
+  정착지는 보지 못함"을 알려진 근사로 정직하게 기록.
+- 어느 kind에도 후보가 없으면 `toTrade`. `bankTrade`를 포함한 다른 모든
+  결정점은 `bot.decide(...)`로 그대로 위임.
+- export 정리: 파일 하단 export 블록에 `pipCount` 추가(중복 재구현 대신
+  기존 함수 재사용 — 초기 배치와 이번 카드가 같은 채점 기준을 쓴다는 것을
+  코드로도 보장).
+
+### 검증
+
+- `npx tsc --noEmit`: 0에러.
+- `npm test`: 69 suites, 964 tests 전부 통과 — 회귀 없음.
+
+### C6 재채점 (행동 구별 확인)
+
+```
+C6-strategy-surface: score=80
+  note: 4/5 strategySurface flag(s) are behaviorally distinct.
+  note: "cityUpgradePriority" produced no observable behavior change across probe seeds (no-op).
+```
+
+신규 `catanPipWeightedBuild`는 행동 구별에 성공(no-op 아님) — no-op으로
+남은 것은 이전 라운드부터의 기존 `cityUpgradePriority`뿐(이번 카드 스코프
+밖, 그대로 둠).
+
+### C4 처리량 확인 (5배 한도 점검)
+
+`catanPipWeightedBuild` 대 base(heuristic) 20게임 head-to-head 실측(fresh
+seeds 950000-950019, botSeedBase 950100/950200):
+
+| 구성 | 소요시간 |
+|---|---|
+| base(heuristic vs heuristic) | 81ms |
+| catanPipWeightedBuild vs heuristic | 80ms |
+| 비율 | **0.99x**(측정 잡음 범위, 5배 한도 전혀 안 걸림) |
+
+pip 합산이 O(vertex 수) 수준의 저비용 연산이라 예상대로 처리량 문제 없음.
+
+### 웨이브 실측 (신규 러너 `src/reference/runners/catan-a8-round2.ts`, 신규 시드 뱅크)
+
+기존 catan 러너 3개(`catan.ts`, `catan-benchmark.ts`, `catan-a8.ts`)의 모든
+리터럴 시드/봇시드를 grep으로 사전 확인(`catan-a8.ts`가 이미 940000+까지
+점유 — 자체 헤더 주석에 전체 목록 기록됨) 후 950000+ 대역으로 선택:
+처리량 체크 시드 950000-950019/botSeedBase 950100·950200, 캘리브레이션
+identitySeeds 951000-951099/시드 44/952000, screenProbe 953001-953003/
+botSeedBase 953100, `catan-a8-round2-smoke`(960000+)/`-prune`(970000+)/
+`-holdout`(980000+). regression=v1(플래그 0개) 그대로, 상대는 heuristic.
+
+캘리브레이션: identity self-play(heuristic vs heuristic, 100 시드)
+meanWinRate=0.2500, blockStdDev=0.0000(완전 결정론적) → 권장 블록수
+5(클램프 후 5) → smokeMaxBlocks=15.
+
+| 티어 | 승률 | scoreDiff | 블록(게임) | drawRate | 통과 |
+|---|---|---|---|---|---|
+| screen | (프로브 3시드에서 행동 구별 확인) | — | — | — | ✅ |
+| smoke | **25.0%** | 0.289 | 15 | 20% | ❌ failed |
+| prune | (미도달) | — | — | — | — |
+| holdout | (미도달) | — | — | — | — |
+
+근접실패 후보 없음(`runs/catan/near-miss-a8-round2.json` = `[]`).
+
+참고로 (신규 러너 실행에 앞서 v1 baseline을 부트스트랩하기 위해 먼저 실행한)
+`catan.ts`의 자체 러너가 신규 플래그를 자동으로 픽업해 자신의 시드 대역에서도
+동일 신호를 냈다: wave A(단일 상대) smoke winRate=35.0%, wave B(fieldMix)
+smoke winRate=45.0% — 대역은 다르지만(comparabilityKey 다름, 직접 비교
+불가) minWinRate=0.53 기준에 미달한다는 방향은 일관됨.
+
+### 최종 판정: **failed**
+
+`runs/catan/registry.json`은 v1 그대로(승격 없음). `runs/catan/ledger.json`에
+`a8-wave-2` adoption record 추가(entries[0].verdict="failed"). smoke 15블록
+에서 승률 25.0%·scoreDiff +0.289로 minWinRate(0.53) 기준에 크게 미달 —
+근소한 차이가 아니라 heuristic보다 명백히 나쁜 성과. scoreDiff는 양수이나
+승률이 낮아 채점 기준(승률+scoreDiff 동시 충족) 미달로 failed.
+
+**해석**: bankTrade 축을 완전히 배제했음에도(base 그대로 절대 거래 안 함)
+1차(`catanScarcityWeightedTrade`, smoke 6.3%)보다는 나아졌지만(25.0%) 여전히
+크게 부족하다 — 이는 "다음 카드 제안 2번"(4:1 거래 자체가 순손실)의 가설을
+뒷받침하지 않는다: bankTrade를 완전히 제거해도 heuristic을 못 넘었으므로,
+1차의 실패가 순전히 bankTrade 필터링 때문이었다는 가설은 이번 실측으로
+반증된 것에 가깝다. 대신 build 좌표 선택 자체("어느 정착지를 먼저 지을지")가
+이 게임에서 승률에 큰 영향을 못 준다는 신호로 보인다 — 초기 배치는 이미
+동일한 pip 평가함수를 쓰고 있어(heuristic도 `buildInitial`에서 pip 최적화),
+게임 중반 build 단계의 좌표 선택 품질을 개선해도 초기 배치가 이미 결정한
+자원 생산 구조를 크게 뒤집지 못하는 것으로 추정된다(사후 추정, 추가 실측
+없이 확정하지 않음).
+
+### 다음 카드 제안 (검증된 것과 아직 안 한 것 구분)
+
+1차의 제안 3개 중 이번 카드가 검증한 것: 제안 1(결정지점 분리) — 완료,
+build/bankTrade를 완전히 분리해 실측함. 아직 안 한 것:
+
+- **제안 2(4:1 은행 거래 재검토)는 재해석 필요**: 이번 실측이 "거래를
+  완전히 안 해도 여전히 큰 격차로 진다"는 것을 보였으므로, 다음 검토는
+  "거래를 아예 안 하는 게 최선"이 아니라 **"heuristic 자체의 build/거래
+  구조 전체가 다른 무언가(예: 초기 배치 알고리즘, 로버 이동, 또는 4인전의
+  구조적 좌석 편향 — C5가 측정한 seatWinRates=[0.595, 0.170, 0.115, 0.110],
+  bias=0.485)에 밀리고 있을 가능성"으로 옮겨야 한다.
+- **제안 3(휴리스틱 자체 개선 축)은 부분적으로 검증되었으나 이번엔
+  효과 없음**: 평가함수형 전환(장기 A8과 같은 처치)을 build 좌표 선택에
+  적용했지만 승률을 heuristic 수준까지 끌어올리지 못했다 — 이 처치가
+  카탄에는 통하지 않는다는 첫 증거. 다음 카드는 build 좌표 선택이 아니라
+  **로버 이동 로직**(현재 heuristicPick의 robber 타겟팅은 단순히
+  최고점자를 노리기만 함) 또는 **discard 선택**처럼 아직 손대지 않은
+  결정지점, 혹은 C5가 드러낸 좌석 편향(0.485)이 4인전 자체의 구조적
+  문제인지를 먼저 진단하는 방향을 고려할 만하다.
+- 이번 카드 하나에서 파라미터를 바꿔가며 재시도하지 않는다(ADR-0009
+  준하는 신중함) — 다음 판단은 메인 루프가 한다.

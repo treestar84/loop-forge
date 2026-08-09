@@ -1238,6 +1238,122 @@ const catanScarcityWeightedTrade: StrategyFlagSpec<CatanObservation, CatanChoice
   },
 };
 
+/**
+ * Strategy flag: effective. `catanPipWeightedBuild` — the A8 round-2 card
+ * (docs/GAP-11-ROUNDS.md "카탄 A8 2차 시도(건설/거래 분리)",
+ * scratchpad/catan-a8-round2-design-spec.md). Both prior catan A8 attempts
+ * (`eagerBankTrade`, `catanScarcityWeightedTrade`) touched the bankTrade
+ * decision and both screened out/failed — this card deliberately isolates
+ * the other axis instead: it never overrides `bankTrade` (or any decision
+ * point other than `build`), delegating everything else straight to
+ * `bot.decide(...)`. It also keeps the *type* priority on `build`
+ * identical to `heuristicPick` (settlement > city > road > toTrade) — the
+ * only change is *which coordinate* to pick within a type, replacing
+ * `heuristicPick`'s `legal.find(...)` (first legal candidate, no
+ * evaluation) with the same "sum of adjacent hex pips" evaluation function
+ * `heuristicPick`'s own `buildInitial` branch already uses for initial
+ * settlement placement (`pipScore`, via the now-exported `pipCount`) —
+ * reusing a function already proven to change behavior in the initial
+ * phase, rather than inventing a new evaluation from scratch.
+ *
+ * - settlement/city groups: among legal candidates of that kind, pick the
+ *   vertex with the highest `pipScore` (ties keep the first-encountered
+ *   candidate, matching `legal`'s iteration order, so play stays
+ *   deterministic). The city group in practice rarely has more than one or
+ *   two legal candidates (at most one upgradeable settlement per decision
+ *   is typical), so this group is often a near no-op — kept anyway for
+ *   scoring consistency with settlement/road.
+ * - road group: each candidate edge's two endpoint vertices are scored via
+ *   `isFreeForSettlement(observation, v) ? pipScore(v) : 0`, and the edge
+ *   takes the *larger* of its two endpoint scores. The edge with the
+ *   highest score wins (ties: first-encountered). Known, accepted
+ *   approximation (not attempted to fix here): this is a one-hop-sighted
+ *   evaluation — it rewards a road that touches an open, high-pip vertex
+ *   right now, but cannot see a high-value vertex that is two roads away.
+ *   If every candidate edge scores 0 (no candidate touches a currently-open
+ *   settlement spot), the first legal road is used, identical to
+ *   `heuristicPick`'s "any road" fallback.
+ * - `isFreeForSettlement` reimplements `isVertexFreeForSettlement`
+ *   (catan.ts:385-391) against `CatanObservation` instead of `CatanState`,
+ *   because `StrategyFlagSpec.apply`'s `decide` only receives an
+ *   observation (same constraint `catanScarcityWeightedTrade` operates
+ *   under, above) — the distance-rule check (no adjacent building) is
+ *   otherwise byte-for-byte identical.
+ */
+function isFreeForSettlement(observation: CatanObservation, v: number): boolean {
+  if (observation.buildings[v] !== null) return false;
+  for (const n of VERTEX_NEIGHBORS[v] as number[]) {
+    if (observation.buildings[n] !== null) return false;
+  }
+  return true;
+}
+
+function pipScore(observation: CatanObservation, vertex: number): number {
+  return (VERTEX_HEXES[vertex] as number[]).reduce(
+    (sum, hex) => sum + pipCount(observation.tiles[hex]?.number ?? null),
+    0,
+  );
+}
+
+function bestByPipScore<C extends CatanChoice>(
+  candidates: readonly C[],
+  score: (candidate: C) => number,
+): C | undefined {
+  let best: C | undefined;
+  let bestScore = -1;
+  for (const candidate of candidates) {
+    const s = score(candidate);
+    if (s > bestScore) {
+      bestScore = s;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+const catanPipWeightedBuild: StrategyFlagSpec<CatanObservation, CatanChoice> = {
+  flag: 'catanPipWeightedBuild',
+  description:
+    'On the build decision, keeps the base settlement>city>road>toTrade type priority but replaces first-legal-candidate coordinate selection with the pip-sum evaluation heuristicPick already uses for initial settlement placement. Never touches bankTrade or any other decision point.',
+  apply(base) {
+    return (seed) => {
+      const bot = base(seed);
+      return {
+        id: wrapBotId(bot.id, 'catanPipWeightedBuild'),
+        decide(decisionPoint, observation, legal) {
+          if (decisionPoint === 'build') {
+            const settlements = legal.filter(
+              (c): c is Extract<CatanChoice, { kind: 'buildSettlement' }> => c.kind === 'buildSettlement',
+            );
+            if (settlements.length > 0) {
+              return bestByPipScore(settlements, (c) => pipScore(observation, c.vertex)) as CatanChoice;
+            }
+            const cities = legal.filter(
+              (c): c is Extract<CatanChoice, { kind: 'buildCity' }> => c.kind === 'buildCity',
+            );
+            if (cities.length > 0) {
+              return bestByPipScore(cities, (c) => pipScore(observation, c.vertex)) as CatanChoice;
+            }
+            const roads = legal.filter(
+              (c): c is Extract<CatanChoice, { kind: 'buildRoad' }> => c.kind === 'buildRoad',
+            );
+            if (roads.length > 0) {
+              return bestByPipScore(roads, (c) => {
+                const [a, b] = EDGE_VERTICES[c.edge] as [number, number];
+                const scoreA = isFreeForSettlement(observation, a) ? pipScore(observation, a) : 0;
+                const scoreB = isFreeForSettlement(observation, b) ? pipScore(observation, b) : 0;
+                return Math.max(scoreA, scoreB);
+              }) as CatanChoice;
+            }
+            return legal.find((c) => c.kind === 'toTrade') as CatanChoice;
+          }
+          return bot.decide(decisionPoint, observation, legal);
+        },
+      };
+    };
+  },
+};
+
 // -----------------------------------------------------------------------
 // Replay fixtures — generated by running this adapter's own random-vs-random
 // self-play (see src/reference/__tests__/catan.test.ts's generation note). No
@@ -1499,7 +1615,13 @@ export const catanAdapter: GameAdapter<CatanState, CatanObservation, CatanChoice
     random: randomBaseline,
     heuristic: heuristicBaseline,
   },
-  strategySurface: [cityUpgradePriority, roadExpansionPriority, eagerBankTrade, catanScarcityWeightedTrade],
+  strategySurface: [
+    cityUpgradePriority,
+    roadExpansionPriority,
+    eagerBankTrade,
+    catanScarcityWeightedTrade,
+    catanPipWeightedBuild,
+  ],
 };
 
 export {
@@ -1510,4 +1632,5 @@ export {
   VERTEX_EDGES,
   VERTEX_NEIGHBORS,
   EDGE_VERTICES,
+  pipCount,
 };

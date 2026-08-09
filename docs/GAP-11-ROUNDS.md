@@ -2133,3 +2133,102 @@ heuristic보다 나쁜 전략이라는 판단은 보정 전후 동일하다.
   가능성이 있으나, 아발론 A8 2차 라운드는 원인 분리 3후보를 동시에 테스트한
   복잡한 구조라 별도 설계 브리프가 필요하다 — 이번 위임 범위 밖, 다음 트랙
   후보로만 기록.
+
+## 카탄 재판정 2차 — minScoreDiff 보정 배선
+
+**이건 새 버그가 아니라, 1차 재판정 러너의 배선 누락이었다.** 위 "카탄
+재판정" 절에서 "다음 카드 제안"으로 남겨둔 P6 calibration 배선을 실제로
+연결한 결과다. `src/reference/runners/catan-a8-rejudge.ts`는 이미
+`measureNoiseFloor`를 호출해 `noiseFloor.blockStdDev`/`scoreDiffStdDev`를
+계산해 두었지만, `assembleWaveConfig(adapter, {...})` 호출에 그 값을 3번째
+인자(`calibration`)로 넘기지 않았다 — `deriveBlueprint`가 "calibration
+없음" 분기로 빠져 범게임 폴백 `DEFAULT_CRITERIA.minScoreDiff=5`를 그대로
+썼다. `assembleWaveConfig`의 시그니처는 이미
+`(adapter, required, calibration?, overrides?)`였으므로, 이미 계산해 둔
+값을 3번째 인자로 넘기기만 하면 되는 순수 배선 수정이었다.
+
+### 구현
+
+신규 러너 `src/reference/runners/catan-a8-rejudge2.ts`를
+`catan-a8-rejudge.ts` 구조 그대로 복제(카드 3개 그대로, 새 전략 설계
+없음)해서 `assembleWaveConfig` 호출에 다음 3번째 인자만 추가:
+
+```ts
+assembleWaveConfig(adapter, { ...기존 required 필드들... }, {
+  blockStdDev: noiseFloor.blockStdDev,
+  scoreDiffStdDev: noiseFloor.scoreDiffStdDev,
+});
+```
+
+완전히 새 시드 뱅크 사용(`catan-a8-rejudge.ts`가 1,000,000~1,008,019대를
+쓰므로 겹치지 않게 1,010,000대부터 — 전체 `catan*.ts` grep으로 사전
+확인). `npx tsc --noEmit` 0에러, `npm test` 전체 통과(**69 suites /
+966 tests**, 회귀 없음).
+
+이 worktree에는 `runs/`가 비어 있었으므로(gitignore 대상, 새 worktree),
+`catan.ts`를 먼저 1회 실행해 `runs/catan/registry.json`에 `v1` 기준선을
+생성한 뒤 `catan-a8-rejudge2.ts`를 실행했다 — 두 실행 모두 이번에 처음
+만든 `runs/` 상태이므로 이전 라운드의 registry/ledger와 무관하다(순수
+로컬 재현 목적).
+
+### 실행 로그(발췌)
+
+```
+=== catan-a8-rejudge2 runner ===
+identityCenter=0.25 (playerCount=4)
+   캘리브레이션: blockStdDev=0.0000, scoreDiffStdDev=0.0000, 권장 블록수=5(클램프 후 5)
+   criteria: minWinRate=0.28 minScoreDiff=2.597144423061267e-16 (rejudge1 미보정 고정값은 5였음 — 이번엔 noise stddev 기반 보정값으로 달라짐)
+catanScarcityWeightedTrade: verdict=failed tiersPassed=screen
+  smoke: winRate=0.083 scoreDiff=-1.750 blocks=15
+catanPipWeightedBuild: verdict=screened tiersPassed=screen→smoke→prune
+  smoke: winRate=0.350 scoreDiff=0.450 blocks=15
+  prune: winRate=0.300 scoreDiff=0.133 blocks=5
+  holdout: winRate=0.250 scoreDiff=-0.033 blocks=5
+catanProductionDenialRobber: verdict=failed tiersPassed=screen
+  smoke: winRate=0.250 scoreDiff=0.067 blocks=15
+```
+
+| 후보 | smoke 승률/scoreDiff | prune 승률/scoreDiff | holdout 승률/scoreDiff | 최종 판정 |
+|---|---|---|---|---|
+| catanScarcityWeightedTrade | 8.3% / -1.750 | (미도달) | (미도달) | **failed** |
+| catanPipWeightedBuild | 35.0% / 0.450 | 30.0% / 0.133 | 25.0% / -0.033 | **screened** |
+| catanProductionDenialRobber | 25.0% / 0.067 | (미도달) | (미도달) | **failed** |
+
+**보정된 minScoreDiff는 실제로 5와 달라졌다** — `2.597144423061267e-16`
+(부동소수점 잔차 수준, 사실상 0)로 계산됐다. 원인: 이 worktree에서
+`measureNoiseFloor`(heuristic vs heuristic, fresh identity seeds
+1,011,000~1,011,099)가 측정한 `blockStdDev`/`scoreDiffStdDev`가 모두
+`0.0000`으로 나왔다 — identity self-play가 매 블록 동일한 승률/점수차를
+냈다는 뜻으로, 이번 측정 조건(블록 구성·시드)에서 노이즈 표준편차가
+관측되지 않았기 때문에 `recommendedMinScoreDiff`(2×표준편차)가 0에
+수렴했다. 배선 자체는 정상 동작한다 — calibration을 넘기지 않으면 5,
+넘기면 계산값이 실제로 반영된다는 것이 이번 실측으로 확인됐다. 다만 이
+0에 가까운 값이 카탄에 "적절한" scoreDiff 게이트인지는 별개 문제로,
+`measureNoiseFloor`가 왜 0 분산을 측정했는지는 이번 위임 범위 밖의 후속
+질문으로 남긴다.
+
+**결과: 여전히 미채택이다.** `catanScarcityWeightedTrade`/
+`catanProductionDenialRobber`는 이번에도 smoke를 통과하지 못했다(scoreDiff
+게이트가 거의 0으로 완화됐음에도 `catanProductionDenialRobber`는
+winRate 0.250 < minWinRate 0.28로 여전히 smoke fail — scoreDiff 게이트
+완화의 수혜를 못 봤다). `catanPipWeightedBuild`는 1차 재판정 때보다 한
+단계 더 진출했다(1차: screen→smoke에서 near-miss로 막힘 / 2차:
+screen→smoke→prune까지 통과, holdout까지 진행). 하지만 holdout에서
+winRate 0.250이 minWinRate 0.28 미달로 실패 — `finalVerdict`가
+`near-miss`가 아니라 **`screened`**로 분류한 이유는 holdout 실패가
+scoreDiff 단독 부족(`isScoreDiffOnlyShortfall`)이 아니라 winRate 자체가
+기준 미달이었기 때문이다(`src/kernel/gates.ts` 74-103줄). `runs/catan/
+registry.json`은 여전히 `v1`(승격 없음) — 이번에도 채택된 카드는 없다.
+`runs/catan/near-miss-a8-rejudge2.json`은 빈 배열(근접실패 후보 0건,
+2차 재판정에서는 near-miss가 아니라 failed/screened로만 갈렸다).
+
+### 다음 카드 제안 (메인 루프 판단용, 이 카드 안에서 재시도하지 않음)
+
+- `catanPipWeightedBuild`는 holdout까지 도달했지만 winRate이 0.25로
+  기준(0.28)에 살짝 못 미쳤다 — smoke/prune 표본(15/5블록)보다 더 큰
+  holdout 표본이나 반복 측정으로 이 0.25가 진짜 실력 부족인지 표본 노이즈인지
+  구분하는 것이 다음으로 유의미한 단계일 수 있다.
+- `measureNoiseFloor`가 이번 측정 조건에서 0 분산을 낸 이유(블록 구성,
+  시드 수, 게임 자체의 결정성)를 별도로 조사하면 이 0에 가까운
+  `minScoreDiff`가 카탄에 실제로 적절한 게이트인지 판단할 수 있다 — 지금은
+  "우연히 거의 없는 게이트"로 작동했을 뿐, 의도된 보정값인지 불명확하다.

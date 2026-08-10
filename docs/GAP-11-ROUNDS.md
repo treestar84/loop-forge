@@ -2232,3 +2232,95 @@ registry.json`은 여전히 `v1`(승격 없음) — 이번에도 채택된 카�
   시드 수, 게임 자체의 결정성)를 별도로 조사하면 이 0에 가까운
   `minScoreDiff`가 카탄에 실제로 적절한 게이트인지 판단할 수 있다 — 지금은
   "우연히 거의 없는 게이트"로 작동했을 뿐, 의도된 보정값인지 불명확하다.
+
+## 카탄 `catanPipWeightedBuild` E9 대규모 재확증
+
+### 배경
+
+재판정 2차(위 섹션, 커밋 `a8c9496`)에서 `catanPipWeightedBuild`가 카탄
+사상 처음으로 holdout까지 도달했으나, holdout이 **5블록뿐**인 극소 표본에서
+winRate 25.0% vs minWinRate 28.0%로 근소하게 미달해 `screened`로 판정됐다.
+이건 정확히 `docs/TROUBLESHOOTING.md` §13(E9 원칙)이 말하는 패턴 — "같은
+후보가 문턱 근처에서 근접실패하면 재설계 전에 표본을 5~10배 키워 먼저
+재확인하라"에 해당한다(오목 v9가 이 원칙으로 실제 초월을 확정했고, 반대로
+하스스톤 v4는 표본을 키우자 진짜 열세였음이 드러났다 — 결과를 예단하지
+않고 순수 통계 재확증만 수행한다).
+
+### 구현
+
+신규 러너 `src/reference/runners/catan-a8-pipweightedbuild-large-confirm.ts`
+— `catan-a8-rejudge2.ts`의 웨이브 구조(assembleWaveConfig+runWave, P6
+calibration 배선 유지)를 그대로 재사용, **새 설계 없음**.
+`catanPipWeightedBuild` 단일 후보만(다른 2개 카드는 이미 명백히 failed라
+재측정 제외). prune/holdout 블록 수만 5→**50**(10배)으로 증폭 —
+`recommendBlockCount`의 클램프(5~20) 로직을 이 두 티어에는 적용하지 않고
+50을 직접 하드코딩(브리프 지시). smoke는 기존과 동일한 클램프 로직 유지
+(이미 35.0%로 여유 있게 통과했으므로 증폭 불필요).
+
+완전히 새 시드 뱅크 사용 — `catan-a8-rejudge2.ts`가 최상단
+1,010,000~1,018,019대를 점유하므로, 이 러너는 1,020,000대부터 시작해
+throughput(1,020,000+)/calibration(1,021,000+/1,022,000)/screenProbe
+(1,023,001+)/smoke(1,024,000+)/prune(1,026,000+, 최대 1,026,049)/holdout
+(1,028,000+, 최대 1,028,049)로 구간을 나눠 겹치지 않게 확보.
+
+`npx tsc --noEmit` 0에러, `npm test` 전체 통과(**69 suites / 966 tests**,
+회귀 없음).
+
+이 worktree에는 `runs/`가 비어 있었으므로(gitignore 대상, 새 worktree),
+`catan.ts`를 먼저 1회 실행해 `runs/catan/registry.json`에 `v1` 기준선을
+생성한 뒤 신규 러너를 실행했다 — 시드 뱅크가 이전 라운드와 완전히
+분리되어 있으므로 이 순서는 측정 결과에 영향을 주지 않는다(순수 로컬
+재현 목적).
+
+### 실행 로그(발췌)
+
+```
+=== catan-a8-pipweightedbuild-large-confirm runner ===
+identityCenter=0.25 (playerCount=4)
+   캘리브레이션: blockStdDev=0.0000, scoreDiffStdDev=0.0000, 권장 블록수=5(smoke 클램프 후 5, prune/holdout은 E9 재확증이라 클램프 미적용, 하드코딩 50)
+   criteria: minWinRate=0.28 minScoreDiff=2.2248153562291187e-16
+catanPipWeightedBuild: verdict=adopted tiersPassed=screen→smoke→prune→holdout
+  smoke: winRate=0.267 scoreDiff=0.267 blocks=15
+  prune: winRate=0.330 scoreDiff=0.385 blocks=50
+  holdout: winRate=0.330 scoreDiff=0.420 blocks=50
+  wave elapsed=0.5s over ~115 scored blocks
+승격: v2, flags=[catanPipWeightedBuild]
+```
+
+| 티어 | 블록 수 | 승률 | scoreDiff | 문턱(minWinRate) |
+|---|---|---|---|---|
+| smoke | 15 | 26.7% | 0.267 | (SPRT, p0=0.25/p1=0.35) |
+| prune | **50**(재판정 2차의 5블록에서 10배 증폭) | **33.0%** | 0.385 | 28.0% |
+| holdout | **50**(재판정 2차의 5블록에서 10배 증폭) | **33.0%** | 0.420 | 28.0% |
+
+### 결과: **채택(adopted)** — 카탄 사상 최초 채택
+
+재판정 2차의 5블록 holdout(25.0%)은 표본 노이즈로 인한 근접실패였음이
+확인됐다. 표본을 10배(5→50블록)로 늘리자 prune과 holdout 모두 33.0%로
+안정적으로 문턱(28.0%)을 넘었다 — 두 티어의 승률이 거의 동일(33.0%
+vs 33.0%)하다는 것은 5블록 표본에서 관측된 25.0%가 실제 실력이 아니라
+극소 표본 분산이었다는 것을 뒷받침한다. `runs/catan/registry.json`에
+**`v2`(flags=[catanPipWeightedBuild])**가 실제로 등록됐다 — 웨이브
+실행기(`assembleWaveConfig`+`runWave` 호출 후 4.6 단계)가 `verdict===
+'adopted'`인 플래그를 자동으로 승격시키는 구조이므로, 별도의 수동 승격
+절차는 필요 없었다(러너 스크립트 자체가 승격까지 끝낸다).
+
+이것이 **카탄에서 나온 최초의 채택 사례**다 — `catan.ts`(오리지널 3카드)→
+`catan-a8.ts`(A8 재설계)→`catan-a8-round2/round3.ts`(추가 재설계)→
+`catan-a8-rejudge.ts`(FFA 임계값 버그 수정 후 재판정)→
+`catan-a8-rejudge2.ts`(calibration 배선 버그 수정 후 재판정 2차)로
+이어진 긴 실패 사슬 끝에, E9 원칙(근접실패 시 재설계 전에 표본 증폭)을
+적용한 이 재확증에서 처음으로 `adopted`가 나왔다. 새 카드를 설계하지
+않고 순수하게 표본 크기만 늘려 얻은 결과라는 점이 중요 — 재판정 2차의
+"홀드아웃 근소 미달"이 카드 자체의 결함이 아니라 통계적 노이즈였다는
+것을 이번 실측이 입증한다.
+
+### 다음 단계 제안 (메인 루프 판단용, 이 카드 안에서 재시도하지 않음)
+
+- 카탄 v2가 실전에 반영된 뒤 다른 두 카드(`catanScarcityWeightedTrade`,
+  `catanProductionDenialRobber`)를 새로 설계할지, 아니면 v2 위에 새 카드를
+  쌓을지는 다음 라운드 판단.
+- 다른 게임에서도 근접실패가 재설계 전에 반드시 E9 표본 증폭을 먼저
+  거치도록 하는 체크리스트/게이트를 온보딩 문서에 명문화할 가치가 있다
+  (오목 v9, 카탄 이 라운드 — 두 사례 모두 표본 증폭이 실제로 채택/거부
+  판정을 바꿨다).

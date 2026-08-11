@@ -77,6 +77,18 @@ describe('deriveBlueprint promotionMinWinRate (E11 — FFA identityCenter scalin
     expect(classification.identityCenter).toBeCloseTo(0.25);
     expect(blueprint.promotionMinWinRate).toBeCloseTo(0.28);
   });
+
+  // E11 아발론 후속 (scratchpad/avalon-identity-center-fix-design-spec.md):
+  // hiddenTeamStructure 게임은 classification.identityCenter(=1/playerCount)가
+  // 공정한 기준이 아니다 — measuredIdentityCenter 오버라이드로 실측치를
+  // 우선시켜야 한다.
+  it('measuredIdentityCenter override (playerCount=5, measured=0.237): uses measured value instead of 1/5=0.2', () => {
+    const ffaSpec = { ...splendorAdapter.spec, playerCount: 5, maxDecisionsPerGame: 190 };
+    const classification = classifyGame(ffaSpec);
+    expect(classification.identityCenter).toBeCloseTo(0.2);
+    const blueprint = deriveBlueprint(classification, { measuredIdentityCenter: 0.237 });
+    expect(blueprint.promotionMinWinRate).toBeCloseTo(0.267);
+  });
 });
 
 // P6 (docs/FIX-BACKLOG.md, docs/GAP-ANALYSIS-8.md §2): recommendedMinScoreDiff

@@ -55,6 +55,20 @@ export interface BlueprintCalibration {
   /** Identity-noise-floor standard deviation of score-delta (P6, from
    * `measureNoiseFloor`'s `scoreDiffStdDev`) — drives `recommendedMinScoreDiff`. */
   readonly scoreDiffStdDev?: number;
+  /**
+   * Measured identity-self-play win rate to use as the fairness center for
+   * `promotionMinWinRate`, overriding `classification.identityCenter`
+   * (docs/FIX-BACKLOG.md E11, avalon follow-up). `classifyGame`'s
+   * `identityCenter = 1/playerCount` (or `1/teams.length`) assumes a
+   * uniform per-seat fair share, which is wrong for
+   * `hiddenTeamStructure`/`cooperativeStructure` games where faction sizes
+   * are asymmetric and not statically knowable (see `scoreC5`'s
+   * `identityFairnessExempt` in `src/onboarding/score.ts`, which already
+   * substitutes a measured mean win rate for exactly this reason). Callers
+   * that don't pass this fall back to `classification.identityCenter`
+   * unchanged — byte-identical to before this field existed.
+   */
+  readonly measuredIdentityCenter?: number;
 }
 
 /** "Noise floor x this multiplier" — a margin twice the identity-self-play
@@ -129,13 +143,22 @@ export function deriveBlueprint(
     recommendedMinScoreDiff = DEFAULT_CRITERIA.minScoreDiff;
   }
 
+  // E11 아발론 후속: hiddenTeamStructure/cooperativeStructure 게임은
+  // classification.identityCenter(=1/playerCount)가 공정한 기준이 아니다 —
+  // 진영 크기가 비대칭이고 정적으로 알 수 없기 때문(scoreC5의
+  // identityFairnessExempt와 동일한 이유). 호출자가 실측
+  // measuredIdentityCenter를 넘기면 그것을 우선 사용하고, 안 넘기면 기존
+  // classification.identityCenter로 폴백한다(카탄 등 기존 호출자는
+  // byte-identical).
+  const identityCenterForPromotion = calibration?.measuredIdentityCenter ?? classification.identityCenter;
+
   return {
     // FFA(3인 이상) 게임의 identityCenter로 스케일: 2인 게임(identityCenter=0.5)은
     // DEFAULT_CRITERIA.minWinRate(0.53) 그대로 byte-identical 보존되고, FFA
     // 게임은 공정한 몫(identityCenter) 기준으로 +0.03 우세를 요구하도록 이동한다
     // (docs/FIX-BACKLOG.md E11 — 카탄 playerCount=4가 identityCenter=0.25인데도
     // 2인 게임 전제 0.53을 그대로 요구받던 결함).
-    promotionMinWinRate: classification.identityCenter + (DEFAULT_CRITERIA.minWinRate - 0.5),
+    promotionMinWinRate: identityCenterForPromotion + (DEFAULT_CRITERIA.minWinRate - 0.5),
     promotionMinScoreDiff:
       classification.scoreStructure === 'win-loss-only' ? 0 : DEFAULT_CRITERIA.minScoreDiff,
     sprtNullHypothesis: classification.identityCenter,

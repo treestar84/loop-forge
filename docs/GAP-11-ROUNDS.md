@@ -2324,3 +2324,151 @@ vs 33.0%)하다는 것은 5블록 표본에서 관측된 25.0%가 실제 실력�
   거치도록 하는 체크리스트/게이트를 온보딩 문서에 명문화할 가치가 있다
   (오목 v9, 카탄 이 라운드 — 두 사례 모두 표본 증폭이 실제로 채택/거부
   판정을 바꿨다).
+
+## 아발론 hiddenTeamStructure 기준선 진단·재판정
+
+카탄의 E11 수정(`promotionMinWinRate = classification.identityCenter +
+0.03`)이 카탄 최초 채택(`catanPipWeightedBuild` v2)을 이끌어낸 뒤,
+`docs/FIX-BACKLOG.md` E11 행은 "아발론도 같은 결함 영향 가능성"을 다음
+후보로 남겨 뒀다. 이번 라운드는 코드를 직접 확인한 뒤 **아발론이 카탄과
+다른 종류의 문제를 겪고 있다**는 것을 진단하고, 그에 맞는 별개의 수정
+메커니즘을 구현해 4개 기존 후보를 재판정했다.
+
+### 진단 — 왜 카탄과 다른가
+
+`kernel/classify.ts`의 `classifyGame`은 `identityCenter = spec.teams ?
+1/teams.length : 1/playerCount`를 계산하는데, 이 계산은
+`hiddenTeamStructure` 플래그를 전혀 고려하지 않는다. 아발론
+(`hiddenTeamStructure: true`, 진영이 숨겨져 있어 `spec.teams`를 정적으로
+선언 못 함, `playerCount=5`)은 `identityCenter = 1/5 = 0.2`로 계산된다.
+
+그런데 `src/onboarding/score.ts`의 `scoreC5`는 이미 이 문제를 알고 있다
+— `identityFairnessExempt = adapter.spec.hiddenTeamStructure ||
+adapter.spec.cooperativeStructure`일 때 naive 1/N 대신 **실측
+`meanWinRate`**를 공정성 중심값으로 대체한다(진영 크기가 비대칭이고
+정적으로 알 수 없기 때문). `runs/avalon/conformance/payload.json`의 C5
+실측 기록: `meanWinRate=0.237`(random 항등 자기대국).
+
+`kernel/blueprint.ts`의 `promotionMinWinRate` 계산은 이 예외 처리를
+전혀 반영하지 않았다 — `classification.identityCenter`(=0.2)를 그대로
+써서 여전히 틀린 기준을 썼다. 하지만 **더 중요한 문제는 따로 있었다**:
+0.237조차도 정답이 아니다 — 그건 **random 항등** 자기대국 실측치이지,
+promotionMinWinRate가 실제로 답해야 하는 질문("후보가 현재 챔피언(v1=
+heuristic)과 완전히 동일하게 행동한다면 자기 자신을 상대로 몇 %를 딸
+것인가")에 맞는 **heuristic 항등** 자기대국 실측치가 아니다. 카탄의
+성공 사례(`catan-a8-rejudge2.ts`)가 정확히 heuristic 항등 자기대국
+(`measureNoiseFloor(adapter, catanAdapter.baselines.heuristic, ...)`)을
+썼고, 카탄은 대칭 게임이라 이 값이 우연히 1/playerCount와 일치했을
+뿐이다.
+
+**요약**: 카탄은 "identityCenter 자체는 맞는데 promotionMinWinRate가
+그걸 안 썼다"는 결함이었다. 아발론은 "identityCenter 자체가 애초에 틀린
+값(naive 1/N)"인 데다, 그 틀린 값을 대체할 후보로 잘못 지목됐던 C5의
+random 항등값(0.237)도 정답이 아니라는 이중 결함이었다 — 단순
+재적용이 불가능했던 이유다.
+
+### 수정 — `measuredIdentityCenter` 오버라이드 (`kernel/blueprint.ts`)
+
+`BlueprintCalibration`에 옵션 필드 `readonly measuredIdentityCenter?:
+number`를 추가했다. `deriveBlueprint`는
+`identityCenterForPromotion = calibration?.measuredIdentityCenter ??
+classification.identityCenter`를 계산해 `promotionMinWinRate =
+identityCenterForPromotion + 0.03`에 사용한다. 오버라이드를 넘기지 않는
+기존 호출자(카탄 등)는 byte-identical — `sprtNullHypothesis`는 건들지
+않았다(스코프 밖).
+
+`src/kernel/__tests__/blueprint.test.ts`에 오버라이드 케이스 테스트
+추가(playerCount=5, measuredIdentityCenter=0.237 → promotionMinWinRate
+≈0.267). 기존 blueprint 테스트(2인 게임 0.53, FFA identityCenter=0.25
+→0.28)는 전부 회귀 없이 통과.
+
+### 아발론 heuristic 항등 실측 (신규 러너 `avalon-a8-rejudge.ts`)
+
+새 시드 뱅크(2,001,000~2,008,029대, 기존 avalon*.ts 전체 grep 후
+겹치지 않는 구간 선택)로 `measureNoiseFloor(adapter,
+avalonAdapter.baselines.heuristic, ...)`를 실측한 결과:
+
+```
+heuristic-identity self-play (heuristic vs heuristic, 100 seeds): pointWinRate(seat0)=0.2070, CI=[0.2020, 0.2140], blockStdDev=0.0326, scoreDiffStdDev=0.0521
+세 기준값 비교:
+  - naive 1/playerCount            = 0.2000 (틀린 기준 — hiddenTeamStructure 무시)
+  - C5 random-identity meanWinRate  = 0.2370 (scoreC5의 공정성 중심값 — random 항등, promotion 기준으로는 부적절)
+  - heuristic-identity pointWinRate  = 0.2070 (이번 러너가 실측 — promotionMinWinRate에 실제로 쓰일 값)
+```
+
+세 값이 모두 다르다는 것이 실측으로 확인됐다(0.200 vs 0.237 vs 0.207)
+— naive, random-identity, heuristic-identity가 서로 다른 개념이며,
+promotionMinWinRate에는 heuristic-identity(0.207)를 써야 한다는
+설계 브리프의 주장이 실증됐다.
+
+### 4개 후보 재판정 — 재설계 없음
+
+이미 구현된 4개 전략(`avalonSuspicionTracking` 1차,
+`avalonSuspicionVoteOnly`/`avalonSuspicionProposalOnly`/
+`avalonSuspicionGoodOnly` 2차 causal-isolation — round1/round2에서 전부
+`failed`)을 로직/파라미터 변경 없이 그대로 재사용해 재판정했다.
+`assembleWaveConfig`의 calibration 인자로 `measuredIdentityCenter=
+0.207`, `blockStdDev=0.0326`, `scoreDiffStdDev=0.0521`을 모두 전달(카탄의
+minScoreDiff 배선 누락 재발 방지). smoke SPRT `p0=0.207`, `p1=0.307`.
+regression=v1(flags=[]), opponent=heuristic, 완전히 새 시드 뱅크.
+
+보정된 기준: `minWinRate=0.237`(measuredIdentityCenter 0.207+0.03),
+`minScoreDiff=0`(win-loss-only 게임이라 항상 0, calibration과 무관 —
+아발론은 카탄과 달리 scoreDiffStdDev 보정이 실질적 영향을 주지 않음).
+
+실행 로그(발췌):
+
+```
+=== avalon-a8-rejudge runner ===
+   criteria: minWinRate=0.2369999999999997 minScoreDiff=0
+   avalonSuspicionTracking: verdict=screened tiersPassed=screen→smoke
+     smoke: winRate=0.220 scoreDiff=0.040 blocks=15
+     prune: winRate=0.220 scoreDiff=0.040 blocks=5
+   avalonSuspicionVoteOnly: verdict=screened tiersPassed=screen→smoke→prune
+     smoke: winRate=0.227 scoreDiff=0.053 blocks=15
+     prune: winRate=0.240 scoreDiff=0.080 blocks=5
+     holdout: winRate=0.200 scoreDiff=0.000 blocks=5
+   avalonSuspicionProposalOnly: verdict=screened tiersPassed=screen→smoke
+     smoke: winRate=0.220 scoreDiff=0.040 blocks=15
+     prune: winRate=0.220 scoreDiff=0.040 blocks=5
+   avalonSuspicionGoodOnly: verdict=screened tiersPassed=screen→smoke
+     smoke: winRate=0.220 scoreDiff=0.040 blocks=15
+     prune: winRate=0.220 scoreDiff=0.040 blocks=5
+```
+
+### 결과 — 있는 그대로: 여전히 채택 안 됨
+
+4개 후보 전부 `screened` — 어느 것도 `adopted`/`near-miss`에 도달하지
+못했다. `avalonSuspicionVoteOnly`가 가장 멀리(holdout까지) 진출했지만
+holdout winRate 0.200이 보정된 문턱 0.237보다 오히려 더 낮게 나왔다(5
+블록의 소표본 노이즈로 보인다 — prune 0.240에서 holdout 0.200으로
+하락). `runs/avalon/registry.json`은 v1 그대로, v2 등록 없음.
+
+설계 브리프가 사전에 인지시킨 대로, **0.2→0.207(naive 대비 +0.007,
++0.03을 더해도 문턱은 0.237로 카탄의 0.25→0.28(+0.03)보다 훨씬 작은
+보정폭)**이라 카탄만큼 극적인 반전은 나오지 않았다. 4개 후보의 smoke
+승률(0.220~0.227)은 애초에 naive 기준 0.2보다도 살짝 높은 수준이라
+"보정 전에는 통과했을 후보가 보정 때문에 떨어졌다"는 이야기가 아니라,
+"보정 전이든 후든 이 4개 후보의 실력 자체가 문턱 근처에도 못 미친다"는
+것이 이번 재판정의 정직한 결론이다.
+
+**결론: 아발론은 E11류 결함(promotionMinWinRate 기준선 오류)의 영향을
+받긴 했지만(naive 0.2 대신 0.207을 썼어야 함, 그리고 blueprint.ts가 C5의
+identityFairnessExempt 예외를 전혀 반영하지 않고 있었다는 진단은 유효),
+그 영향의 크기가 카탄만큼 크지 않았고, 4개 기존 후보 자체가 채택
+문턱에서 멀리 떨어져 있어 이번 보정으로는 판정이 뒤집히지 않았다.**
+다음 카드를 설계할지는 메인 루프 판단 몫 — 이 라운드에서는 재설계하지
+않았다.
+
+### 다음 단계 제안 (메인 루프 판단용, 이 라운드 안에서 재시도하지 않음)
+
+- `deriveBlueprint`가 `measuredIdentityCenter`를 옵션으로만 받는 대신,
+  `hiddenTeamStructure`/`cooperativeStructure` 게임에서 자동으로
+  `scoreC5`와 동일한 실측 로직을 강제하도록 상위 계층(예:
+  `assembleWaveConfig`)에서 기본값을 계산해 주는 방향도 고려할 가치가
+  있다(현재는 러너가 매번 수동으로 `measureNoiseFloor`를 호출해 넘겨야
+  함 — 다음에 같은 부류의 게임(예: 다른 숨은 진영 게임)을 온보딩할 때
+  똑같은 실수를 반복할 위험).
+- 4개 기존 후보가 전부 문턱 근처에도 못 미치는 수준이라, 아발론에
+  새로운 A8 카드를 설계한다면 이번 진단(heuristic-identity=0.207)을
+  기준선으로 삼아야 한다.

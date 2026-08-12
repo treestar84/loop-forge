@@ -2543,3 +2543,70 @@ seedBase=450,000, 총 198게임 트래젝토리). draw/split(블록 단위, 승�
 산출물: `runs/dominion/mirror-draw-diagnosis/{trajectories.jsonl,
 loss-report.json, draw-report.json, diagnosis-summary.json}` (gitignore
 대상, 커밋 제외).
+
+## 도미니언 A4 루트 오버라이드(action 축) — 1단계 가설 검증 (2026-08-12 실측, 가설 기각)
+
+4회전 진단이 v6(챔피언, `ismcts-s64-v2buy-prior`)의 `action` 결정지점
+불일치율을 19.9%(803/4044)로 측정했고, 그 축을 정확히 겨냥한 소프트 prior
+주입(`ismcts-s64-v2action-prior`)은 이미 challenge에서 챔피언보다 낮은
+성적(40.0% vs 41.3%)으로 실패했다(4회전 문서). `heuristicPick`의
+`ACTION_PRIORITY`(dominion.ts 942-955줄)는 이미 "+actions을 주는 카드
+(Village/Laboratory/Festival/Market — 논터미널)를 먼저, 나머지(터미널)를
+나중에" 순서로 정렬돼 있다. 오목의 `gomokuForkRootOverride` 선례처럼
+"결정론적으로 명백한 규칙을 얕은 시뮬레이션 평균에 맡기지 않고 루트에서
+곧바로 결정"하는 A4 축이 미탐색으로 남아 있었고, 가설은 "v6의 IS-MCTS
+(s64, action에는 별도 prior 없음)가 얕은 탐색 하에서 이 순서를 가끔
+어긴다"였다.
+
+**방법론**: 신규 순수 분석 러너
+`src/reference/runners/dominion-a4-hypothesis-check.ts` 1개만 추가했고
+`dominion.ts`/`loss-mining.ts` 등 기존 코드는 전혀 건드리지 않았다.
+`dominion-mirror-draw-diagnosis.ts`와 완전히 동일한 시드(450,000+, N=100,
+bot base 996_101/996_201)로 v6 vs L2(`dominionOpusBot`) 트래젝토리를
+재현(결정론적이므로 동일 결과)한 뒤, `loop/loss-mining.ts`의 `mineLosses`
+재생 루프를 그대로 재구현해(divergence 검출 로직은 바이트 단위로 동일 —
+`mineLosses`를 별도로 호출해 action 불일치 총수가 정확히 일치함을
+교차검증했다) `action` 결정지점의 모든 divergence에 대해 "후보(v6)가
+고른 카드가 터미널(actions=0)인데, 같은 legal 목록에 논터미널
+(actions>=1: Village/Laboratory/Festival/Market) `playAction` 선택지가
+있었던" 비율을 집계했다.
+
+**실측 결과** (winRate=37.9% [31.3-44.7%], N=100, blocks=99, trajectories=198,
+소요 272.8초):
+- 교차검증: `mineLosses` 기준 action 결정=3655, 불일치=727 / 이 러너의
+  독립 재구현 기준 actionDivergences=727 — **완전 일치**(재구현 로직이
+  `mineLosses`와 정확히 동일한 값을 재현함을 확인).
+- **action divergence 727건 중 "논터미널 방치 패턴"(터미널 선택 + legal에
+  논터미널 playAction 존재) = 59건 -> 비율 8.1%.**
+- 판단 기준(15% 이상이면 2단계 진행)에 **미달** — 설계 스펙이 정한 기각
+  기준.
+- 후보 선택 카드별 divergence 빈도(상위): `endActions` 319건,
+  `playAction:Moat` 227건, `playAction:Witch` 152건,
+  `playAction:CouncilRoom` 29건. 즉 action divergence의 대다수(319건,
+  43.9%)는 애초에 카드 선택이 아니라 "행동 단계를 조기 종료하는가"의
+  문제였고, 나머지도 상당수는 legal에 논터미널 대안이 없는 상황(예: 손에
+  더 이상 Village/Laboratory/Festival/Market이 없는 경우)에서 발생했다.
+  샘플 사례(5건 중 대표)는 v6가 Witch/CouncilRoom을 골랐는데 L2가
+  Laboratory를 골랐던 경우가 많았다 — "논터미널을 완전히 무시"하는
+  패턴이 아니라 "이미 논터미널을 다 쓴 뒤 남은 손에서 어떤 터미널을
+  먼저 낼지"를 둘러싼 불일치일 가능성이 높다(정성적 관찰, 통계적 검정
+  없음).
+
+**결론(2단계 진행 안 함)**: **A4 가설 기각** — action 불일치의 8.1%만이
+"논터미널 방치" 패턴에 해당해 15% 문턱에 못 미친다. `ACTION_PRIORITY`가
+이미 논터미널-먼저 순서로 정렬돼 있고, v6의 IS-MCTS가 그 순서를 어기는
+비율은 낮다(즉 heuristic이 이미 알고 있는 이 규칙을 탐색이 심하게
+흐리는 것은 아니다). 남은 action 불일치의 대부분(43.9%가 `endActions`)은
+"행동을 언제 멈출지"와 "이미 논터미널을 다 쓴 뒤 어떤 터미널을 낼지"
+쪽에 있어 보이며, 이는 이번 스펙이 겨냥한 결정론적 우선순위 규칙과는
+다른 성격의 문제다 — 오목의 포크 사례처럼 "명백한데 얕은 탐색이 흐리는
+규칙"이 아니라, 여전히 evaluator/탐색 설계 수준의 판단 문제로 보인다.
+`dominion.ts`/`search/mcts.ts`의 `rootOverride` 메커니즘은 구현하지
+않았다(가설이 데이터로 뒷받침되지 않았으므로 2단계를 진행하지 않음 —
+설계 스펙의 "가설이 기각됐는데도 억지로 카드를 구현하지 말 것" 지시
+준수). 다음 라운드 설계 시 참고할 점: `endActions` 조기 종료(43.9%)와
+"논터미널 소진 후 터미널 순서"가 action 불일치의 새로운 후보 세부축일
+수 있으나, 착수 여부는 메인 루프 판단.
+
+산출물: `runs/dominion/a4-hypothesis-check/hypothesis-check-summary.json`
+(gitignore 대상, 커밋 제외).

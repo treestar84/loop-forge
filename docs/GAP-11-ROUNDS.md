@@ -2610,3 +2610,100 @@ bot base 996_101/996_201)로 v6 vs L2(`dominionOpusBot`) 트래젝토리를
 
 산출물: `runs/dominion/a4-hypothesis-check/hypothesis-check-summary.json`
 (gitignore 대상, 커밋 제외).
+
+## 도미니언 action 페이즈 종료/터미널 선택 진단 (2026-08-13 실측, 1단계만 —
+2단계 진행 안 함)
+
+A4(논터미널 우선순위 위반) 가설이 8.1%로 기각된 뒤(바로 위 섹션), 그 검증
+과정에서 드러난 action divergence 727건의 실제 구성 — `endActions` 319건
+(43.9%), `playAction:Moat` 227건, `playAction:Witch` 152건,
+`playAction:CouncilRoom` 29건(합 727건, 96.3%) — 을 실제 게임 상태 데이터로
+진단해 어느 축이 유의미한 신호인지 가려내는 라운드(main-loop design spec:
+scratchpad/dominion-action-endgame-design-spec.md). 신규 순수 분석 러너
+`src/reference/runners/dominion-action-endgame-diagnosis.ts` 1개만
+추가했고 `dominion.ts`/`loss-mining.ts` 등 기존 코드는 전혀 건드리지
+않았다.
+
+**방법론**: `dominion-a4-hypothesis-check.ts`와 완전히 동일한 시드
+(450,000+, N=100, bot base 996_101/996_201)로 v6(`ismcts-s64-v2buy-prior`)
+vs L2(`dominionOpusBot`) 트래젝토리를 재현(결정론적이므로 동일 결과,
+`mineLosses` 대비 교차검증도 727건으로 완전 일치)했다. 두 갈래로 분석:
+(1) `mineLosses` 재생 루프를 재구현해 매 `action` divergence를 카드별
+방향성(candidate가 그 카드를 선택했는지 anchor가 선택했는지)과
+`endActions` 세부(legal에 다른 playAction 대안이 있었는지, 그게
+논터미널/터미널 중 무엇인지)로 분류; (2) Moat "방어 실패 상관관계"는
+앵커가 전혀 필요 없는 **실제 트래젝토리 재생**(`record.choices`, 양쪽
+플레이어의 진짜 수)으로 별도 측정 — `dominion.ts`의 `cleanupAndAdvance`
+(566-585줄)가 매 턴 종료 시 손패+플레이 영역 전체를 discard하고 5장을
+새로 뽑는다는 사실이 핵심 전제였다: 이번 턴에 Moat를 냈든 안 냈든 다음
+상대 턴에 실제로 방어에 쓰이는 손은 "이번 턴 cleanup에서 새로 뽑은
+5장"이므로, play/hold 결정과 무관하게 그 턴의 드로우 운으로 결정될
+것이라는 예측을 코드 읽기가 아니라 실측으로 검증했다.
+
+**실측 결과** (winRate=37.9% [31.3-44.7%], N=100, blocks=99,
+trajectories=198, 소요 282.0초, `mineLosses` 대비 action 불일치
+727건 완전 일치):
+
+- **카드별 divergence 방향성**: Moat — candidate(v6) 선택 227건, anchor(L2)
+  선택 0건. Witch — candidate 152건, anchor 11건. CouncilRoom — candidate
+  29건, anchor 0건. 세 카드 모두 v6이 L2보다 훨씬 적극적으로 낸다(특히
+  Moat/CouncilRoom은 이 divergence 집합에서 L2가 그 카드를 낸 사례가
+  단 한 번도 없음).
+- **endActions 상세** (한 방향만 세던 A4의 319건과 달리 양방향 총합
+  598건 — candidate가 더 일찍 끝냄 319건 + anchor(L2)가 더 일찍 끝냄
+  279건): **598건 전부**(100%) legal에 다른 playAction 대안이 있었다
+  (정의상 당연함 — divergence 자체가 반대편이 legal한 다른 선택을 했다는
+  뜻이므로 "카드가 없어서 어쩔 수 없이 끝낸" 사례는 애초에 존재할 수
+  없다). 더 중요한 건: **그 대안 598건 전부(100%) 터미널 카드**였다
+  (논터미널 대안 0건) — 이미 논터미널을 다 쓴 뒤 "터미널을 하나 더
+  낼지 멈출지"를 둘러싼 판단 불일치이지, A4가 겨냥했던 "논터미널을
+  건너뛰고 터미널을 먼저 냄" 패턴과는 무관하다(A4의 8.1%가 별도로 이미
+  이걸 확인했음). 샘플 8건을 보면 패턴이 뚜렷하다: `anchorEndsEarly`
+  방향은 거의 전부 candidate가 Moat를 더 냈고(L2는 그 지점에서
+  endActions를 택함), `candidateEndsEarly` 방향은 거의 전부 L2가
+  Chapel을 더 냈다(candidate가 그 지점에서 endActions를 택함) — 즉
+  598건의 실질 내용은 "Moat를 계속 낼지"와 "Chapel을 계속 낼지"라는
+  두 카드 축으로 좁혀진다.
+- **Moat 방어 실패 상관관계**(공격 관측 1,741건, 실제 트래젝토리
+  전수): defender의 직전 자기 턴에 Moat를 **소모(play)**한 경우 — 공격
+  88건 중 관철(안 막힘) 73건, 관철율 **83.0%**. Moat가 있었는데
+  **보류(hold)**한 경우 — 공격 29건 중 관철 23건, 관철율 **79.3%**.
+  Moat 자체가 없었던 경우(`never`) — 공격 1,624건 중 관철 1,526건,
+  관철율 **94.0%**. played(83.0%)와 held(79.3%)의 차이는 3.7%p, 표본이
+  각각 88건/29건으로 작아 통계적으로 유의미하지 않다(두 비율 z검정
+  ≈0.45, 유의수준 미달) — **play 여부와 방어 성공 사이에 뚜렷한
+  상관관계가 없다.** 둘 다 `never`(94.0%)보다 관철율이 뚜렷이 낮은 건
+  "그 턴에 Moat가 손에 있었다"는 사실 자체(=덱에 Moat가 가까이 있어
+  다음 턴에도 다시 뽑힐 확률이 높다는 덱 구성 신호)가 방어에 유리하게
+  작용한 것이지, "이번 턴에 냈는지 보류했는지"라는 결정 자체의 인과
+  효과가 아니다 — 이는 `cleanupAndAdvance`의 게임 규칙(매 턴 손패 전체
+  discard 후 5장 재드로우)이 예측한 그대로다: 이번 턴 Moat를 플레이하든
+  안 하든 상관없이 그 Moat는 이번 턴 cleanup에서 discard되고, 다음 상대
+  턴의 방어 여부는 오직 그 cleanup에서 새로 뽑은 5장에 Moat가 포함되는지
+  (순수 드로우 운)에만 달려 있다.
+
+**결론(2단계 진행 안 함)**: 설계 스펙의 사전 우선순위 1번이었던 "Moat
+방어용 보류" 가설은 데이터로 **뒷받침되지 않는다** — played/held 관철율
+차이가 통계적으로 무의미할 뿐 아니라, 그 무의미함이 이 어댑터의 턴 종료
+규칙(매 턴 손패 flush)과 정합적이다. 즉 이 카드가 겨냥하는 인과 메커니즘
+자체가 이 구현에는 존재하지 않는다 — `dominionMoatHoldForDefense`를
+만들어도 실제 방어력에 영향을 줄 수 없으므로 구현하지 않는다. Witch는
+방향성이 뚜렷하지만(v6 152건 vs L2 11건) v6이 이미 L2보다 Witch를 훨씬
+적극적으로 내는 쪽이며, 이는 기존 문서(`docs/GAP-11-ROUNDS.md`의 Witch
+관련 결정, "Witch가 legal이면 거의 항상 즉시 내는 게 유리")가 이미
+정답으로 판단한 방향과 같은 쪽이다 — v6을 "고칠" 명확한 반대 방향
+증거가 없다. CouncilRoom은 표본이 29건(727건의 4%)뿐이고 설계 스펙
+자체가 "상대에게도 이득을 준다는 점에서 유일하게 확신할 수 없는 카드"라고
+명시했듯 데이터도 어느 방향이 옳은지 가리키지 않는다. `endActions` 598건
+(가장 큰 축)은 내용을 뜯어보면 결국 Moat/Chapel 두 카드의 "계속 낼지
+멈출지" 타이밍 문제로 좁혀지는데, Moat 쪽은 위에서 이미 인과관계가
+없음을 확인했고 Chapel 쪽은 다른 라운드(round 3/4)에서 `chapelTrash`
+서브결정이 이미 0.0% 불일치로 수렴했다고 기록된 축과 인접해 있어 별도
+설계 없이 이 라운드에서 새로 파고들 명확한 근거가 부족하다. **셋(Moat/
+Witch/CouncilRoom) + endActions 전부 뚜렷한 단일 카드 설계로 이어지지
+않는다 — 축 소진에 가깝다는 결론이 정직하다.** 설계 스펙의 "가설이
+데이터로 뒷받침되지 않는데도 억지로 카드를 만들지 말 것" 지시에 따라
+2단계(카드 구현)를 진행하지 않았다.
+
+산출물: `runs/dominion/action-endgame-diagnosis/action-endgame-diagnosis-summary.json`
+(gitignore 대상, 커밋 제외).

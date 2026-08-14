@@ -25,6 +25,7 @@
 - 점수 비교는 comparabilityKey 동일 문맥 안에서만 (docs/INTERPRETATION.md 제1규칙).
 
 ## 문서 지도
+- 쉬운 기술 설명(비개발자·처음 읽는 사람용): `docs/EXPLAINER.md`
 - 핸드오프(최신 상태 스냅샷): `docs/HANDOFF-2026-07-30.md`
 - 아키텍처 결정 기록(왜 이렇게 됐는가): `docs/adr/README.md` (ADR-0001~0010)
 - 운영 함정·재발 방지: `docs/TROUBLESHOOTING.md`

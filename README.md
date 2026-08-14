@@ -409,6 +409,7 @@ src/reference/   레퍼런스+실전 게임 어댑터 9종(위 표) + 게임별 
 
 | 문서 | 내용 |
 |---|---|
+| [docs/EXPLAINER.md](./docs/EXPLAINER.md) | **처음 읽기 좋은 쉬운 기술 설명** — 루프가 뭘 반복하는지, 과적합을 어떻게 막는지 |
 | [docs/HANDOFF-2026-07-30.md](./docs/HANDOFF-2026-07-30.md) | 최신 핸드오프 — 전체 맥락·현재 상태 |
 | [docs/GAP-ANALYSIS-11.md](./docs/GAP-ANALYSIS-11.md) | "왜 못 이기나" 근본 원인 진단·처치 설계(정본, 안 바뀜) |
 | [docs/GAP-11-ROUNDS.md](./docs/GAP-11-ROUNDS.md) | 위 처치를 실제로 돌린 라운드별 실측 기록(계속 갱신) |
